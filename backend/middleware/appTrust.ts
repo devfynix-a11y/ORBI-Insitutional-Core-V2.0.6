@@ -11,6 +11,11 @@ export const ALLOWED_DOMAINS = [
     '127.0.0.1'
 ];
 
+const TRUSTED_MOBILE_APP_ORIGINS = [
+    process.env.ORBI_MOBILE_ORIGIN,
+    'ORBI_MOBILE_V2026',
+].filter((value): value is string => Boolean(value && value.trim()));
+
 /**
  * APP TRUST MIDDLEWARE
  * --------------------
@@ -30,6 +35,7 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
     const origin = req.get('origin') || req.get('referer') || '';
     const apkHashHeader = req.get('x-orbi-apk-hash'); // Custom header for native app identification
     const appIdHeader = req.get('x-orbi-app-id'); // App ID identification
+    const appOriginHeader = req.get('x-orbi-app-origin') || '';
 
     const isLocal = rpID === 'localhost' || rpID === '127.0.0.1';
     
@@ -46,7 +52,9 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
     // 3b. Web Browser & Mobile App Requests: Require exact allowed Origin/Referer host
     // In production, we don't trust all *.run.app hosts.
     const isWebOrigin = ALLOWED_DOMAINS.some(domain => origin.includes(domain));
-    const isMobileApp = origin === process.env.ORBI_MOBILE_ORIGIN;
+    const isMobileApp =
+        TRUSTED_MOBILE_APP_ORIGINS.includes(origin) ||
+        TRUSTED_MOBILE_APP_ORIGINS.includes(appOriginHeader);
     const isTrustedMobileId = appIdHeader === 'mobile-android' && isMobileApp;
     
     if (isWebOrigin || isLocal || isMobileApp || isTrustedMobileId) {

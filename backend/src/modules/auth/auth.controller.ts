@@ -18,6 +18,13 @@ import { ALLOWED_DOMAINS } from "../../../middleware/appTrust.js";
 const cleanAndroidHash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
 const EXPECTED_ANDROID_ORIGIN = cleanAndroidHash ? `android:apk-key-hash:${cleanAndroidHash}` : '';
 const ALLOWED_APK_HASHES = EXPECTED_ANDROID_ORIGIN ? [normalizeAndroidOrigin(EXPECTED_ANDROID_ORIGIN)] : [];
+const TRUSTED_MOBILE_APP_ORIGINS = [
+    process.env.ORBI_MOBILE_ORIGIN,
+    'ORBI_MOBILE_V2026',
+].filter((value): value is string => Boolean(value && value.trim()));
+
+const isTrustedMobileAppIdentity = (appIdentity: string) =>
+    TRUSTED_MOBILE_APP_ORIGINS.includes(appIdentity);
 
 const validateBiometricContext = (req: any) => {
     // Strictly use the specified domain for both prod and dev
@@ -54,7 +61,7 @@ const validateBiometricContext = (req: any) => {
 
     // App Identity Metadata (Separate from WebAuthn Origin)
     const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin;
-    const isMobileApp = appIdentity === process.env.ORBI_MOBILE_ORIGIN || appIdentity === 'ORBI_INSTITUTIONAL_CORE_V2026';
+    const isMobileApp = isTrustedMobileAppIdentity(appIdentity);
     const appIdHeader = req.get('x-orbi-app-id');
     const isTrustedMobileId = appIdHeader === 'mobile-android' && isMobileApp;
 
@@ -156,7 +163,7 @@ export class AuthController {
             // 2. Verify Passkey
             const { rpID, origin } = validateBiometricContext(req);
             const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin;
-            const isMobileApp = appIdentity === process.env.ORBI_MOBILE_ORIGIN || appIdentity === 'ORBI_INSTITUTIONAL_CORE_V2026';
+            const isMobileApp = isTrustedMobileAppIdentity(appIdentity);
             const appIdHeader = req.get('x-orbi-app-id');
             const isTrustedMobile = isMobileApp && appIdHeader === 'mobile-android';
             
@@ -325,7 +332,7 @@ export class AuthController {
             const { userId, response, challenge, platform } = req.body;
             const { rpID, origin } = validateBiometricContext(req);
             const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin;
-            const isMobileApp = appIdentity === process.env.ORBI_MOBILE_ORIGIN || appIdentity === 'ORBI_INSTITUTIONAL_CORE_V2026';
+            const isMobileApp = isTrustedMobileAppIdentity(appIdentity);
             const appIdHeader = req.get('x-orbi-app-id');
             const isTrustedMobile = isMobileApp && appIdHeader === 'mobile-android';
 

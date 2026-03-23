@@ -76,6 +76,7 @@ const requiredEnv = [
     'RP_ID',
     'ORBI_WEB_ORIGIN',
     'ORBI_ANDROID_APP_HASH',
+    'ORBI_MOBILE_ORIGIN',
     'KMS_MASTER_KEY',
     'WORKER_SECRET'
 ];
@@ -105,10 +106,21 @@ app.set('trust proxy', 1);
 
 // Dynamically serve assetlinks.json to support Android App Passkeys on dynamic domains
 app.get('/.well-known/assetlinks.json', (req, res, next) => {
-    const hash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
-    if (!hash) {
+    const base64Hash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
+    if (!base64Hash) {
         return next(); // Fallback to static file if env var is missing
     }
+
+    let hexHash = '';
+    try {
+        const buffer = Buffer.from(base64Hash, 'base64');
+        const hexString = buffer.toString('hex').toUpperCase();
+        hexHash = hexString.match(/.{1,2}/g)?.join(':') || '';
+    } catch (e) {
+        console.error("Failed to convert ORBI_ANDROID_APP_HASH to hex format", e);
+        hexHash = base64Hash;
+    }
+
     res.json([{
         "relation": [
             "delegate_permission/common.handle_all_urls",
@@ -117,7 +129,7 @@ app.get('/.well-known/assetlinks.json', (req, res, next) => {
         "target": {
             "namespace": "android_app",
             "package_name": "com.example.orbi_mobileapp",
-            "sha256_cert_fingerprints": [hash]
+            "sha256_cert_fingerprints": [hexHash]
         }
     }]);
 });
