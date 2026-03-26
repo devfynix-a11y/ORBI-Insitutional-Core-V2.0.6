@@ -57,7 +57,7 @@ export class SettlementScheduler {
 
     const { data: settlements } = await this.client
       .from('settlement_lifecycle')
-      .select('*')
+      .select('id,user_id,amount,provider_id,external_settlement_id,currency,auto_settle_at')
       .eq('current_phase', SettlementPhase.EXTERNAL_PENDING)
       .lte('auto_settle_at', now)
       .is('auto_settle_executed_at', null);
@@ -102,7 +102,7 @@ export class SettlementScheduler {
 
     const { data: stuckSettlements } = await this.client
       .from('settlement_lifecycle')
-      .select('*')
+      .select('id,user_id,amount,phase_started_at')
       .eq('current_phase', SettlementPhase.RECONCILIATION_RUNNING)
       .lt('phase_started_at', stuckBefore);
 
@@ -126,7 +126,7 @@ export class SettlementScheduler {
   private async retryFailedSettlements(): Promise<void> {
     const { data: failedSettlements } = await this.client
       .from('settlement_lifecycle')
-      .select('*')
+      .select('id,user_id,retry_count,phase_completed_at,updated_at,created_at')
       .eq('current_phase', SettlementPhase.FAILED)
       .lt('retry_count', 3);
 

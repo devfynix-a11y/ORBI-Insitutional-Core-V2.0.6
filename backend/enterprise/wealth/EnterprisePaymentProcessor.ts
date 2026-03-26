@@ -232,6 +232,19 @@ export class EnterprisePaymentProcessor {
                 }
             }
 
+            await this.assertWalletUnlocked(intent.sourceWalletId, 'source');
+            if (intent.targetWalletId) {
+                await this.assertWalletUnlocked(intent.targetWalletId, 'target');
+            }
+            const intermediateWallet = intent.metadata?.intermediate_operating_wallet;
+            if (intermediateWallet) {
+                await this.assertWalletUnlocked(intermediateWallet, 'operating');
+            }
+            const internalVault = intent.metadata?.source_internal_vault_id;
+            if (internalVault) {
+                await this.assertWalletUnlocked(internalVault, 'internal');
+            }
+
             // --- CROSS-CURRENCY RESOLUTION ---
             const sb = getAdminSupabase() || getSupabase();
             let sourceCurrency = intent.currency;
@@ -520,6 +533,50 @@ export class EnterprisePaymentProcessor {
             } catch (e: any) {
                 console.error(`[EntProcessor Settlement] Failed to settle ${tx.id}: ${e.message}`);
             }
+        }
+    }
+
+    private looksLocked(value?: string | null): boolean {
+        if (!value) return false;
+        const normalized = value.trim().toLowerCase();
+        return normalized.includes('lock') ||
+            normalized.includes('freeze') ||
+            normalized.includes('blocked') ||
+            normalized.includes('suspend');
+    }
+
+    private async assertWalletUnlocked(walletId?: string, label: string = 'wallet') {
+        if (!walletId) return;
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return;
+
+        const { data: vault } = await sb
+            .from('platform_vaults')
+            .select('id, status, is_locked, locked_at, lock_reason, metadata')
+            .eq('id', walletId)
+            .maybeSingle();
+
+        const record = vault || (await sb
+            .from('wallets')
+            .select('id, status, is_locked, locked_at, lock_reason, metadata')
+            .eq('id', walletId)
+            .maybeSingle()).data;
+
+        if (!record) return;
+
+        const meta = record.metadata || {};
+        const isLocked = Boolean(record.is_locked) ||
+            this.looksLocked(record.status) ||
+            this.looksLocked(meta.status) ||
+            Boolean(meta.is_locked) ||
+            Boolean(meta.isLocked) ||
+            Boolean(meta.locked) ||
+            Boolean(meta.is_frozen) ||
+            Boolean(meta.isFrozen);
+
+        if (isLocked) {
+            const reason = record.lock_reason || meta.lock_reason || meta.lockReason || 'Wallet is locked.';
+            throw new Error(`WALLET_LOCKED: ${label} wallet is locked. ${reason}`);
         }
     }
 

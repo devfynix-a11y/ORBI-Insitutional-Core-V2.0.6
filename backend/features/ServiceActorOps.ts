@@ -4,6 +4,7 @@ import { DataVault } from '../security/encryption.js';
 import { RegulatoryService } from '../../ledger/regulatoryService.js';
 import { platformFeeService } from '../payments/PlatformFeeService.js';
 import { UUID } from '../../services/utils.js';
+import { PerfMonitor } from '../infrastructure/PerfMonitor.js';
 import type { AuthService } from '../../iam/authService.js';
 import type { User, UserRole } from '../../types.js';
 import { Messaging } from './MessagingService.js';
@@ -584,28 +585,32 @@ class ServiceActorOperations {
         const sb = this.getDb();
         if (!sb) return [];
 
-        const { data } = await sb
-            .from('merchant_transactions')
-            .select('*')
-            .eq('owner_user_id', userId)
-            .order('created_at', { ascending: false })
-            .range(offset, offset + limit - 1);
+        return await PerfMonitor.track(`ServiceActorOps.getMerchantTransactions:${userId}:${limit}:${offset}`, async () => {
+            const { data } = await sb
+                .from('merchant_transactions')
+                .select('*')
+                .eq('owner_user_id', userId)
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
 
-        return data || [];
+            return data || [];
+        });
     }
 
     public async getAgentTransactions(userId: string, limit = 50, offset = 0) {
         const sb = this.getDb();
         if (!sb) return [];
 
-        const { data } = await sb
-            .from('agent_transactions')
-            .select('*')
-            .eq('owner_user_id', userId)
-            .order('created_at', { ascending: false })
-            .range(offset, offset + limit - 1);
+        return await PerfMonitor.track(`ServiceActorOps.getAgentTransactions:${userId}:${limit}:${offset}`, async () => {
+            const { data } = await sb
+                .from('agent_transactions')
+                .select('*')
+                .eq('owner_user_id', userId)
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
 
-        return data || [];
+            return data || [];
+        });
     }
 
     public async registerCustomerByActor(

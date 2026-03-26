@@ -53,6 +53,7 @@ import { ServiceActorOps } from './features/ServiceActorOps.js';
 import { institutionalFundsService } from './payments/InstitutionalFundsService.js';
 import { platformFeeService } from './payments/PlatformFeeService.js';
 import { offlineGatewayService } from './offline/OfflineGatewayService.js';
+import bcrypt from 'bcryptjs';
 
 const internalBackgroundJobsEnabled =
     process.env.ORBI_ENABLE_INTERNAL_BACKGROUND_JOBS === 'true';
@@ -106,13 +107,20 @@ class OrbiServer {
         // Start Background Jobs only when this process is explicitly promoted to
         // a worker role. The gateway runtime already runs its own scheduler.
         if (internalBackgroundJobsEnabled) {
+            let backgroundJobRunning = false;
             setInterval(async () => {
+                if (backgroundJobRunning) {
+                    return;
+                }
+                backgroundJobRunning = true;
                 try {
                     await ReconEngine.reapStuckTransactions();
                     await EntProcessor.settleProcessingTransactions();
                     await Treasury.sweepAllOrganizations();
                 } catch (e) {
                     console.error("[BackgroundJob] Cycle failed:", e);
+                } finally {
+                    backgroundJobRunning = false;
                 }
             }, CONFIG.BACKGROUND_JOB_INTERVAL); // Run every configured interval
         }
@@ -210,7 +218,7 @@ class OrbiServer {
         const [transactions, wallets, goals, categories, tasks, messages] = await Promise.all([
             this.ledger.getLatestTransactions(session.sub),
             this.wallet.fetchForUser(session.sub),
-            this.goal.fetchForUser(session.sub),
+            this.goal.fetchForUser(session.sub, token || session.access_token),
             this.category.fetchForUser(session.sub),
             this.task.fetchForUser(session.sub),
             this.getUserMessages(session.sub)
@@ -352,6 +360,128 @@ class OrbiServer {
     async getWallets(uid: string) { return this.wallet.fetchForUser(uid); }
     async deleteWallet(id: string) { return this.wallet.deleteWallet(id, 'linked'); }
 
+    private async verifyTransactionPin(userId: string, pin?: string): Promise<boolean> {
+        if (!pin || !pin.trim()) return false;
+        const sb = getAdminSupabase();
+        if (!sb) throw new Error('DB_OFFLINE');
+        const { data: profile } = await sb
+            .from('users')
+            .select('security_tx_pin_hash, security_tx_pin_enabled')
+            .eq('id', userId)
+            .maybeSingle();
+        if (!profile?.security_tx_pin_enabled || !profile.security_tx_pin_hash) {
+            throw new Error('PIN_NOT_SET');
+        }
+        const hash = String(profile.security_tx_pin_hash || '');
+        if (hash.startsWith('$2')) {
+            return await bcrypt.compare(pin.trim(), hash);
+        }
+        return pin.trim() === hash;
+    }
+
+    private async resolveWalletRecord(walletId: string) {
+        const sb = getAdminSupabase();
+        if (!sb) throw new Error('DB_OFFLINE');
+        const { data: vault } = await sb
+            .from('platform_vaults')
+            .select('id, user_id, status, is_locked, locked_at, lock_reason, metadata')
+            .eq('id', walletId)
+            .maybeSingle();
+        if (vault) return { table: 'platform_vaults', record: vault };
+
+        const { data: wallet } = await sb
+            .from('wallets')
+            .select('id, user_id, status, is_locked, locked_at, lock_reason, metadata')
+            .eq('id', walletId)
+            .maybeSingle();
+        if (wallet) return { table: 'wallets', record: wallet };
+        return null;
+    }
+
+    private isHardBlockedStatus(status?: string | null) {
+        if (!status) return false;
+        return status.trim().toLowerCase() === 'blocked';
+    }
+
+    private shouldForceUnlockStatus(status?: string | null) {
+        if (!status) return false;
+        const normalized = status.trim().toLowerCase();
+        return ['locked', 'frozen', 'suspended', 'blocked'].includes(normalized);
+    }
+
+    async lockWallet(
+        actorUserId: string,
+        walletId: string,
+        opts: { reason?: string; pin?: string; force?: boolean; isAdmin?: boolean } = {}
+    ) {
+        const sb = getAdminSupabase();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const resolved = await this.resolveWalletRecord(walletId);
+        if (!resolved) throw new Error('WALLET_NOT_FOUND');
+
+        const { table, record } = resolved;
+        const isOwner = record.user_id === actorUserId;
+        if (!opts.isAdmin && !isOwner) throw new Error('ACCESS_DENIED');
+
+        if (!opts.isAdmin && opts.pin) {
+            const ok = await this.verifyTransactionPin(actorUserId, opts.pin);
+            if (!ok) throw new Error('INVALID_PIN');
+        }
+
+        const reason = opts.reason || (opts.isAdmin ? 'Admin lock' : 'User lock');
+        const updatePayload: any = {
+            is_locked: true,
+            status: 'locked',
+            locked_at: new Date().toISOString(),
+            lock_reason: reason
+        };
+
+        const { error } = await sb.from(table).update(updatePayload).eq('id', record.id);
+        if (error) throw error;
+
+        return { ...record, ...updatePayload, table };
+    }
+
+    async unlockWallet(
+        actorUserId: string,
+        walletId: string,
+        opts: { pin?: string; force?: boolean; isAdmin?: boolean } = {}
+    ) {
+        const sb = getAdminSupabase();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const resolved = await this.resolveWalletRecord(walletId);
+        if (!resolved) throw new Error('WALLET_NOT_FOUND');
+
+        const { table, record } = resolved;
+        const isOwner = record.user_id === actorUserId;
+        if (!opts.isAdmin && !isOwner) throw new Error('ACCESS_DENIED');
+
+        if (!opts.isAdmin) {
+            const ok = await this.verifyTransactionPin(actorUserId, opts.pin);
+            if (!ok) throw new Error('INVALID_PIN');
+            if (this.isHardBlockedStatus(record.status)) {
+                throw new Error('WALLET_BLOCKED');
+            }
+        }
+
+        const nextStatus = (opts.isAdmin || this.shouldForceUnlockStatus(record.status))
+            ? 'active'
+            : record.status;
+        const updatePayload: any = {
+            is_locked: false,
+            status: nextStatus,
+            locked_at: null,
+            lock_reason: null
+        };
+
+        const { error } = await sb.from(table).update(updatePayload).eq('id', record.id);
+        if (error) throw error;
+
+        return { ...record, ...updatePayload, table };
+    }
+
     // --- ESCROW & TRUSTLESS COMMERCE ---
     async createEscrow(userId: string, recipientCustomerId: string, amount: number, description: string, conditions: any) {
         return this.escrow.createEscrow(userId, recipientCustomerId, amount, description, conditions);
@@ -378,14 +508,16 @@ class OrbiServer {
     }
 
     // --- STRATEGY & PLANNING ---
-    async postGoal(p: any) { return this.goal.postGoal(p); }
-    async updateGoal(p: any) { return this.goal.updateGoal(p); }
-    async allocateToGoal(goalId: string, amount: number, walletId: string) { return this.goal.allocateFunds(goalId, amount, walletId); }
-    async withdrawFromGoal(goalId: string, amount: number, walletId: string, verification?: any) {
-        return this.goal.withdrawFunds(goalId, amount, walletId, verification);
+    async postGoal(p: any, token?: string) { return this.goal.postGoal(p, token); }
+    async updateGoal(p: any, token?: string) { return this.goal.updateGoal(p, token); }
+    async allocateToGoal(goalId: string, amount: number, walletId: string, token?: string) {
+        return this.goal.allocateFunds(goalId, amount, walletId, token);
     }
-    async deleteGoal(id: string) { return this.goal.deleteGoal(id); }
-    async getGoals(userId: string) { return this.goal.fetchForUser(userId); }
+    async withdrawFromGoal(goalId: string, amount: number, walletId: string, verification?: any, token?: string) {
+        return this.goal.withdrawFunds(goalId, amount, walletId, verification, token);
+    }
+    async deleteGoal(id: string, token?: string) { return this.goal.deleteGoal(id, token); }
+    async getGoals(userId: string, token?: string) { return this.goal.fetchForUser(userId, token); }
     async postCategory(p: any) { return this.category.postCategory(p); }
     async getCategories(userId: string) { return this.category.fetchForUser(userId); }
     async updateCategory(p: any) { return this.category.updateCategory(p); }

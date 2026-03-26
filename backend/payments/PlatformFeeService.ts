@@ -1,5 +1,6 @@
 import { getAdminSupabase, getSupabase } from '../supabaseClient.js';
 import { Audit } from '../security/audit.js';
+import { RedisClusterFactory } from '../infrastructure/RedisClusterFactory.js';
 import {
   PlatformFeeConfig,
   PlatformFeeComputation,
@@ -50,9 +51,31 @@ const LEGACY_DEFAULTS: Record<string, Partial<PlatformFeeConfig>> = {
 };
 
 export class PlatformFeeService {
+  private cache = new Map<string, { expiresAt: number; data: PlatformFeeConfig[] }>();
+  private cacheTtlMs = 60 * 1000;
+
   async listConfigs(filters?: PlatformFeeFilters) {
     const sb = getAdminSupabase() || getSupabase();
     if (!sb) throw new Error('DB_OFFLINE');
+
+    const cacheKey = this.buildCacheKey(filters);
+    const cached = this.cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+    const redis = RedisClusterFactory.getClient('monitor');
+    if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
+      try {
+        const cachedRaw = await redis.get(`platform_fees:${cacheKey}`);
+        if (cachedRaw) {
+          const parsed = JSON.parse(String(cachedRaw));
+          this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: parsed });
+          return parsed;
+        }
+      } catch (e) {
+        // Redis is optional; fall back to DB.
+      }
+    }
 
     let query = sb
       .from('platform_fee_configs')
@@ -70,7 +93,16 @@ export class PlatformFeeService {
 
     const { data, error } = await query;
     if (error) throw new Error(error.message);
-    return data || [];
+    const rows = data || [];
+    this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: rows });
+    if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
+      try {
+        await redis.set(`platform_fees:${cacheKey}`, JSON.stringify(rows), 'EX', Math.ceil(this.cacheTtlMs / 1000));
+      } catch (e) {
+        // Ignore Redis write errors.
+      }
+    }
+    return rows;
   }
 
   async upsertConfig(payload: any, actorId: string, configId?: string) {
@@ -121,6 +153,9 @@ export class PlatformFeeService {
     const { data, error } = await query;
     if (error) throw new Error(error.message);
 
+    this.cache.clear();
+    // Redis cache is short-lived; allow natural expiry for now.
+
     await Audit.log('ADMIN', actorId, configId ? 'PLATFORM_FEE_CONFIG_UPDATED' : 'PLATFORM_FEE_CONFIG_CREATED', {
       configId: data.id,
       flowCode: data.flow_code,
@@ -150,6 +185,18 @@ export class PlatformFeeService {
 
     const config = this.selectBestConfig(activeConfigs as PlatformFeeConfig[], input) || this.buildLegacyFallback(flowCode, currency);
     return this.computeFromConfig(config, amount, currency, input);
+  }
+
+  private buildCacheKey(filters?: PlatformFeeFilters) {
+    const normalized = {
+      flowCode: String(filters?.flowCode || '').trim().toUpperCase(),
+      status: String(filters?.status || '').trim().toUpperCase(),
+      providerId: String(filters?.providerId || ''),
+      currency: String(filters?.currency || '').trim().toUpperCase(),
+      countryCode: String(filters?.countryCode || '').trim().toUpperCase(),
+      rail: String(filters?.rail || '').trim().toUpperCase(),
+    };
+    return JSON.stringify(normalized);
   }
 
   private selectBestConfig(configs: PlatformFeeConfig[], input: FeeResolutionInput) {

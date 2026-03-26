@@ -53,7 +53,19 @@ export const WalletCreateSchema = z.object({
     currency: z.string().length(3).default('USD'),
     color: z.string().optional(),
     icon: z.string().optional(),
-    type: z.string().optional()
+    type: z.string().optional(),
+    metadata: z.record(z.string(), z.any()).optional()
+});
+
+export const WalletLockSchema = z.object({
+    reason: z.string().max(255).optional(),
+    pin: z.string().min(4).max(8).optional(),
+    force: z.boolean().optional()
+});
+
+export const WalletUnlockSchema = z.object({
+    pin: z.string().min(4).max(8).optional(),
+    force: z.boolean().optional()
 });
 
 export const GoalCreateSchema = z.object({

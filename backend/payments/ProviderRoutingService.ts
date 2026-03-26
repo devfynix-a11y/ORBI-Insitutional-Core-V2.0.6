@@ -1,4 +1,5 @@
 import { getAdminSupabase } from '../supabaseClient.js';
+import { RedisClusterFactory } from '../infrastructure/RedisClusterFactory.js';
 import {
     FinancialPartner,
     MoneyOperation,
@@ -28,13 +29,44 @@ function fallbackRailFromPartner(partner: FinancialPartner): RailType {
 }
 
 export class ProviderRoutingService {
+    private cache = new Map<string, { expiresAt: number; data: ResolvedProviderConfig }>();
+    private cacheTtlMs = 60 * 1000;
+
     async resolveProvider(input: ProviderResolutionInput): Promise<ResolvedProviderConfig> {
         const sb = getAdminSupabase();
         if (!sb) throw new Error('DB_OFFLINE');
 
+        const cacheKey = this.buildCacheKey(input);
+        const cached = this.cache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.data;
+        }
+        const redis = RedisClusterFactory.getClient('monitor');
+        if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
+            try {
+                const cachedRaw = await redis.get(`provider_route:${cacheKey}`);
+                if (cachedRaw) {
+                    const parsed = JSON.parse(String(cachedRaw));
+                    this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: parsed });
+                    return parsed;
+                }
+            } catch (e) {
+                // Redis is optional; fall back to DB.
+            }
+        }
+
         const routed = await this.resolveViaRoutingRules(sb, input);
         if (routed) {
-            return this.toResolvedProviderConfig(routed, input.operation);
+            const resolved = this.toResolvedProviderConfig(routed, input.operation);
+            this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: resolved });
+            if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
+                try {
+                    await redis.set(`provider_route:${cacheKey}`, JSON.stringify(resolved), 'EX', Math.ceil(this.cacheTtlMs / 1000));
+                } catch (e) {
+                    // Ignore Redis write errors.
+                }
+            }
+            return resolved;
         }
 
         let query = sb
@@ -66,7 +98,27 @@ export class ProviderRoutingService {
             partner.api_base_url ||
             undefined;
 
-        return this.toResolvedProviderConfig(partner, input.operation);
+        const resolved = this.toResolvedProviderConfig(partner, input.operation);
+        this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: resolved });
+        if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
+            try {
+                await redis.set(`provider_route:${cacheKey}`, JSON.stringify(resolved), 'EX', Math.ceil(this.cacheTtlMs / 1000));
+            } catch (e) {
+                // Ignore Redis write errors.
+            }
+        }
+        return resolved;
+    }
+
+    private buildCacheKey(input: ProviderResolutionInput) {
+        return JSON.stringify({
+            rail: input.rail,
+            operation: input.operation,
+            countryCode: input.countryCode || '',
+            currency: input.currency || '',
+            preferredProviderCode: input.preferredProviderCode || '',
+            preferredProviderId: input.preferredProviderId || '',
+        });
     }
 
     private async resolveViaRoutingRules(sb: any, input: ProviderResolutionInput): Promise<FinancialPartner | null> {
