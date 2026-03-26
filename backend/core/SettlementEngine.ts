@@ -1,5 +1,6 @@
 import { getSupabase } from '../supabaseClient.js';
 import { UUID } from '../../services/utils.js';
+import { platformFeeService } from '../payments/PlatformFeeService.js';
 
 export class SettlementEngineService {
     
@@ -119,8 +120,21 @@ export class SettlementEngineService {
         const amount = await this.calculatePendingSettlement(tenantId);
         if (amount <= 0) throw new Error("No pending funds available for settlement.");
 
-        // 4. Calculate Fees (e.g., 0.5% payout fee or fixed fee)
-        const feeDeducted = Math.max(500, amount * 0.005); // Min 500 TZS or 0.5%
+        // 4. Calculate Fees from admin-managed platform fee configuration
+        const payoutCurrency = String(config?.currency || '').trim().toUpperCase();
+        if (!payoutCurrency) {
+            throw new Error("CURRENCY_REQUIRED: Settlement payout requires an explicit configured currency.");
+        }
+        const payoutFee = await platformFeeService.resolveFee({
+            flowCode: 'TENANT_SETTLEMENT_PAYOUT',
+            amount,
+            currency: payoutCurrency,
+            transactionType: 'TENANT_SETTLEMENT_PAYOUT',
+            metadata: {
+                tenant_id: tenantId,
+            },
+        });
+        const feeDeducted = payoutFee.totalFee;
         const netAmount = amount - feeDeducted;
 
         if (netAmount <= 0) throw new Error("Amount too small for settlement after fees.");

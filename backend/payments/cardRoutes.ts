@@ -1,8 +1,21 @@
 import { Router, Request, Response } from 'express';
-import { cardProcessor, CardTokenRequest, CardPaymentRequest } from '../cardProcessor.js';
-import { validationMiddleware } from '../../middleware/validation.js';
+import { cardProcessor, CardTokenRequest, CardPaymentRequest } from './cardProcessor.js';
+import { validationMiddleware } from '../middleware/validation.js';
 import { z } from 'zod';
-import { Audit } from '../../security/audit.js';
+import { Audit } from '../security/audit.js';
+
+type AuthenticatedRequest = Request & {
+  user?: { id?: string; email?: string; role?: string };
+  session?: {
+    sub?: string;
+    user?: { id?: string; user_id?: string };
+  };
+};
+
+function getCardActorId(req: Request): string | null {
+  const authReq = req as AuthenticatedRequest;
+  return authReq.user?.id || authReq.session?.user?.id || authReq.session?.user?.user_id || authReq.session?.sub || null;
+}
 
 const cardRouter = Router();
 
@@ -40,12 +53,12 @@ cardRouter.post(
   ),
   async (req: Request, res: Response) => {
     try {
-      const userId = req.user?.id;
+      const userId = getCardActorId(req);
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
       const token = await cardProcessor.tokenizeCard(userId, req.body as CardTokenRequest);
 
-      await Audit.log('PAYMENT', userId, 'CARD_TOKENIZED_API', {
+      await Audit.log('FINANCIAL', userId, 'CARD_TOKENIZED_API', {
         cardBrand: token.cardBrand,
         last4: token.last4Digits,
       });
@@ -74,14 +87,14 @@ cardRouter.post(
  */
 cardRouter.get('/', async (req: Request, res: Response) => {
   try {
-    const userId = req.user?.id;
+    const userId = getCardActorId(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     const tokens = await cardProcessor.listCardTokens(userId);
 
     res.json({
       success: true,
-      data: tokens.map(t => ({
+      data: tokens.map((t: any) => ({
         id: t.id,
         maskedCardNumber: t.maskedCardNumber,
         cardBrand: t.cardBrand,
@@ -102,12 +115,12 @@ cardRouter.get('/', async (req: Request, res: Response) => {
  */
 cardRouter.delete('/:cardTokenId', async (req: Request, res: Response) => {
   try {
-    const userId = req.user?.id;
+    const userId = getCardActorId(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    await cardProcessor.deleteCardToken(req.params.cardTokenId, userId);
+    await cardProcessor.deleteCardToken(req.params.cardTokenId as string, userId);
 
-    await Audit.log('PAYMENT', userId, 'CARD_DELETED_API', {
+    await Audit.log('FINANCIAL', userId, 'CARD_DELETED_API', {
       cardTokenId: req.params.cardTokenId,
     });
 
@@ -135,12 +148,11 @@ cardRouter.post(
       targetWalletId: z.string().uuid(),
       merchantId: z.optional(z.string().uuid()),
       categoryId: z.optional(z.string().uuid()),
-      metadata: z.optional(z.record(z.any())),
     })
   ),
   async (req: Request, res: Response) => {
     try {
-      const userId = req.user?.id;
+      const userId = getCardActorId(req);
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
       const cardTx = await cardProcessor.authorizeCardPayment(
@@ -184,11 +196,11 @@ cardRouter.post(
   ),
   async (req: Request, res: Response) => {
     try {
-      const userId = req.user?.id;
+      const userId = getCardActorId(req);
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
       const result = await cardProcessor.settleCardPayment(
-        req.params.cardTransactionId,
+        req.params.cardTransactionId as string,
         userId,
         req.body.sourceWalletId,
         req.body.targetWalletId
@@ -213,16 +225,16 @@ cardRouter.post(
   validationMiddleware(z.object({ reason: z.optional(z.string()) })),
   async (req: Request, res: Response) => {
     try {
-      const userId = req.user?.id;
+      const userId = getCardActorId(req);
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
       const result = await cardProcessor.refundCardPayment(
-        req.params.cardTransactionId,
+        req.params.cardTransactionId as string,
         userId,
         req.body.reason
       );
 
-      await Audit.log('PAYMENT', userId, 'CARD_REFUND_API', {
+      await Audit.log('FINANCIAL', userId, 'CARD_REFUND_API', {
         originalTxId: req.params.cardTransactionId,
         refundId: result.refundId,
       });

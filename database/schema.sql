@@ -501,6 +501,140 @@ CREATE TABLE IF NOT EXISTS public.financial_partners (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS public.institutional_payment_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    role TEXT NOT NULL,
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE SET NULL,
+    bank_name TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    account_number TEXT NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'TZS',
+    country_code TEXT,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    is_primary BOOLEAN DEFAULT FALSE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.external_fund_movements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    direction TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'initiated',
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE SET NULL,
+    institutional_source_account_id UUID REFERENCES public.institutional_payment_accounts(id) ON DELETE SET NULL,
+    institutional_target_account_id UUID REFERENCES public.institutional_payment_accounts(id) ON DELETE SET NULL,
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    source_wallet_id UUID,
+    target_wallet_id UUID,
+    gross_amount NUMERIC NOT NULL DEFAULT 0,
+    net_amount NUMERIC NOT NULL DEFAULT 0,
+    fee_amount NUMERIC NOT NULL DEFAULT 0,
+    tax_amount NUMERIC NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'TZS',
+    description TEXT,
+    external_reference TEXT,
+    source_external_ref TEXT,
+    target_external_ref TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.provider_routing_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rail TEXT NOT NULL,
+    country_code TEXT,
+    currency TEXT,
+    operation_code TEXT NOT NULL,
+    provider_id UUID NOT NULL REFERENCES public.financial_partners(id) ON DELETE CASCADE,
+    priority INTEGER NOT NULL DEFAULT 100,
+    conditions JSONB DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.platform_fee_configs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    flow_code TEXT NOT NULL,
+    transaction_type TEXT,
+    operation_type TEXT,
+    direction TEXT,
+    rail TEXT,
+    channel TEXT,
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE CASCADE,
+    currency TEXT,
+    country_code TEXT,
+    percentage_rate NUMERIC NOT NULL DEFAULT 0,
+    fixed_amount NUMERIC NOT NULL DEFAULT 0,
+    minimum_fee NUMERIC NOT NULL DEFAULT 0,
+    maximum_fee NUMERIC,
+    tax_rate NUMERIC NOT NULL DEFAULT 0,
+    gov_fee_rate NUMERIC NOT NULL DEFAULT 0,
+    stamp_duty_fixed NUMERIC NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 100,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.inbound_sms_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    gateway_id TEXT NOT NULL,
+    phone_number TEXT NOT NULL,
+    raw_message TEXT NOT NULL,
+    normalized_message TEXT,
+    message_type TEXT,
+    request_id TEXT,
+    carrier_ref TEXT,
+    received_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    parse_status TEXT,
+    signature_status TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.offline_transaction_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id TEXT NOT NULL UNIQUE,
+    tenant_id UUID,
+    phone_number TEXT NOT NULL,
+    user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    device_id TEXT,
+    action TEXT NOT NULL,
+    amount NUMERIC(20, 2),
+    currency TEXT,
+    source_wallet_id TEXT,
+    budget_id TEXT,
+    recipient_ref TEXT,
+    status TEXT NOT NULL,
+    challenge_code TEXT,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    confirmed_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    failure_reason TEXT,
+    correlation_id TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.outbound_sms_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id TEXT,
+    phone_number TEXT NOT NULL,
+    message_body TEXT NOT NULL,
+    message_type TEXT,
+    send_status TEXT,
+    gateway_ref TEXT,
+    sent_at TIMESTAMP WITH TIME ZONE,
+    delivered_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 DO $$
 DECLARE
     partner_constraint RECORD;
@@ -580,6 +714,118 @@ BEGIN
         ALTER TABLE public.financial_partners
             ADD CONSTRAINT financial_partners_logic_type_check
             CHECK (logic_type IN ('REGISTRY', 'GENERIC_REST', 'SPECIALIZED'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'institutional_payment_accounts'
+          AND c.conname = 'institutional_payment_accounts_role_check'
+    ) THEN
+        ALTER TABLE public.institutional_payment_accounts
+            ADD CONSTRAINT institutional_payment_accounts_role_check
+            CHECK (role IN ('MAIN_COLLECTION', 'FEE_COLLECTION', 'TAX_COLLECTION', 'TRANSFER_SAVINGS'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'institutional_payment_accounts'
+          AND c.conname = 'institutional_payment_accounts_status_check'
+    ) THEN
+        ALTER TABLE public.institutional_payment_accounts
+            ADD CONSTRAINT institutional_payment_accounts_status_check
+            CHECK (status IN ('ACTIVE', 'INACTIVE'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'external_fund_movements'
+          AND c.conname = 'external_fund_movements_direction_check'
+    ) THEN
+        ALTER TABLE public.external_fund_movements
+            ADD CONSTRAINT external_fund_movements_direction_check
+            CHECK (direction IN ('INTERNAL_TO_EXTERNAL', 'EXTERNAL_TO_INTERNAL', 'EXTERNAL_TO_EXTERNAL'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'external_fund_movements'
+          AND c.conname = 'external_fund_movements_status_check'
+    ) THEN
+        ALTER TABLE public.external_fund_movements
+            ADD CONSTRAINT external_fund_movements_status_check
+            CHECK (status IN ('previewed', 'initiated', 'processing', 'completed', 'failed', 'recorded', 'reversed'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'provider_routing_rules'
+          AND c.conname = 'provider_routing_rules_rail_check'
+    ) THEN
+        ALTER TABLE public.provider_routing_rules
+            ADD CONSTRAINT provider_routing_rules_rail_check
+            CHECK (rail IN ('MOBILE_MONEY', 'BANK', 'CARD_GATEWAY', 'CRYPTO', 'WALLET'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'provider_routing_rules'
+          AND c.conname = 'provider_routing_rules_status_check'
+    ) THEN
+        ALTER TABLE public.provider_routing_rules
+            ADD CONSTRAINT provider_routing_rules_status_check
+            CHECK (status IN ('ACTIVE', 'INACTIVE'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'platform_fee_configs'
+          AND c.conname = 'platform_fee_configs_status_check'
+    ) THEN
+        ALTER TABLE public.platform_fee_configs
+            ADD CONSTRAINT platform_fee_configs_status_check
+            CHECK (status IN ('ACTIVE', 'INACTIVE'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'offline_transaction_sessions'
+          AND c.conname = 'offline_transaction_sessions_status_check'
+    ) THEN
+        ALTER TABLE public.offline_transaction_sessions
+            ADD CONSTRAINT offline_transaction_sessions_status_check
+            CHECK (status IN ('RECEIVED', 'PARSED', 'VALIDATED', 'PENDING_CONFIRMATION', 'FORWARDED_TO_ORBI', 'CHALLENGE_SENT', 'CONFIRMED', 'SUCCESS', 'FAILED', 'EXPIRED', 'REJECTED'));
     END IF;
 END $$;
 
@@ -1315,6 +1561,12 @@ BEGIN
     ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.financial_ledger ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.financial_partners ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.institutional_payment_accounts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.external_fund_movements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.provider_routing_rules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.inbound_sms_messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.offline_transaction_sessions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.outbound_sms_messages ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.system_nodes ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.chargeback_cases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.payment_reviews ENABLE ROW LEVEL SECURITY;
@@ -1401,6 +1653,52 @@ CREATE POLICY "Users view own transactions" ON public.transactions FOR SELECT US
 
 DROP POLICY IF EXISTS "Service role transaction bypass" ON public.transactions;
 CREATE POLICY "Service role transaction bypass" ON public.transactions FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Admin manage institutional accounts" ON public.institutional_payment_accounts;
+CREATE POLICY "Admin manage institutional accounts" ON public.institutional_payment_accounts
+    FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'))
+    WITH CHECK ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role institutional account bypass" ON public.institutional_payment_accounts;
+CREATE POLICY "Service role institutional account bypass" ON public.institutional_payment_accounts
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users view own external fund movements" ON public.external_fund_movements;
+CREATE POLICY "Users view own external fund movements" ON public.external_fund_movements
+    FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users create own external fund movements" ON public.external_fund_movements;
+CREATE POLICY "Users create own external fund movements" ON public.external_fund_movements
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Admin view external fund movements" ON public.external_fund_movements;
+CREATE POLICY "Admin view external fund movements" ON public.external_fund_movements
+    FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role external fund movement bypass" ON public.external_fund_movements;
+CREATE POLICY "Service role external fund movement bypass" ON public.external_fund_movements
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Admin manage provider routing rules" ON public.provider_routing_rules;
+CREATE POLICY "Admin manage provider routing rules" ON public.provider_routing_rules
+    FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'))
+    WITH CHECK ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role provider routing bypass" ON public.provider_routing_rules;
+CREATE POLICY "Service role provider routing bypass" ON public.provider_routing_rules
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role inbound sms bypass" ON public.inbound_sms_messages;
+CREATE POLICY "Service role inbound sms bypass" ON public.inbound_sms_messages
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role offline session bypass" ON public.offline_transaction_sessions;
+CREATE POLICY "Service role offline session bypass" ON public.offline_transaction_sessions
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role outbound sms bypass" ON public.outbound_sms_messages;
+CREATE POLICY "Service role outbound sms bypass" ON public.outbound_sms_messages
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Workforce Consumer Access" ON public.users;
 CREATE POLICY "Workforce Consumer Access" ON public.users FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'CUSTOMER_CARE'));
@@ -1595,6 +1893,16 @@ CREATE POLICY "Approvers view assignments" ON public.treasury_approvers
 CREATE INDEX IF NOT EXISTS idx_tx_user_date ON public.transactions(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_ledger_tx ON public.financial_ledger(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_wallet ON public.transactions(user_id, wallet_id);
+CREATE INDEX IF NOT EXISTS idx_institutional_payment_accounts_role ON public.institutional_payment_accounts(role, currency, status);
+CREATE INDEX IF NOT EXISTS idx_institutional_payment_accounts_provider ON public.institutional_payment_accounts(provider_id);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_user_date ON public.external_fund_movements(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_transaction ON public.external_fund_movements(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_provider_status ON public.external_fund_movements(provider_id, status);
+CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup ON public.provider_routing_rules(rail, operation_code, status, priority);
+CREATE INDEX IF NOT EXISTS idx_inbound_sms_request_id ON public.inbound_sms_messages(request_id);
+CREATE INDEX IF NOT EXISTS idx_offline_transaction_sessions_request_id ON public.offline_transaction_sessions(request_id);
+CREATE INDEX IF NOT EXISTS idx_offline_transaction_sessions_status ON public.offline_transaction_sessions(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_outbound_sms_request_id ON public.outbound_sms_messages(request_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_user ON public.wallets(user_id);
 CREATE INDEX IF NOT EXISTS idx_goals_user ON public.goals(user_id);
 CREATE INDEX IF NOT EXISTS idx_categories_user ON public.categories(user_id);

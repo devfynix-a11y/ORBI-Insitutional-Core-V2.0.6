@@ -1,5 +1,5 @@
 
-import { FinancialPartner, DigitalMerchant } from '../../../types.js';
+import { FinancialPartner } from '../../../types.js';
 import { getSupabase } from '../../../services/supabaseClient.js';
 import { DataVault } from '../../security/encryption.js';
 import { UUID } from '../../../services/utils.js';

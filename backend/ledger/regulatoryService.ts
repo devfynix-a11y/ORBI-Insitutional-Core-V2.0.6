@@ -1,6 +1,7 @@
 
 import { RegulatoryConfig, User } from '../../types.js';
 import { getSupabase } from '../../services/supabaseClient.js';
+import { platformFeeService } from '../payments/PlatformFeeService.js';
 
 /**
  * ORBI REGULATORY & COMPLIANCE NODE (V8.2)
@@ -56,22 +57,45 @@ export class RegulatoryServiceNode {
         return fallbacks[role];
     }
 
-    public async calculateFees(amount: number, type: string): Promise<{ vat: number, fee: number, gov_fee: number, total: number, rate: number }> {
-        const config = await this.getActiveConfig();
-        
-        const vat = amount * config.vat_rate;
-        const serviceFee = amount * config.service_fee_rate;
-        const govFee = (type === 'EXTERNAL_PAYMENT' || type === 'WITHDRAWAL') ? (amount * config.gov_fee_rate) : 0;
-        const stampDuty = config.stamp_duty_fixed;
+    public async calculateFees(
+        amount: number,
+        type: string,
+        currency: string,
+        context?: { metadata?: Record<string, any>; category?: string },
+    ): Promise<{ vat: number, fee: number, gov_fee: number, total: number, rate: number }> {
+        const normalizedType = String(type || '').trim().toUpperCase();
+        const normalizedCurrency = String(currency || '').trim().toUpperCase();
+        if (!normalizedCurrency) {
+            throw new Error(`FEE_CURRENCY_REQUIRED:${normalizedType || 'CORE_TRANSACTION'}`);
+        }
+        const metadata = context?.metadata || {};
+        const serviceContext = String(metadata.service_context || '').trim().toUpperCase();
+        const cashDirection = String(metadata.cash_direction || '').trim().toLowerCase();
 
-        const totalFees = vat + serviceFee + govFee + stampDuty;
+        const flowCode =
+            serviceContext === 'MERCHANT' ? 'MERCHANT_PAYMENT'
+            : serviceContext === 'AGENT_CASH' && cashDirection === 'withdrawal' ? 'AGENT_CASH_WITHDRAWAL'
+            : serviceContext === 'AGENT_CASH' ? 'AGENT_CASH_DEPOSIT'
+            : serviceContext === 'SERVICE_COMMISSION' || serviceContext === 'SYSTEM' ? 'SYSTEM_OPERATION'
+            : normalizedType === 'EXTERNAL_PAYMENT' ? 'EXTERNAL_PAYMENT'
+            : normalizedType === 'WITHDRAWAL' ? 'WITHDRAWAL'
+            : normalizedType === 'DEPOSIT' ? 'DEPOSIT'
+            : normalizedType === 'INTERNAL_TRANSFER' ? 'INTERNAL_TRANSFER'
+            : 'CORE_TRANSACTION';
+
+        const feeResult = await platformFeeService.resolveFee({
+            flowCode,
+            amount,
+            currency: normalizedCurrency,
+            transactionType: normalizedType,
+        });
 
         return {
-            vat,
-            fee: serviceFee + stampDuty,
-            gov_fee: govFee,
-            total: totalFees,
-            rate: config.vat_rate
+            vat: feeResult.taxAmount,
+            fee: feeResult.serviceFee + feeResult.stampDutyFixed,
+            gov_fee: feeResult.govFeeAmount,
+            total: feeResult.totalFee,
+            rate: feeResult.taxRate
         };
     }
 }

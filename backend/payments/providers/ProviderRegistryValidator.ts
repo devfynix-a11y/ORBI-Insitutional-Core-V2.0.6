@@ -1,5 +1,6 @@
 import {
     FinancialPartner,
+    FinancialPartnerMetadata,
     ProviderAuthConfig,
     ProviderCallbackConfig,
     ProviderRegistryConfig,
@@ -9,6 +10,44 @@ import {
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const PARTNER_TYPES = new Set(['mobile_money', 'bank', 'card', 'crypto']);
 const LOGIC_TYPES = new Set(['REGISTRY', 'GENERIC_REST', 'SPECIALIZED']);
+const PROVIDER_GROUPS = new Set(['mobile', 'bank', 'gateways', 'crypto']);
+const RAIL_TYPES = new Set(['mobile_money', 'bank', 'card_gateway', 'crypto', 'wallet']);
+const CHECKOUT_MODES = new Set([
+    'redirect',
+    'embedded',
+    'tokenized',
+    'server_to_server',
+    'ussd',
+    'stk_push',
+    'manual',
+]);
+const CHANNELS = new Set([
+    'bank_transfer',
+    'bank_account',
+    'mobile_money',
+    'card',
+    'paypal',
+    'crypto',
+    'ussd',
+    'qr',
+    'checkout_link',
+]);
+const MONEY_OPERATIONS = new Set([
+    'AUTH',
+    'ACCOUNT_LOOKUP',
+    'COLLECTION_REQUEST',
+    'COLLECTION_STATUS',
+    'DISBURSEMENT_REQUEST',
+    'DISBURSEMENT_STATUS',
+    'PAYOUT_REQUEST',
+    'PAYOUT_STATUS',
+    'REVERSAL_REQUEST',
+    'REVERSAL_STATUS',
+    'BALANCE_INQUIRY',
+    'TRANSACTION_LOOKUP',
+    'WEBHOOK_VERIFY',
+    'BENEFICIARY_VALIDATE',
+]);
 
 function assertObject(value: any, label: string): Record<string, any> {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -34,6 +73,17 @@ function validatePathLike(url: unknown, label: string): string {
         throw new Error(`${label}_URL_INVALID`);
     }
     return value;
+}
+
+function normalizeServiceRoots(value: unknown): Record<string, string> | undefined {
+    if (value === undefined || value === null) return undefined;
+    const raw = assertObject(value, 'PROVIDER_SERVICE_ROOTS');
+    const normalized: Record<string, string> = {};
+    for (const [key, root] of Object.entries(raw)) {
+        const label = `PROVIDER_SERVICE_ROOTS_${String(key).toUpperCase()}`;
+        normalized[String(key)] = validatePathLike(root, label);
+    }
+    return normalized;
 }
 
 function normalizeHeaders(headers: unknown, label: string): Record<string, string> | undefined {
@@ -127,9 +177,136 @@ function normalizeCallbackConfig(config: unknown): ProviderCallbackConfig | unde
     };
 }
 
+function normalizeStringArray(values: unknown, label: string): string[] | undefined {
+    if (values === undefined || values === null) return undefined;
+    if (!Array.isArray(values)) {
+        throw new Error(`${label}_INVALID`);
+    }
+    return values
+        .map((value) => String(value || '').trim())
+        .filter((value) => value.length > 0);
+}
+
+function normalizeProviderMetadata(metadata: unknown): FinancialPartnerMetadata | undefined {
+    if (metadata === undefined || metadata === null) return undefined;
+    const raw = assertObject(metadata, 'PROVIDER_METADATA');
+    const normalized: FinancialPartnerMetadata = { ...raw };
+
+    const groupRaw = String(
+        raw.group ?? raw.provider_group ?? '',
+    ).trim().toLowerCase();
+    if (groupRaw) {
+        const normalizedGroup =
+            groupRaw === 'gateway' || groupRaw === 'processor' || groupRaw === 'payment_gateway'
+                ? 'gateways'
+                : groupRaw === 'mobile_money'
+                    ? 'mobile'
+                    : groupRaw;
+        if (!PROVIDER_GROUPS.has(normalizedGroup)) {
+            throw new Error('PROVIDER_METADATA_GROUP_INVALID');
+        }
+        normalized.group = normalizedGroup[0].toUpperCase() + normalizedGroup.slice(1);
+        delete normalized.provider_group;
+    }
+
+    const brandName = String(raw.brand_name ?? raw.display_name ?? '').trim();
+    if (brandName) {
+        normalized.brand_name = brandName;
+    }
+
+    const displayName = String(raw.display_name ?? '').trim();
+    if (displayName) {
+        normalized.display_name = displayName;
+    }
+
+    const displayIcon = String(raw.display_icon ?? raw.icon ?? '').trim();
+    if (displayIcon) {
+        normalized.display_icon = displayIcon;
+    }
+
+    const checkoutMode = String(raw.checkout_mode ?? '').trim().toLowerCase();
+    if (checkoutMode) {
+        if (!CHECKOUT_MODES.has(checkoutMode)) {
+            throw new Error('PROVIDER_METADATA_CHECKOUT_MODE_INVALID');
+        }
+        normalized.checkout_mode = checkoutMode;
+    }
+
+    const channels = normalizeStringArray(raw.channels, 'PROVIDER_METADATA_CHANNELS');
+    if (channels) {
+        const normalizedChannels = channels.map((channel) => channel.toLowerCase());
+        for (const channel of normalizedChannels) {
+            if (!CHANNELS.has(channel)) {
+                throw new Error('PROVIDER_METADATA_CHANNEL_INVALID');
+            }
+        }
+        normalized.channels = normalizedChannels;
+    }
+
+    const countries = normalizeStringArray(raw.countries, 'PROVIDER_METADATA_COUNTRIES');
+    if (countries) {
+        normalized.countries = countries.map((country) => country.toUpperCase());
+    }
+
+    const capabilities = normalizeStringArray(raw.capabilities, 'PROVIDER_METADATA_CAPABILITIES');
+    if (capabilities) {
+        normalized.capabilities = capabilities;
+    }
+
+    const rail = String(raw.rail ?? '').trim().toLowerCase();
+    if (rail) {
+        if (!RAIL_TYPES.has(rail)) {
+            throw new Error('PROVIDER_METADATA_RAIL_INVALID');
+        }
+        normalized.rail = rail.toUpperCase();
+    }
+
+    const operations = normalizeStringArray(raw.operations, 'PROVIDER_METADATA_OPERATIONS');
+    if (operations) {
+        const normalizedOperations = operations.map((operation) => operation.trim().toUpperCase());
+        for (const operation of normalizedOperations) {
+            if (!MONEY_OPERATIONS.has(operation)) {
+                throw new Error('PROVIDER_METADATA_OPERATION_INVALID');
+            }
+        }
+        normalized.operations = normalizedOperations;
+    }
+
+    if (raw.sort_order !== undefined && raw.sort_order !== null) {
+        const sortOrder = Number(raw.sort_order);
+        if (!Number.isFinite(sortOrder)) {
+            throw new Error('PROVIDER_METADATA_SORT_ORDER_INVALID');
+        }
+        normalized.sort_order = sortOrder;
+    }
+
+    return normalized;
+}
+
+function normalizeOperationMap(config: unknown): Partial<Record<string, RestEndpointConfig>> | undefined {
+    if (config === undefined || config === null) return undefined;
+    const raw = assertObject(config, 'PROVIDER_OPERATION_MAP');
+    const normalized: Partial<Record<string, RestEndpointConfig>> = {};
+    for (const [operation, endpointConfig] of Object.entries(raw)) {
+        const normalizedOperation = String(operation || '').trim().toUpperCase();
+        if (!MONEY_OPERATIONS.has(normalizedOperation)) {
+            throw new Error('PROVIDER_OPERATION_MAP_KEY_INVALID');
+        }
+        const endpoint = normalizeEndpointConfig(endpointConfig, `PROVIDER_OPERATION_${normalizedOperation}`);
+        if (!endpoint) {
+            throw new Error('PROVIDER_OPERATION_MAP_INVALID');
+        }
+        normalized[normalizedOperation] = endpoint;
+    }
+    return normalized;
+}
+
 export function normalizeProviderRegistryConfig(config: unknown): ProviderRegistryConfig {
     const raw = assertObject(config || {}, 'PROVIDER_REGISTRY');
     const normalized: ProviderRegistryConfig = {
+        service_root: raw.service_root ? validatePathLike(raw.service_root, 'PROVIDER_SERVICE_ROOT') : undefined,
+        service_roots: normalizeServiceRoots(raw.service_roots),
+        operations: normalizeOperationMap(raw.operations),
         auth: normalizeAuthConfig(raw.auth),
         endpoint: raw.endpoint ? String(raw.endpoint) : undefined,
         method: raw.method ? normalizeMethod(raw.method, 'PROVIDER_REGISTRY') : undefined,
@@ -194,6 +371,10 @@ export function normalizeFinancialPartnerInput(
 
     if (payload.api_base_url !== undefined) {
         normalized.api_base_url = String(payload.api_base_url || '').trim() || undefined;
+    }
+
+    if (payload.provider_metadata !== undefined) {
+        normalized.provider_metadata = normalizeProviderMetadata(payload.provider_metadata);
     }
 
     if (payload.status !== undefined) {

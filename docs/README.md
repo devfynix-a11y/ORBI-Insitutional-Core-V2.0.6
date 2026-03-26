@@ -12,6 +12,9 @@ This is the **Sovereign Financial Operating System** powering the ORBI ecosystem
 *   **[Multi-Tenant Merchant Architecture](./MERCHANT_ARCHITECTURE.md)**: Marketplaces, Payment Gateways, and Business Accounts.
 *   **[Reconciliation Engine](./RECONCILIATION_ENGINE.md)**: Financial Integrity & Forensic Auditing.
 *   **[Master Integration Manual](./INTEGRATION_MANUAL.md)**: The definitive technical specification.
+*   **[Provider Registry Contract](./PROVIDER_REGISTRY_CONTRACT.md)**: Admin/UI and backend contract for registry-driven providers.
+*   **[Universal Provider And Offline Gateway Status](./UNIVERSAL_PROVIDER_AND_OFFLINE_GATEWAY_STATUS.md)**: Current implementation status for routing, institutional settlements, deposit intents, and offline bridge flows.
+*   **[Agent, Merchant, and System Fee Flows](./AGENT_MERCHANT_FEE_FLOWS.md)**: How fees and commissions use `platform_fee_configs`.
 *   **[Mobile SDK Guide](./MOBILE_SDK_GUIDE.md)**: For iOS/Android developers.
 *   **[Quick Start Guide](./INTEGRATION_GUIDE.md)**: Get connected in 5 minutes.
 *   **[Vision & Philosophy](./manual.md)**: The "Why" behind ORBI.

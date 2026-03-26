@@ -42,6 +42,7 @@ CardProcessor (Core Service)
 ### Database Schema
 
 #### `card_tokens` Table
+
 Stores encrypted payment card information for users.
 
 ```sql
@@ -67,6 +68,7 @@ CREATE TABLE public.card_tokens (
 ```
 
 #### `card_transactions` Table
+
 Records all card payment processing events.
 
 ```sql
@@ -93,6 +95,7 @@ CREATE TABLE public.card_transactions (
 ```
 
 #### `merchant_card_settings` Table
+
 Configures card acceptance rules per merchant.
 
 ```sql
@@ -110,6 +113,7 @@ CREATE TABLE public.merchant_card_settings (
 ```
 
 #### `card_transaction_audit` Table
+
 Immutable audit trail for compliance and forensics.
 
 ```sql
@@ -127,6 +131,7 @@ CREATE TABLE public.card_transaction_audit (
 ```
 
 #### `card_processing_fees` Table
+
 Card network fee structure.
 
 ```sql
@@ -145,6 +150,7 @@ CREATE TABLE public.card_processing_fees (
 ## API Reference
 
 ### Base URL
+
 ```
 POST/GET /v1/cards
 ```
@@ -154,6 +160,7 @@ POST/GET /v1/cards
 **Endpoint:** `POST /v1/cards/tokenize`
 
 **Request:**
+
 ```json
 {
   "cardNumber": "4242424242424242",
@@ -172,6 +179,7 @@ POST/GET /v1/cards
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -193,6 +201,7 @@ POST/GET /v1/cards
 **Endpoint:** `GET /v1/cards`
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -217,6 +226,7 @@ POST/GET /v1/cards
 **Endpoint:** `DELETE /v1/cards/{cardTokenId}`
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -231,6 +241,7 @@ POST/GET /v1/cards
 **Endpoint:** `POST /v1/cards/authorize`
 
 **Request:**
+
 ```json
 {
   "cardTokenId": "ct_550e8400e29b41d4a716446655440000",
@@ -249,6 +260,7 @@ POST/GET /v1/cards
 ```
 
 **Response (Success):**
+
 ```json
 {
   "success": true,
@@ -266,6 +278,7 @@ POST/GET /v1/cards
 ```
 
 **Response (Declined):**
+
 ```json
 {
   "success": false,
@@ -288,6 +301,7 @@ POST/GET /v1/cards
 **Endpoint:** `POST /v1/cards/transactions/{cardTransactionId}/settle`
 
 **Request:**
+
 ```json
 {
   "sourceWalletId": "f47ac10b58cc4372b1e5430c5d1cc3e9",
@@ -296,6 +310,7 @@ POST/GET /v1/cards
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -313,6 +328,7 @@ POST/GET /v1/cards
 **Endpoint:** `POST /v1/cards/transactions/{cardTransactionId}/refund`
 
 **Request:**
+
 ```json
 {
   "reason": "Customer changed mind"
@@ -320,6 +336,7 @@ POST/GET /v1/cards
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -337,6 +354,7 @@ POST/GET /v1/cards
 ### PCI-DSS Compliance
 
 ✅ **Level 1 Readiness:**
+
 - Encrypted storage of card data (AES-256)
 - Separate KMS for key management
 - No card number logging in application logs
@@ -527,6 +545,7 @@ CVV: 123 (or 1234 for AMEX)
 ## Support & Documentation
 
 For issues or questions:
-- 📧 Email: fintech-support@orbi.io
-- 📚 Docs: https://docs.orbi.io/cards
-- 🐛 Issues: https://github.com/devfynix-a11y/issues
+
+- 📧 Email: <fintech-support@orbi.io>
+- 📚 Docs: <https://docs.orbi.io/cards>
+- 🐛 Issues: <https://github.com/devfynix-a11y/issues>

@@ -3,6 +3,9 @@ import { DataVault } from '../security/encryption.js';
 import { Audit } from '../security/audit.js';
 import { RiskEngine } from '../security/RiskEngine.js';
 import { UUID } from '../../services/utils.js';
+import { institutionalFundsService } from './InstitutionalFundsService.js';
+import { EntProcessor } from '../enterprise/wealth/EnterprisePaymentProcessor.js';
+import { platformFeeService } from './PlatformFeeService.js';
 import crypto from 'crypto';
 
 /**
@@ -82,8 +85,6 @@ export interface CardTransaction {
 }
 
 export class CardProcessor {
-  private vault = new DataVault();
-  private riskEngine = new RiskEngine();
   private readonly BIN_PATTERNS = {
     VISA: /^4[0-9]{12}(?:[0-9]{3})?$/,
     MASTERCARD: /^5[1-5][0-9]{14}$/,
@@ -113,8 +114,8 @@ export class CardProcessor {
     const fingerprint = this.generateFingerprint(cardRequest.cardNumber);
 
     // 3. ENCRYPT SENSITIVE CARD DATA (PCI-DSS)
-    const encryptedCardNumber = await this.vault.encrypt(cardRequest.cardNumber);
-    const encryptedCVV = await this.vault.encrypt(cardRequest.cvv);
+    const encryptedCardNumber = await DataVault.encrypt(cardRequest.cardNumber);
+    const encryptedCVV = await DataVault.encrypt(cardRequest.cvv);
 
     // 4. STORE TOKENIZED CARD
     const cardTokenId = `ct_${UUID.generate()}`;
@@ -148,7 +149,7 @@ export class CardProcessor {
       throw new Error(`Card tokenization failed: ${error?.message}`);
     }
 
-    await Audit.log('SECURITY', userId, 'CARD_TOKENIZED', { cardTokenId, brand, last4 });
+    await Audit.log('FINANCIAL', userId, 'CARD_TOKENIZED', { cardTokenId, brand, last4 });
 
     return this.formatCardToken(token);
   }
@@ -183,15 +184,13 @@ export class CardProcessor {
     }
 
     // 3. PERFORM FRAUD RISK ASSESSMENT
-    const riskAssessment = await this.riskEngine.assessTransactionRisk(userId, {
-      type: 'CARD_PAYMENT',
-      amount: paymentRequest.amount,
-      currency: paymentRequest.currency,
-      merchantId: paymentRequest.merchantId,
-      cardFingerprint: token.fingerprint,
+    const riskAssessment = await RiskEngine.evaluateRequest({}, {
+      userId,
+      ip: '',
+      appId: 'card_payment'
     });
 
-    if (riskAssessment.riskScore > 85) {
+    if (riskAssessment.score > 85) {
       return this.createFailedTransaction(paymentRequest, 'BLOCKED_BY_FRAUD_ENGINE', riskAssessment);
     }
 
@@ -218,8 +217,8 @@ export class CardProcessor {
         stan_number: stan,
         response_code: authResult.responseCode,
         response_message: authResult.responseMessage,
-        risk_score: riskAssessment.riskScore,
-        fraud_flags: riskAssessment.flags,
+        risk_score: riskAssessment.score,
+        fraud_flags: JSON.stringify(riskAssessment.signals || []),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         metadata: paymentRequest.metadata || {},
@@ -230,11 +229,11 @@ export class CardProcessor {
     if (txError) throw new Error(`Failed to record card transaction: ${txError.message}`);
 
     // 6. AUDIT LOG
-    await Audit.log('PAYMENT', userId, 'CARD_AUTHORIZATION', {
+    await Audit.log('FINANCIAL', userId, 'CARD_AUTHORIZATION', {
       cardTxId,
       status: cardTx.status,
       amount: paymentRequest.amount,
-      riskScore: riskAssessment.riskScore,
+      riskScore: riskAssessment.score,
     });
 
     return this.formatCardTransaction(cardTx);
@@ -242,7 +241,11 @@ export class CardProcessor {
 
   /**
    * SETTLE AUTHORIZED PAYMENT
-   * Moves funds and marks transaction as settled
+   * Conditional ledger logic based on wallet types:
+   * - External => External: No ledger, only record transaction
+   * - External => Internal: Credit ledger
+   * - Internal => External: Debit ledger
+   * - Internal => Internal: Full ledger (debit + credit + fee)
    */
   async settleCardPayment(
     cardTransactionId: string,
@@ -266,25 +269,207 @@ export class CardProcessor {
     if (fetchError || !cardTx) throw new Error('Card transaction not found');
     if (cardTx.status !== 'AUTHORIZED') throw new Error('Only authorized transactions can be settled');
 
-    // 2. MOVE FUNDS (via main transaction engine)
+    // 2. VERIFY AND DETERMINE WALLET TYPES
+    const sourceWallet = await this.getSettlementWallet(sourceWalletId, userId, true);
+    const targetWallet = await this.getSettlementWallet(targetWalletId, null, false);
+
+    // Determine wallet types (INTERNAL or EXTERNAL)
+    const sourceType = sourceWallet.wallet_type || 'INTERNAL';
+    const targetType = targetWallet.wallet_type || 'INTERNAL';
+
+    // 3. CALCULATE TRANSACTION DETAILS
+    const transactionAmount = cardTx.amount;
+    const transactionCurrency = String(cardTx.currency || '').trim().toUpperCase();
+    if (!transactionCurrency) {
+      throw new Error('CARD_SETTLEMENT_CURRENCY_REQUIRED');
+    }
+    const feeComputation = await platformFeeService.resolveFee({
+      flowCode: 'CARD_SETTLEMENT',
+      amount: transactionAmount,
+      currency: transactionCurrency,
+      providerId: cardTx.merchant_id || undefined,
+      rail: 'CARD_GATEWAY',
+      transactionType: 'CARD_SETTLEMENT',
+      metadata: {
+        card_transaction_id: cardTransactionId,
+      },
+    });
+    const transactionFee = feeComputation.serviceFee;
+    const transactionTax = feeComputation.taxAmount + feeComputation.govFeeAmount + feeComputation.stampDutyFixed;
+    const totalAmount = transactionAmount + transactionFee + transactionTax;
+    const settlementContext = {
+      service_context: 'CARD_PROCESSOR',
+      card_transaction_id: cardTransactionId,
+      card_token_id: cardTx.card_token_id,
+      authorization_code: cardTx.authorization_code,
+      rrn: cardTx.rrn,
+      stan: cardTx.stan_number,
+      source_wallet_type: sourceType,
+      target_wallet_type: targetType,
+      processor_fee_estimate: transactionFee,
+      processor_tax_estimate: transactionTax,
+      fee_config_id: feeComputation.configId || null,
+    };
+
     try {
-      const { error: updateError } = await sb
+      let financialTxId: string | null = null;
+      let movementId: string | null = null;
+      let ledgerEntriesCreated = 0;
+
+      if (sourceType === 'EXTERNAL' || targetType === 'EXTERNAL') {
+        const direction =
+          sourceType === 'EXTERNAL' && targetType === 'INTERNAL'
+            ? 'EXTERNAL_TO_INTERNAL'
+            : sourceType === 'INTERNAL' && targetType === 'EXTERNAL'
+              ? 'INTERNAL_TO_EXTERNAL'
+              : 'EXTERNAL_TO_EXTERNAL';
+
+        const movementResult = await institutionalFundsService.processMovement(userId, {
+          direction,
+          amount: transactionAmount,
+          currency: transactionCurrency,
+          providerId: cardTx.merchant_id || undefined,
+          description: `Card payment settlement for transaction ${cardTransactionId}`,
+          sourceWalletId: direction !== 'EXTERNAL_TO_INTERNAL' ? sourceWalletId : undefined,
+          targetWalletId: direction !== 'INTERNAL_TO_EXTERNAL' ? targetWalletId : undefined,
+          feeAmount: transactionFee,
+          taxAmount: transactionTax,
+          metadata: settlementContext,
+          sourceExternalRef: sourceType === 'EXTERNAL' ? sourceWalletId : undefined,
+          targetExternalRef: targetType === 'EXTERNAL' ? targetWalletId : undefined,
+          externalReference: cardTx.rrn || cardTransactionId,
+        });
+
+        financialTxId = 'transactionId' in movementResult ? movementResult.transactionId || null : null;
+        movementId = movementResult.movement?.id || null;
+        ledgerEntriesCreated = movementResult.ledgerPosted ? direction === 'EXTERNAL_TO_EXTERNAL' ? 0 : transactionFee > 0 ? 3 : 2 : 0;
+      } else {
+        const enterpriseResult = await EntProcessor.process(
+          { id: userId, user_metadata: {} } as any,
+          {
+            idempotencyKey: `card_${cardTransactionId}`,
+            referenceId: cardTx.rrn || `CARD-${cardTransactionId}`,
+            sourceWalletId,
+            targetWalletId,
+            amount: transactionAmount,
+            currency: transactionCurrency,
+            description: `Card payment settlement for transaction ${cardTransactionId}`,
+            type: 'INTERNAL_TRANSFER',
+            metadata: settlementContext,
+          } as any,
+        );
+
+        if (!enterpriseResult?.success) {
+          throw new Error(enterpriseResult?.error || 'CARD_ENTERPRISE_SETTLEMENT_FAILED');
+        }
+
+        financialTxId =
+          enterpriseResult?.transaction?.id ||
+          enterpriseResult?.data?.transaction?.id ||
+          enterpriseResult?.id ||
+          null;
+        ledgerEntriesCreated = 0;
+      }
+
+      const settledAt = new Date().toISOString();
+      const { error: cardUpdateError } = await sb
         .from('card_transactions')
         .update({
           status: 'SETTLED',
-          settled_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          settled_at: settledAt,
+          updated_at: settledAt,
+          metadata: {
+            ...(cardTx.metadata || {}),
+            ...settlementContext,
+            settlement_transaction_id: financialTxId,
+            external_movement_id: movementId,
+          },
         })
         .eq('id', cardTransactionId);
 
-      if (updateError) throw updateError;
+      if (cardUpdateError) throw cardUpdateError;
 
-      await Audit.log('PAYMENT', userId, 'CARD_SETTLEMENT_COMPLETED', { cardTxId: cardTransactionId });
-      return { success: true, cardTxId: cardTransactionId, status: 'SETTLED' };
+      await Audit.log('FINANCIAL', userId, 'CARD_SETTLEMENT_COMPLETED', {
+        cardTxId: cardTransactionId,
+        financialTxId,
+        movementId,
+        amount: transactionAmount,
+        fee: transactionFee,
+        tax: transactionTax,
+        sourceWallet: sourceWalletId,
+        sourceWalletType: sourceType,
+        targetWallet: targetWalletId,
+        targetWalletType: targetType,
+        ledgerEntriesCreated,
+        rrn: cardTx.rrn,
+        status: 'SETTLED',
+      });
+
+      console.info(`[CardProcessor] ✅ Settlement completed: ${financialTxId || movementId || cardTransactionId} (${sourceType} => ${targetType})`);
+
+      return {
+        success: true,
+        cardTxId: cardTransactionId,
+        financialTxId,
+        movementId,
+        status: 'SETTLED',
+        amount: transactionAmount,
+        fee: transactionFee,
+        tax: transactionTax,
+        totalSettled: totalAmount,
+        sourceWalletType: sourceType,
+        targetWalletType: targetType,
+        ledgerEntriesCreated,
+        settledAt,
+      };
     } catch (error: any) {
-      await Audit.log('SECURITY', userId, 'CARD_SETTLEMENT_FAILED', { error: error.message });
+      await Audit.log('SECURITY', userId, 'CARD_SETTLEMENT_FAILED', {
+        cardTxId: cardTransactionId,
+        error: error.message,
+        sourceWalletType: sourceType,
+        targetWalletType: targetType,
+        timestamp: new Date().toISOString(),
+      });
       throw error;
     }
+  }
+
+  private async getSettlementWallet(walletId: string, ownerUserId?: string | null, requireOwnership: boolean = false) {
+    const sb = getSupabase();
+    if (!sb) throw new Error('Database connection required');
+
+    let walletQuery = sb
+      .from('wallets')
+      .select('id, user_id, balance, wallet_type, currency')
+      .eq('id', walletId);
+
+    if (requireOwnership && ownerUserId) {
+      walletQuery = walletQuery.eq('user_id', ownerUserId);
+    }
+
+    const { data: wallet, error } = await walletQuery.maybeSingle();
+    if (error) throw new Error(error.message);
+    if (wallet) return wallet;
+
+    let vaultQuery = sb
+      .from('platform_vaults')
+      .select('id, user_id, balance, currency, vault_role')
+      .eq('id', walletId);
+
+    if (requireOwnership && ownerUserId) {
+      vaultQuery = vaultQuery.eq('user_id', ownerUserId);
+    }
+
+    const { data: vault, error: vaultError } = await vaultQuery.maybeSingle();
+    if (vaultError) throw new Error(vaultError.message);
+    if (vault) {
+      return {
+        ...vault,
+        wallet_type: 'INTERNAL',
+      };
+    }
+
+    throw new Error(requireOwnership ? 'Source wallet not found or unauthorized' : 'Target wallet not found');
   }
 
   /**
@@ -332,7 +517,7 @@ export class CardProcessor {
 
     if (error) throw new Error(`Refund failed: ${error.message}`);
 
-    await Audit.log('PAYMENT', userId, 'CARD_REFUND_PROCESSED', { originalTxId: cardTransactionId, refundId });
+    await Audit.log('FINANCIAL', userId, 'CARD_REFUND_PROCESSED', { originalTxId: cardTransactionId, refundId });
 
     return { success: true, refundId, originalAmount: originalTx.amount };
   }
@@ -475,8 +660,8 @@ export class CardProcessor {
       status: 'DECLINED',
       responseCode,
       responseMessage: 'Transaction blocked by fraud detection',
-      riskScore: riskAssessment.riskScore,
-      fraudFlags: riskAssessment.flags,
+      riskScore: riskAssessment.score || 0,
+      fraudFlags: riskAssessment.signals?.map((s: any) => s.type) || [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

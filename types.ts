@@ -640,6 +640,315 @@ export interface ProviderAuthConfig extends RestEndpointConfig {
     cache_ttl_seconds?: number;
 }
 
+export type RailType =
+    | 'MOBILE_MONEY'
+    | 'BANK'
+    | 'CARD_GATEWAY'
+    | 'CRYPTO'
+    | 'WALLET';
+
+export type MoneyOperation =
+    | 'AUTH'
+    | 'ACCOUNT_LOOKUP'
+    | 'COLLECTION_REQUEST'
+    | 'COLLECTION_STATUS'
+    | 'DISBURSEMENT_REQUEST'
+    | 'DISBURSEMENT_STATUS'
+    | 'PAYOUT_REQUEST'
+    | 'PAYOUT_STATUS'
+    | 'REVERSAL_REQUEST'
+    | 'REVERSAL_STATUS'
+    | 'BALANCE_INQUIRY'
+    | 'TRANSACTION_LOOKUP'
+    | 'WEBHOOK_VERIFY'
+    | 'BENEFICIARY_VALIDATE';
+
+export interface UnifiedPaymentIntent {
+    intentId: string;
+    tenantId?: string;
+    rail: RailType;
+    providerCode?: string;
+    operation: MoneyOperation;
+    countryCode?: string;
+    currency: string;
+    amount?: string;
+    reference: string;
+    description?: string;
+    source?: {
+        walletId?: string;
+        msisdn?: string;
+        bankAccount?: string;
+        accountRef?: string;
+    };
+    destination?: {
+        walletId?: string;
+        msisdn?: string;
+        bankAccount?: string;
+        merchantCode?: string;
+        accountRef?: string;
+    };
+    customer?: {
+        fullName?: string;
+        msisdn?: string;
+        email?: string;
+    };
+    metadata?: Record<string, unknown>;
+}
+
+export interface ProviderResolutionInput {
+    rail: RailType;
+    operation: MoneyOperation;
+    countryCode?: string;
+    currency?: string;
+    tenantId?: string;
+    preferredProviderCode?: string;
+    preferredProviderId?: string;
+}
+
+export type OfflineMessageType =
+    | 'APP_OFFLINE_REQUEST'
+    | 'APP_OFFLINE_CONFIRM'
+    | 'BALANCE_CHECK'
+    | 'MINI_STATEMENT'
+    | 'INTERNAL_TRANSFER'
+    | 'MERCHANT_PAYMENT'
+    | 'WITHDRAWAL_REQUEST'
+    | 'CHALLENGE_RESPONSE'
+    | 'HELP'
+    | 'UNKNOWN';
+
+export type OfflineSessionStatus =
+    | 'RECEIVED'
+    | 'PARSED'
+    | 'VALIDATED'
+    | 'PENDING_CONFIRMATION'
+    | 'FORWARDED_TO_ORBI'
+    | 'CHALLENGE_SENT'
+    | 'CONFIRMED'
+    | 'SUCCESS'
+    | 'FAILED'
+    | 'EXPIRED'
+    | 'REJECTED';
+
+export interface ResolvedProviderConfig {
+    providerId: string;
+    providerCode: string;
+    providerName: string;
+    rail: RailType;
+    operation: MoneyOperation;
+    authType?: string;
+    baseUrl?: string;
+    timeoutMs?: number;
+    requestTemplate?: Record<string, unknown>;
+    responseMapping?: Record<string, unknown>;
+    extraConfig?: Record<string, unknown>;
+}
+
+export type ProviderGroup = 'Mobile' | 'Bank' | 'Gateways' | 'Crypto';
+export type ProviderCheckoutMode =
+    | 'redirect'
+    | 'embedded'
+    | 'tokenized'
+    | 'server_to_server'
+    | 'ussd'
+    | 'stk_push'
+    | 'manual';
+export type ProviderChannel =
+    | 'bank_transfer'
+    | 'bank_account'
+    | 'mobile_money'
+    | 'card'
+    | 'paypal'
+    | 'crypto'
+    | 'ussd'
+    | 'qr'
+    | 'checkout_link';
+
+export interface FinancialPartnerMetadata {
+    group?: ProviderGroup | string;
+    provider_group?: ProviderGroup | string;
+    rail?: RailType | string;
+    brand_name?: string;
+    display_name?: string;
+    display_icon?: string;
+    icon?: string;
+    color?: string;
+    checkout_mode?: ProviderCheckoutMode | string;
+    channels?: ProviderChannel[] | string[];
+    sort_order?: number;
+    region?: string;
+    currency?: string;
+    countries?: string[];
+    capabilities?: string[];
+    operations?: MoneyOperation[] | string[];
+    routing_priority?: number;
+    provider_code?: string;
+    supports_webhooks?: boolean;
+    supports_polling?: boolean;
+    [key: string]: any;
+}
+
+export interface FinancialPartner {
+    id: string;
+    name: string;
+    /**
+     * Legacy field kept for backward compatibility only.
+     * Dynamic integrations should use `type`, `logic_type`, and `mapping_config`.
+     */
+    provider_type?: string;
+    type?: 'mobile_money' | 'bank' | 'card' | 'crypto';
+    icon?: string;
+    color?: string;
+    status: 'ACTIVE' | 'INACTIVE' | 'MAINTENANCE';
+    client_id?: string;
+    client_secret?: string;
+    api_key?: string;
+    api_base_url?: string;
+    merchant_id?: string;
+    webhook_secret?: string;
+    connection_secret?: string;
+    logic_type?: 'REGISTRY' | 'GENERIC_REST' | 'SPECIALIZED';
+    token_cache?: string;
+    token_expiry?: number;
+    provider_metadata?: FinancialPartnerMetadata;
+    mapping_config?: ProviderRegistryConfig | Record<string, any>;
+    supported_currencies?: string[];
+    provider_fee?: number;
+    fixed_fee?: number;
+    settlement_fee?: number;
+    created_at?: string;
+    updated_at?: string;
+    created_by?: string;
+    updated_by?: string;
+}
+
+export type InstitutionalAccountRole =
+    | 'MAIN_COLLECTION'
+    | 'FEE_COLLECTION'
+    | 'TAX_COLLECTION'
+    | 'TRANSFER_SAVINGS';
+export type PlatformFeeFlowCode =
+    | 'CORE_TRANSACTION'
+    | 'INTERNAL_TRANSFER'
+    | 'EXTERNAL_PAYMENT'
+    | 'WITHDRAWAL'
+    | 'DEPOSIT'
+    | 'EXTERNAL_TO_INTERNAL'
+    | 'INTERNAL_TO_EXTERNAL'
+    | 'EXTERNAL_TO_EXTERNAL'
+    | 'CARD_SETTLEMENT'
+    | 'GATEWAY_SETTLEMENT'
+    | 'FX_CONVERSION'
+    | 'TENANT_SETTLEMENT_PAYOUT'
+    | 'MERCHANT_PAYMENT'
+    | 'AGENT_CASH_DEPOSIT'
+    | 'AGENT_CASH_WITHDRAWAL'
+    | 'AGENT_REFERRAL_COMMISSION'
+    | 'AGENT_CASH_COMMISSION'
+    | 'SYSTEM_OPERATION';
+export type InstitutionalAccountStatus = 'ACTIVE' | 'INACTIVE';
+export type ExternalFundMovementDirection =
+    | 'INTERNAL_TO_EXTERNAL'
+    | 'EXTERNAL_TO_INTERNAL'
+    | 'EXTERNAL_TO_EXTERNAL';
+export type ExternalFundMovementStatus =
+    | 'previewed'
+    | 'initiated'
+    | 'processing'
+    | 'completed'
+    | 'failed'
+    | 'recorded'
+    | 'reversed';
+
+export interface InstitutionalPaymentAccount {
+    id: string;
+    role: InstitutionalAccountRole;
+    provider_id?: string | null;
+    bank_name: string;
+    account_name: string;
+    account_number: string;
+    currency: string;
+    country_code?: string | null;
+    status: InstitutionalAccountStatus;
+    is_primary?: boolean;
+    metadata?: Record<string, any>;
+    created_at?: string;
+    updated_at?: string;
+}
+
+export interface PlatformFeeConfig {
+    id: string;
+    name: string;
+    flow_code: PlatformFeeFlowCode | string;
+    transaction_type?: string | null;
+    operation_type?: string | null;
+    direction?: string | null;
+    rail?: RailType | string | null;
+    channel?: string | null;
+    provider_id?: string | null;
+    currency?: string | null;
+    country_code?: string | null;
+    percentage_rate?: number;
+    fixed_amount?: number;
+    minimum_fee?: number;
+    maximum_fee?: number | null;
+    tax_rate?: number;
+    gov_fee_rate?: number;
+    stamp_duty_fixed?: number;
+    priority?: number;
+    status?: 'ACTIVE' | 'INACTIVE';
+    metadata?: Record<string, any>;
+    created_at?: string;
+    updated_at?: string;
+}
+
+export interface PlatformFeeComputation {
+    flowCode: string;
+    configId?: string | null;
+    configName?: string | null;
+    currency: string;
+    amount: number;
+    percentageRate: number;
+    fixedAmount: number;
+    minimumFee: number;
+    maximumFee?: number | null;
+    taxRate: number;
+    govFeeRate: number;
+    stampDutyFixed: number;
+    percentageFee: number;
+    serviceFee: number;
+    taxAmount: number;
+    govFeeAmount: number;
+    totalFee: number;
+    netAmount: number;
+    metadata?: Record<string, any>;
+}
+
+export interface ExternalFundMovement {
+    id: string;
+    user_id: string;
+    direction: ExternalFundMovementDirection;
+    status: ExternalFundMovementStatus;
+    provider_id?: string | null;
+    institutional_source_account_id?: string | null;
+    institutional_target_account_id?: string | null;
+    transaction_id?: string | null;
+    source_wallet_id?: string | null;
+    target_wallet_id?: string | null;
+    gross_amount: number;
+    net_amount: number;
+    fee_amount?: number;
+    tax_amount?: number;
+    currency: string;
+    description?: string;
+    external_reference?: string | null;
+    source_external_ref?: string | null;
+    target_external_ref?: string | null;
+    metadata?: Record<string, any>;
+    created_at?: string;
+    updated_at?: string;
+}
+
 export interface ProviderCallbackConfig {
     reference_field?: string;
     status_field?: string;
@@ -652,6 +961,9 @@ export interface ProviderCallbackConfig {
 }
 
 export interface ProviderRegistryConfig {
+    service_root?: string;
+    service_roots?: Record<string, string>;
+    operations?: Partial<Record<MoneyOperation, RestEndpointConfig>>;
     auth?: ProviderAuthConfig;
     endpoint?: string;
     method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -668,26 +980,6 @@ export interface ProviderRegistryConfig {
     check_status?: RestEndpointConfig;
     balance?: RestEndpointConfig;
     callback?: ProviderCallbackConfig;
-}
-
-export interface FinancialPartner {
-    id: string;
-    name: string;
-    type: 'mobile_money' | 'bank' | 'card' | 'crypto';
-    icon: string;
-    color: string;
-    client_id?: string;
-    client_secret?: string;
-    api_base_url?: string;
-    webhook_secret?: string;
-    status: 'ACTIVE' | 'INACTIVE';
-    logic_type: 'REGISTRY' | 'GENERIC_REST' | 'SPECIALIZED';
-    mapping_config?: ProviderRegistryConfig;
-    token_cache?: string;
-    token_expiry?: number;
-    created_at: string;
-    connection_secret?: string;
-    provider_metadata?: any;
 }
 
 export interface TransferTaxRule {

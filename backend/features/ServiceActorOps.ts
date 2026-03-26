@@ -2,6 +2,7 @@ import { getAdminSupabase, getSupabase } from '../supabaseClient.js';
 import { ConfigClient } from '../infrastructure/RulesConfigClient.js';
 import { DataVault } from '../security/encryption.js';
 import { RegulatoryService } from '../../ledger/regulatoryService.js';
+import { platformFeeService } from '../payments/PlatformFeeService.js';
 import { UUID } from '../../services/utils.js';
 import type { AuthService } from '../../iam/authService.js';
 import type { User, UserRole } from '../../types.js';
@@ -910,31 +911,38 @@ class ServiceActorOperations {
         const sourceAmount = Number(
             typeof transaction.amount === 'string' ? await DataVault.decrypt(transaction.amount) : transaction.amount || 0,
         );
-        const config = await this.getCommissionConfig();
-
         let rate = 0;
         let fixedAmount = 0;
         let effectiveUntil: string | null = null;
+        const txCurrency = String(transaction.currency || '').trim().toUpperCase();
+        if (!txCurrency) {
+            throw new Error(`COMMISSION_CURRENCY_REQUIRED:${transaction.id}`);
+        }
+        const cashDirection =
+            transaction?.metadata?.cash_direction === 'withdrawal' ? 'withdrawal' : 'deposit';
+        const commissionFlowCode =
+            commissionMode === 'AGENT_REFERRAL' ? 'AGENT_REFERRAL_COMMISSION' : 'AGENT_CASH_COMMISSION';
 
         if (commissionMode === 'AGENT_REFERRAL') {
-            rate = Number(config.agent_referral?.rate || 0);
-            fixedAmount = Number(config.agent_referral?.fixed_amount || 0);
             effectiveUntil = referralLink?.commission_expires_at || null;
-        } else {
-            const direction = transaction?.metadata?.cash_direction === 'withdrawal' ? 'withdrawal' : 'deposit';
-            rate = Number(
-                direction === 'withdrawal'
-                    ? config.agent_cash?.withdrawal_rate || 0
-                    : config.agent_cash?.deposit_rate || 0,
-            );
-            fixedAmount = Number(
-                direction === 'withdrawal'
-                    ? config.agent_cash?.withdrawal_fixed_amount || 0
-                    : config.agent_cash?.deposit_fixed_amount || 0,
-            );
         }
 
-        const commissionAmount = Math.max(0, Number((sourceAmount * rate + fixedAmount).toFixed(2)));
+        const feeResult = await platformFeeService.resolveFee({
+            flowCode: commissionFlowCode,
+            amount: sourceAmount,
+            currency: txCurrency,
+            direction: cashDirection,
+            transactionType: String(transaction?.type || '').trim().toUpperCase(),
+            metadata: {
+                service_context: transaction?.metadata?.service_context || null,
+                source_transaction_id: transaction.id,
+                commission_mode: commissionMode,
+            },
+        });
+
+        rate = feeResult.percentageRate;
+        fixedAmount = feeResult.fixedAmount;
+        const commissionAmount = Math.max(0, Number(feeResult.totalFee.toFixed(2)));
         if (commissionAmount <= 0) {
             return;
         }
@@ -946,7 +954,7 @@ class ServiceActorOperations {
             source_transaction_id: transaction.id,
             commission_type: commissionMode,
             amount: commissionAmount,
-            currency: transaction.currency || 'TZS',
+            currency: txCurrency,
             rate,
             fixed_amount: fixedAmount,
             status: this.isSettledStatus(transaction.status) ? 'ready_for_payout' : 'pending_source_settlement',
@@ -957,6 +965,8 @@ class ServiceActorOperations {
                 source_transaction_type: transaction.type,
                 source_context: transaction?.metadata?.service_context || null,
                 referral_link_id: referralLink?.id || null,
+                fee_config_id: feeResult.configId || null,
+                fee_flow_code: feeResult.flowCode,
             },
             updated_at: new Date().toISOString(),
         };

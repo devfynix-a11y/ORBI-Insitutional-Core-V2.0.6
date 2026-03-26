@@ -50,6 +50,9 @@ import { Treasury } from './enterprise/treasuryService.js';
 import { RiskComplianceEngine } from './security/RiskComplianceEngine.js';
 import { PartnerRegistry } from './admin/partnerRegistry.js';
 import { ServiceActorOps } from './features/ServiceActorOps.js';
+import { institutionalFundsService } from './payments/InstitutionalFundsService.js';
+import { platformFeeService } from './payments/PlatformFeeService.js';
+import { offlineGatewayService } from './offline/OfflineGatewayService.js';
 
 const internalBackgroundJobsEnabled =
     process.env.ORBI_ENABLE_INTERNAL_BACKGROUND_JOBS === 'true';
@@ -663,6 +666,50 @@ class OrbiServer {
                 '',
             logic_type: payload.logic_type || 'REGISTRY',
         });
+    }
+
+    async getInstitutionalPaymentAccounts(filters?: any) {
+        return institutionalFundsService.listInstitutionalAccounts(filters);
+    }
+
+    async getPlatformFeeConfigs(filters?: any) {
+        return platformFeeService.listConfigs(filters);
+    }
+
+    async upsertPlatformFeeConfig(payload: any, actorId: string, configId?: string) {
+        return platformFeeService.upsertConfig(payload, actorId, configId);
+    }
+
+    async upsertInstitutionalPaymentAccount(payload: any, actorId: string, accountId?: string) {
+        return institutionalFundsService.upsertInstitutionalAccount(payload, actorId, accountId);
+    }
+
+    async previewExternalFundMovement(userId: string, payload: any) {
+        return institutionalFundsService.previewMovement(userId, payload);
+    }
+
+    async createIncomingDepositIntent(userId: string, payload: any) {
+        return institutionalFundsService.createIncomingDepositIntent(userId, payload);
+    }
+
+    async processExternalFundMovement(userId: string, payload: any) {
+        return institutionalFundsService.processMovement(userId, payload);
+    }
+
+    async getUserExternalFundMovements(userId: string, limit?: number, offset?: number) {
+        return institutionalFundsService.listMovements(userId, limit, offset);
+    }
+
+    async getUserExternalFundMovementById(userId: string, movementId: string) {
+        return institutionalFundsService.getMovementById(userId, movementId);
+    }
+
+    async processOfflineGatewayRequest(payload: any) {
+        return offlineGatewayService.handleInboundRequest(payload);
+    }
+
+    async processOfflineGatewayConfirmation(payload: any) {
+        return offlineGatewayService.handleConfirmation(payload);
     }
 
     // --- DATA & MESSAGING ---

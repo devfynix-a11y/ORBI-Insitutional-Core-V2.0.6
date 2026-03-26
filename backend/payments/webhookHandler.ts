@@ -1,13 +1,14 @@
 
 import { TransactionService } from '../../ledger/transactionService.js';
 import { Audit } from '../security/audit.js';
-import { getSupabase } from '../../services/supabaseClient.js';
+import { getAdminSupabase, getSupabase } from '../../services/supabaseClient.js';
 import { RegulatoryService } from '../ledger/regulatoryService.js';
 import { UUID } from '../../services/utils.js';
 import { ProviderFactory } from './providers/ProviderFactory.js';
 import crypto from 'crypto';
 import { DataVault } from '../security/encryption.js';
 import { RedisClusterFactory } from '../infrastructure/RedisClusterFactory.js';
+import { institutionalFundsService } from './InstitutionalFundsService.js';
 
 /**
  * SOVEREIGN WEBHOOK LISTENER (V4.0)
@@ -83,7 +84,7 @@ class WebhookHandler {
         rawPayload?: string,
         explicitEventId?: string,
     ) {
-        const sb = getSupabase();
+        const sb = getAdminSupabase() || getSupabase();
         if (!sb) return;
 
         // 1. Resolve Partner Metadata for Parsing Logic
@@ -130,15 +131,36 @@ class WebhookHandler {
         
         console.info(`[Webhook] Signal for ${reference} from ${partner.name}: ${status}`);
 
-        // 2. Fetch the pending transaction
+        // 2. Try the standard transaction trace first
         const { data: tx } = await sb.from('transactions')
             .select('*')
             .or(`id.eq.${reference},reference_id.eq.${reference}`)
-            .single();
+            .maybeSingle();
         
         if (!tx) {
-            console.error(`[Webhook] TRACE_LOST: Unknown tx ${reference}`);
-            return;
+            try {
+                const depositResult = await institutionalFundsService.handleWebhookDepositIntent(
+                    partnerId,
+                    reference,
+                    status,
+                    message,
+                    providerEventId,
+                    payload,
+                );
+                await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_PROCESSED', {
+                    provider: partner.name,
+                    reference,
+                    status,
+                    providerEventId,
+                    traceId: UUID.generate(),
+                    route: 'EXTERNAL_DEPOSIT_INTENT',
+                    movementId: (depositResult as any)?.movement?.id || null,
+                });
+                return depositResult;
+            } catch (depositError: any) {
+                console.error(`[Webhook] TRACE_LOST: Unknown tx ${reference}`);
+                throw depositError;
+            }
         }
 
         const txId = tx.id;

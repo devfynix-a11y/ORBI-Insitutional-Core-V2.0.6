@@ -1,11 +1,11 @@
 import axios from 'axios';
 import { ConfigClient } from '../infrastructure/RulesConfigClient.js';
+import { platformFeeService } from '../payments/PlatformFeeService.js';
 
 export class FXEngine {
     private static ratesCache: Record<string, number> = {};
     private static lastFetch: number = 0;
     private static CACHE_TTL = 3600000; // 1 hour
-    private static CONVERSION_FEE_PERCENTAGE = 0.005; // 0.5% fee
 
     /**
      * Fetch exchange rates.
@@ -82,19 +82,36 @@ export class FXEngine {
      * This is used for actual user transactions/pricing.
      */
     static async processConversion(amount: number, fromCurrency: string, toCurrency: string) {
-        const rate = await this.getRate(fromCurrency, toCurrency);
+        const normalizedFromCurrency = fromCurrency.toUpperCase();
+        const normalizedToCurrency = toCurrency.toUpperCase();
+        const rate = await this.getRate(normalizedFromCurrency, normalizedToCurrency);
         const rawConvertedAmount = amount * rate;
-        
-        // Add small conversion fee (e.g., 0.5% + fixed cent equivalent)
-        const fee = (rawConvertedAmount * this.CONVERSION_FEE_PERCENTAGE);
-        const finalAmount = rawConvertedAmount - fee;
+        const feeConfig = await platformFeeService.resolveFee({
+            flowCode: 'FX_CONVERSION',
+            amount,
+            currency: normalizedFromCurrency,
+            transactionType: 'FX_CONVERSION',
+            metadata: {
+                from_currency: normalizedFromCurrency,
+                to_currency: normalizedToCurrency,
+                fee_base_currency: normalizedFromCurrency,
+            },
+        });
+        const fee = feeConfig.totalFee;
+        const feeInTargetCurrency =
+            normalizedToCurrency === normalizedFromCurrency
+                ? fee
+                : fee * (await this.getRate(normalizedFromCurrency, normalizedToCurrency));
+        const finalAmount = rawConvertedAmount - feeInTargetCurrency;
 
         return {
             originalAmount: amount,
-            fromCurrency: fromCurrency.toUpperCase(),
-            toCurrency: toCurrency.toUpperCase(),
+            fromCurrency: normalizedFromCurrency,
+            toCurrency: normalizedToCurrency,
             exchangeRate: rate,
             fee: Number(fee.toFixed(4)),
+            feeCurrency: normalizedFromCurrency,
+            feeInTargetCurrency: Number(feeInTargetCurrency.toFixed(4)),
             finalAmount: Number(finalAmount.toFixed(4))
         };
     }

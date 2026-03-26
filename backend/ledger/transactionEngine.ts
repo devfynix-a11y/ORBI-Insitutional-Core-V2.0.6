@@ -38,7 +38,12 @@ export class BankingEngineService {
             TransactionStateMachine.transition(txId, 'created', 'created', { intent });
 
             // 2. Calculate Regulatory Fees
-            const fees = await RegulatoryService.calculateFees(amount, type);
+            const fees = await RegulatoryService.calculateFees(
+                amount,
+                type,
+                currency || intent.currency,
+                { metadata: intent.metadata, category: intent.category },
+            );
 
             // 3. Resolve Ledger Legs (Only if not held for review)
             const shouldSkipLegs = statusOverride === 'held_for_review';
@@ -384,7 +389,7 @@ export class BankingEngineService {
                         transactionId: txId,
                         walletId: fxClearingId,
                         type: 'DEBIT',
-                        amount: fxDetails.finalAmount + fxDetails.fee,
+                        amount: fxDetails.finalAmount + (fxDetails.feeInTargetCurrency || fxDetails.fee || 0),
                         currency: targetCurrency,
                         description: `FX Clearing (Target): ${sourceCurrency} -> ${targetCurrency}`,
                         timestamp: new Date().toISOString()
@@ -408,7 +413,7 @@ export class BankingEngineService {
                         walletId: feeCollectorId,
                         type: 'CREDIT',
                         amount: fxDetails.fee,
-                        currency: targetCurrency,
+                        currency: fxDetails.feeCurrency || targetCurrency,
                         description: `FX Fee Collection: ${txId}`,
                         timestamp: new Date().toISOString()
                     });
@@ -476,7 +481,7 @@ export class BankingEngineService {
                     transactionId: txId,
                     walletId: fxClearingId,
                     type: 'DEBIT',
-                    amount: fxDetails.finalAmount + fxDetails.fee,
+                    amount: fxDetails.finalAmount + (fxDetails.feeInTargetCurrency || fxDetails.fee || 0),
                     currency: targetCurrency,
                     description: `FX Clearing (Target): ${sourceCurrency} -> ${targetCurrency}`,
                     timestamp: new Date().toISOString()
@@ -500,7 +505,7 @@ export class BankingEngineService {
                     walletId: feeCollectorId,
                     type: 'CREDIT',
                     amount: fxDetails.fee,
-                    currency: targetCurrency,
+                    currency: fxDetails.feeCurrency || targetCurrency,
                     description: `FX Fee Collection: ${txId}`,
                     timestamp: new Date().toISOString()
                 });

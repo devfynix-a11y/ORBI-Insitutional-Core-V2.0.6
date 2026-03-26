@@ -7,7 +7,7 @@ import { ProviderFactory } from './providers/ProviderFactory.js';
  * ------------------------------
  * Orchestrator node using provider-registry driven execution.
  */
-class GatewayService {
+export class GatewayService {
     
     /**
      * INITIATE STK PUSH (CASH-IN)

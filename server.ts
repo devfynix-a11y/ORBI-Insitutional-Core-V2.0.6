@@ -49,6 +49,8 @@ import { OTPService } from './backend/security/otpService.js';
 import { Sessions } from './backend/src/modules/session/session.service.js';
 import { Messaging } from './backend/features/MessagingService.js';
 import { ServiceActorOps } from './backend/features/ServiceActorOps.js';
+import gatewayRoutes from './backend/payments/gatewayRoutes.js';
+import { settlementScheduler } from './backend/payments/settlementScheduler.js';
 
 // Helper for Gemini calls with retry logic
 async function callGeminiWithRetry(ai: GoogleGenAI, params: any, retries = 3, delay = 1000): Promise<any> {
@@ -938,6 +940,24 @@ internal.get('/messages/queued', async (req, res) => {
     }
 });
 
+internal.post('/offline/requests', async (req, res) => {
+    try {
+        const result = await LogicCore.processOfflineGatewayRequest(req.body);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+internal.post('/offline/confirmations', async (req, res) => {
+    try {
+        const result = await LogicCore.processOfflineGatewayConfirmation(req.body);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
 /**
  * 10. UPDATE MESSAGE STATUS
  * Marks a message as sent or failed.
@@ -973,6 +993,128 @@ internal.get('/email/verify', async (req, res) => {
 });
 
 app.use('/api/internal', internal);
+
+const InstitutionalAccountSchema = z.object({
+    role: z.enum(['MAIN_COLLECTION', 'FEE_COLLECTION', 'TAX_COLLECTION', 'TRANSFER_SAVINGS']),
+    providerId: z.string().uuid().optional(),
+    bankName: z.string().min(1),
+    accountName: z.string().min(1),
+    accountNumber: z.string().min(1),
+    currency: z.string().length(3).optional(),
+    countryCode: z.string().min(2).max(3).optional(),
+    status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+    isPrimary: z.boolean().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const ExternalFundMovementSchema = z.object({
+    direction: z.enum(['INTERNAL_TO_EXTERNAL', 'EXTERNAL_TO_INTERNAL', 'EXTERNAL_TO_EXTERNAL']),
+    amount: z.coerce.number().positive(),
+    currency: z.string().length(3).optional(),
+    providerId: z.string().uuid().optional(),
+    rail: z.enum(['MOBILE_MONEY', 'BANK', 'CARD_GATEWAY', 'CRYPTO', 'WALLET']).optional(),
+    countryCode: z.string().min(2).max(3).optional(),
+    operation: z.enum([
+        'AUTH',
+        'ACCOUNT_LOOKUP',
+        'COLLECTION_REQUEST',
+        'COLLECTION_STATUS',
+        'DISBURSEMENT_REQUEST',
+        'DISBURSEMENT_STATUS',
+        'PAYOUT_REQUEST',
+        'PAYOUT_STATUS',
+        'REVERSAL_REQUEST',
+        'REVERSAL_STATUS',
+        'BALANCE_INQUIRY',
+        'TRANSACTION_LOOKUP',
+        'WEBHOOK_VERIFY',
+        'BENEFICIARY_VALIDATE',
+    ]).optional(),
+    preferredProviderCode: z.string().optional(),
+    description: z.string().optional(),
+    sourceWalletId: z.string().uuid().optional(),
+    targetWalletId: z.string().uuid().optional(),
+    sourceInstitutionalAccountId: z.string().uuid().optional(),
+    targetInstitutionalAccountId: z.string().uuid().optional(),
+    externalReference: z.string().optional(),
+    sourceExternalRef: z.string().optional(),
+    targetExternalRef: z.string().optional(),
+    feeAmount: z.coerce.number().min(0).optional(),
+    taxAmount: z.coerce.number().min(0).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const IncomingDepositIntentSchema = ExternalFundMovementSchema.omit({ direction: true }).extend({
+    targetWalletId: z.string().uuid(),
+});
+
+const ProviderRoutingRuleSchema = z.object({
+    rail: z.enum(['MOBILE_MONEY', 'BANK', 'CARD_GATEWAY', 'CRYPTO', 'WALLET']),
+    countryCode: z.string().min(2).max(3).optional(),
+    currency: z.string().length(3).optional(),
+    operationCode: z.enum([
+        'AUTH',
+        'ACCOUNT_LOOKUP',
+        'COLLECTION_REQUEST',
+        'COLLECTION_STATUS',
+        'DISBURSEMENT_REQUEST',
+        'DISBURSEMENT_STATUS',
+        'PAYOUT_REQUEST',
+        'PAYOUT_STATUS',
+        'REVERSAL_REQUEST',
+        'REVERSAL_STATUS',
+        'BALANCE_INQUIRY',
+        'TRANSACTION_LOOKUP',
+        'WEBHOOK_VERIFY',
+        'BENEFICIARY_VALIDATE',
+    ]),
+    providerId: z.string().uuid(),
+    priority: z.coerce.number().int().min(1).optional(),
+    status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+    conditions: z.record(z.string(), z.unknown()).optional(),
+});
+
+const PlatformFeeConfigSchema = z.object({
+    name: z.string().min(1),
+    flowCode: z.enum([
+        'CORE_TRANSACTION',
+        'INTERNAL_TRANSFER',
+        'EXTERNAL_PAYMENT',
+        'WITHDRAWAL',
+        'DEPOSIT',
+        'EXTERNAL_TO_INTERNAL',
+        'INTERNAL_TO_EXTERNAL',
+        'EXTERNAL_TO_EXTERNAL',
+        'CARD_SETTLEMENT',
+        'GATEWAY_SETTLEMENT',
+        'FX_CONVERSION',
+        'TENANT_SETTLEMENT_PAYOUT',
+        'MERCHANT_PAYMENT',
+        'AGENT_CASH_DEPOSIT',
+        'AGENT_CASH_WITHDRAWAL',
+        'AGENT_REFERRAL_COMMISSION',
+        'AGENT_CASH_COMMISSION',
+        'SYSTEM_OPERATION',
+    ]),
+    transactionType: z.string().optional(),
+    operationType: z.string().optional(),
+    direction: z.string().optional(),
+    rail: z.enum(['MOBILE_MONEY', 'BANK', 'CARD_GATEWAY', 'CRYPTO', 'WALLET']).optional(),
+    channel: z.string().optional(),
+    providerId: z.string().uuid().optional(),
+    currency: z.string().length(3).optional(),
+    countryCode: z.string().min(2).max(3).optional(),
+    percentageRate: z.coerce.number().min(0).optional(),
+    fixedAmount: z.coerce.number().min(0).optional(),
+    minimumFee: z.coerce.number().min(0).optional(),
+    maximumFee: z.coerce.number().min(0).optional(),
+    taxRate: z.coerce.number().min(0).optional(),
+    govFeeRate: z.coerce.number().min(0).optional(),
+    stampDutyFixed: z.coerce.number().min(0).optional(),
+    priority: z.coerce.number().int().min(0).optional(),
+    status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+});
 
 // 11. ADMIN PARTNER REGISTRY ROUTES
 const admin = express.Router();
@@ -1057,6 +1199,158 @@ admin.get('/balances', async (req, res) => {
     }
 });
 
+admin.get('/institutional-payment-accounts', async (req, res) => {
+    try {
+        const data = await LogicCore.getInstitutionalPaymentAccounts({
+            role: req.query.role,
+            status: req.query.status,
+            providerId: req.query.providerId || req.query.provider_id,
+            currency: req.query.currency,
+        });
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] List Institutional Accounts Error:', e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+admin.post('/institutional-payment-accounts', async (req, res) => {
+    try {
+        const payload = InstitutionalAccountSchema.parse(req.body);
+        const session = (req as any).session;
+        const data = await LogicCore.upsertInstitutionalPaymentAccount(payload, session.sub);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] Create Institutional Account Error:', e);
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+admin.patch('/institutional-payment-accounts/:id', async (req, res) => {
+    try {
+        const payload = InstitutionalAccountSchema.partial().parse(req.body);
+        const session = (req as any).session;
+        const data = await LogicCore.upsertInstitutionalPaymentAccount(payload, session.sub, req.params.id);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] Update Institutional Account Error:', e);
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+admin.get('/platform-fees', async (req, res) => {
+    try {
+        const data = await LogicCore.getPlatformFeeConfigs({
+            flowCode: req.query.flowCode || req.query.flow_code,
+            status: req.query.status,
+            providerId: req.query.providerId || req.query.provider_id,
+            currency: req.query.currency,
+            countryCode: req.query.countryCode || req.query.country_code,
+            rail: req.query.rail,
+        });
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] List Platform Fees Error:', e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+admin.post('/platform-fees', async (req, res) => {
+    try {
+        const payload = PlatformFeeConfigSchema.parse(req.body);
+        const session = (req as any).session;
+        const data = await LogicCore.upsertPlatformFeeConfig(payload, session.sub);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] Create Platform Fee Error:', e);
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+admin.patch('/platform-fees/:id', async (req, res) => {
+    try {
+        const payload = PlatformFeeConfigSchema.partial().parse(req.body);
+        const session = (req as any).session;
+        const data = await LogicCore.upsertPlatformFeeConfig(payload, session.sub, req.params.id);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] Update Platform Fee Error:', e);
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+admin.get('/provider-routing-rules', async (_req, res) => {
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb
+            .from('provider_routing_rules')
+            .select('*, financial_partners(id, name, type, provider_metadata)')
+            .order('priority', { ascending: true })
+            .order('created_at', { ascending: false });
+        if (error) return res.status(500).json({ success: false, error: error.message });
+        res.json({ success: true, data: data || [] });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+admin.post('/provider-routing-rules', async (req, res) => {
+    try {
+        const payload = ProviderRoutingRuleSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb
+            .from('provider_routing_rules')
+            .insert({
+                rail: payload.rail,
+                country_code: payload.countryCode || null,
+                currency: payload.currency?.toUpperCase() || null,
+                operation_code: payload.operationCode,
+                provider_id: payload.providerId,
+                priority: payload.priority ?? 100,
+                conditions: payload.conditions || {},
+                status: payload.status || 'ACTIVE',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
+            .select('*')
+            .single();
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+admin.patch('/provider-routing-rules/:id', async (req, res) => {
+    try {
+        const payload = ProviderRoutingRuleSchema.partial().parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb
+            .from('provider_routing_rules')
+            .update({
+                rail: payload.rail,
+                country_code: payload.countryCode,
+                currency: payload.currency?.toUpperCase(),
+                operation_code: payload.operationCode,
+                provider_id: payload.providerId,
+                priority: payload.priority,
+                conditions: payload.conditions,
+                status: payload.status,
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', req.params.id)
+            .select('*')
+            .single();
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
 admin.get('/metrics/daily-movements', async (req, res) => {
     try {
         const { startDate, endDate } = req.query;
@@ -1075,6 +1369,75 @@ admin.get('/metrics/daily-movements', async (req, res) => {
 app.use('/api/admin', admin);
 
 const v1 = express.Router();
+const gatewayV1 = express.Router();
+
+gatewayV1.use((req, res, next) => {
+    if (req.path.startsWith('/webhooks/gateway/')) {
+        return next();
+    }
+    return (authenticate as any)(req, res, next);
+});
+
+gatewayV1.use(gatewayRoutes);
+v1.use(gatewayV1);
+
+v1.post('/external-funds/preview', authenticate as any, async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const payload = ExternalFundMovementSchema.parse(req.body);
+        const data = await LogicCore.previewExternalFundMovement(session.sub, payload);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/external-funds/deposit-intents', authenticate as any, async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const payload = IncomingDepositIntentSchema.parse(req.body);
+        const data = await LogicCore.createIncomingDepositIntent(session.sub, payload);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/external-funds/settle', authenticate as any, async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const payload = ExternalFundMovementSchema.parse(req.body);
+        const data = await LogicCore.processExternalFundMovement(session.sub, payload);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/external-funds/movements', authenticate as any, async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const limit = Number(req.query.limit || 50);
+        const offset = Number(req.query.offset || 0);
+        const data = await LogicCore.getUserExternalFundMovements(session.sub, limit, offset);
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/external-funds/movements/:id', authenticate as any, async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const data = await LogicCore.getUserExternalFundMovementById(session.sub, req.params.id);
+        if (!data) {
+            return res.status(404).json({ success: false, error: 'EXTERNAL_FUND_MOVEMENT_NOT_FOUND' });
+        }
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 // --- Biometric Authentication (New Architecture) ---
 v1.post('/auth/passkey/register/start', authenticate as any, (req, res) => NewAuth.startPasskeyRegistration(req, res));
@@ -3695,6 +4058,9 @@ wss.on('close', () => {
 
 await LogicCore.warmup();
 NotificationSubscriber.init();
+if (gatewayBackgroundJobsEnabled) {
+    settlementScheduler.start();
+}
 
 try {
     console.log("[System] Initializing Fintech Security Core...");
@@ -3727,6 +4093,7 @@ const gracefulShutdown = async () => {
     
     clearInterval(wsPingInterval);
     if (backgroundInterval) clearInterval(backgroundInterval);
+    settlementScheduler.stop();
     wss.close(() => {
         console.info('[Nexus] WebSocket server closed.');
     });

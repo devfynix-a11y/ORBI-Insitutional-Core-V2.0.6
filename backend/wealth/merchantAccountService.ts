@@ -25,13 +25,20 @@ export class MerchantAccountService {
             throw new Error(`Failed to create merchant: ${merchantError?.message}`);
         }
 
+        const { data: ownerProfile } = await sb
+            .from('users')
+            .select('currency')
+            .eq('id', userId)
+            .maybeSingle();
+        const ownerCurrency = String(ownerProfile?.currency || '').trim().toUpperCase() || null;
+
         // 2. Create Merchant Wallet
         const { error: walletError } = await sb
             .from('merchant_wallets')
             .insert({
                 merchant_id: merchant.id,
                 name: `${data.business_name} Operating Wallet`,
-                currency: 'TZS',
+                ...(ownerCurrency ? { currency: ownerCurrency } : {}),
                 balance: 0,
                 status: 'active'
             });
@@ -45,9 +52,9 @@ export class MerchantAccountService {
             .from('merchant_fees')
             .insert({
                 merchant_id: merchant.id,
-                transaction_fee_percent: 0.01, // 1%
+                transaction_fee_percent: 0,
                 fixed_fee: 0,
-                currency: 'TZS'
+                ...(ownerCurrency ? { currency: ownerCurrency } : {})
             });
 
         if (feesError) {

@@ -213,9 +213,57 @@ The Admin UI should create and update provider records through the partner
 registry. New processor support should be added by registry JSON configuration,
 not by introducing new hardcoded provider classes for each partner.
 
+## Universal Routing, External Settlements, And Offline Gateway
+
+The backend now includes the first production-oriented foundation for the
+universal provider and offline gateway architecture.
+
+Current implemented layers:
+
+- registry-driven provider execution from `financial_partners`
+- operation-aware routing through `provider_routing_rules`
+- institutional external settlement accounts through
+  `institutional_payment_accounts`
+- persistent external movement records through `external_fund_movements`
+- webhook-driven incoming deposit intent settlement
+- offline gateway persistence through
+  `inbound_sms_messages`, `offline_transaction_sessions`, and
+  `outbound_sms_messages`
+- offline confirmation bridge into the same ORBI transaction engine used by
+  online flows
+
+Important current routes:
+
+- `GET /v1/gateway/providers`
+- `POST /v1/external-funds/deposit-intents`
+- `POST /v1/external-funds/preview`
+- `POST /v1/external-funds/settle`
+- `GET /v1/external-funds/movements`
+- `POST /v1/webhooks/gateway/:providerId`
+- `POST /api/internal/offline/requests`
+- `POST /api/internal/offline/confirmations`
+- `GET /api/admin/provider-routing-rules`
+- `POST /api/admin/provider-routing-rules`
+- `GET /api/admin/institutional-payment-accounts`
+- `POST /api/admin/institutional-payment-accounts`
+
+Current offline bridge scope:
+
+- confirmed offline `SEND` requests are forwarded into the normal ORBI payment
+  engine as `INTERNAL_TRANSFER`
+- the offline layer does not post ledger entries directly
+- ORBI core remains the financial truth
+
+See:
+
+- `docs/PROVIDER_REGISTRY_CONTRACT.md`
+- `docs/UNIVERSAL_PROVIDER_AND_OFFLINE_GATEWAY_STATUS.md`
+
 ## Read Next
 
 - `docs/INTEGRATION_MANUAL.md`
 - `docs/MOBILE_SDK_GUIDE.md`
 - `docs/CORE_BANKING_ARCHITECTURE.md`
 - `docs/ORBI_OPERATION.md`
+- `docs/PROVIDER_REGISTRY_CONTRACT.md`
+- `docs/UNIVERSAL_PROVIDER_AND_OFFLINE_GATEWAY_STATUS.md`
