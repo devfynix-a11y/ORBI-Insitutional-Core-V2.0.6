@@ -1376,7 +1376,10 @@ gatewayV1.use((req, res, next) => {
     if (req.path.startsWith('/webhooks/gateway/')) {
         return next();
     }
-    return (authenticate as any)(req, res, next);
+    if (req.path.startsWith('/gateway')) {
+        return (authenticate as any)(req, res, next);
+    }
+    return next();
 });
 
 gatewayV1.use(gatewayRoutes);
