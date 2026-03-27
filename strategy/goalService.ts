@@ -43,8 +43,14 @@ export class GoalService {
     }
 
     async postGoal(g: Goal, token?: string) { 
-        const encryptedTarget = await DataVault.encrypt(g.target);
-        const encryptedCurrent = await DataVault.encrypt(g.current);
+        let encryptedTarget: any = g.target;
+        let encryptedCurrent: any = g.current;
+        try {
+            encryptedTarget = await DataVault.encrypt(g.target);
+            encryptedCurrent = await DataVault.encrypt(g.current);
+        } catch (e: any) {
+            console.warn('[GoalService] Encryption unavailable, storing raw goal amounts locally.', e?.message || e);
+        }
 
         const sb = this.getDb(token);
         let localGoal = { ...g };
