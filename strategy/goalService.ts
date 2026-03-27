@@ -17,7 +17,50 @@ export class GoalService {
         return getSupabase();
     }
 
+    private async resolveOwnedWalletRecord(sb: any, userId: string, walletId: string): Promise<{ id: string; user_id: string; currency?: string; table: 'wallets' | 'platform_vaults' } | null> {
+        const { data: wallet } = await sb
+            .from('wallets')
+            .select('id, user_id, currency, type, is_primary')
+            .eq('id', walletId)
+            .maybeSingle();
+        if (wallet) {
+            return {
+                id: String(wallet.id),
+                user_id: String(wallet.user_id || ''),
+                currency: wallet.currency || undefined,
+                table: 'wallets'
+            };
+        }
+
+        const { data: vault } = await sb
+            .from('platform_vaults')
+            .select('id, user_id, currency, vault_role, name')
+            .eq('id', walletId)
+            .maybeSingle();
+        if (vault) {
+            return {
+                id: String(vault.id),
+                user_id: String(vault.user_id || ''),
+                currency: vault.currency || undefined,
+                table: 'platform_vaults'
+            };
+        }
+
+        return null;
+    }
+
     private async resolveOperatingWalletId(sb: any, userId: string): Promise<string> {
+        const { data: operatingVault } = await sb
+            .from('platform_vaults')
+            .select('id, vault_role, balance, created_at')
+            .eq('user_id', userId)
+            .eq('vault_role', 'OPERATING')
+            .order('created_at', { ascending: true })
+            .limit(1);
+        if (operatingVault && operatingVault.length > 0) {
+            return String(operatingVault[0].id);
+        }
+
         const { data } = await sb
             .from('wallets')
             .select('id, is_primary, type')
@@ -229,11 +272,7 @@ export class GoalService {
             }
             sourceWalletId = operatingWalletId;
 
-            const { data: wallet } = await sb
-                .from('wallets')
-                .select('id, user_id, currency')
-                .eq('id', sourceWalletId)
-                .maybeSingle();
+            const wallet = await this.resolveOwnedWalletRecord(sb, goalUserId, sourceWalletId);
             if (!wallet) {
                 throw new Error('Source wallet not found');
             }
@@ -355,11 +394,7 @@ export class GoalService {
                 throw new Error('SOURCE_WALLET_LOCKED: Withdrawals must return to the original source wallet.');
             }
 
-            const { data: wallet } = await sb
-                .from('wallets')
-                .select('id, user_id, currency')
-                .eq('id', sourceWalletId)
-                .maybeSingle();
+            const wallet = await this.resolveOwnedWalletRecord(sb, goalUserId, sourceWalletId);
             if (!wallet) {
                 throw new Error('Source wallet not found');
             }

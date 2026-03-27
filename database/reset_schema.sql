@@ -454,6 +454,8 @@ CREATE TABLE IF NOT EXISTS public.categories (
     budget TEXT, 
     color TEXT, 
     icon TEXT, 
+    budget_period TEXT DEFAULT 'MONTHLY',
+    budget_interval TEXT DEFAULT 'MONTHLY',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -535,14 +537,20 @@ BEGIN
     END IF;
 END $$;
 
-DO $$ 
-BEGIN 
+DO $$
+BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='categories' AND column_name='organization_id') THEN
         ALTER TABLE public.categories ADD COLUMN organization_id UUID REFERENCES public.organizations(id);
         ALTER TABLE public.categories ADD COLUMN currency TEXT DEFAULT 'TZS';
         ALTER TABLE public.categories ADD COLUMN period TEXT DEFAULT 'MONTHLY';
         ALTER TABLE public.categories ADD COLUMN hard_limit BOOLEAN DEFAULT FALSE;
         ALTER TABLE public.categories ADD COLUMN is_corporate BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='categories' AND column_name='budget_interval') THEN
+        ALTER TABLE public.categories ADD COLUMN budget_interval TEXT DEFAULT 'MONTHLY';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='categories' AND column_name='budget_period') THEN
+        ALTER TABLE public.categories ADD COLUMN budget_period TEXT DEFAULT 'MONTHLY';
     END IF;
 END $$;
 
@@ -1496,8 +1504,10 @@ CREATE TABLE IF NOT EXISTS public.user_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     refresh_token_hash TEXT NOT NULL,
+    -- Stable device fingerprint for password and biometric/passkey sessions.
     device_fingerprint TEXT,
     ip_address TEXT,
+    -- Canonical synthesized device/user-agent label used by security analytics.
     user_agent TEXT,
     is_revoked BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -1510,9 +1520,13 @@ CREATE TABLE IF NOT EXISTS public.user_sessions (
 CREATE TABLE IF NOT EXISTS public.user_devices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    -- Stable hardware-ish fingerprint. Do not derive from locale/app version.
     device_fingerprint TEXT NOT NULL,
+    -- Human-readable device name shown in security views and alerts.
     device_name TEXT,
+    -- Expected values include mobile / android / ios / web / desktop.
     device_type TEXT,
+    -- Canonical synthesized device/user-agent label used by security analytics.
     user_agent TEXT,
     last_active_at TIMESTAMPTZ DEFAULT NOW(),
     is_trusted BOOLEAN DEFAULT FALSE,
@@ -1520,6 +1534,30 @@ CREATE TABLE IF NOT EXISTS public.user_devices (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(user_id, device_fingerprint)
 );
+
+ALTER TABLE public.user_devices
+    ADD COLUMN IF NOT EXISTS device_name TEXT;
+ALTER TABLE public.user_devices
+    ADD COLUMN IF NOT EXISTS device_type TEXT;
+ALTER TABLE public.user_devices
+    ADD COLUMN IF NOT EXISTS user_agent TEXT;
+ALTER TABLE public.user_devices
+    ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE public.user_devices
+    ADD COLUMN IF NOT EXISTS is_trusted BOOLEAN DEFAULT FALSE;
+ALTER TABLE public.user_devices
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active';
+
+ALTER TABLE public.user_sessions
+    ADD COLUMN IF NOT EXISTS device_fingerprint TEXT;
+ALTER TABLE public.user_sessions
+    ADD COLUMN IF NOT EXISTS ip_address TEXT;
+ALTER TABLE public.user_sessions
+    ADD COLUMN IF NOT EXISTS user_agent TEXT;
+ALTER TABLE public.user_sessions
+    ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE public.user_sessions
+    ADD COLUMN IF NOT EXISTS is_trusted_device BOOLEAN DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS public.user_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

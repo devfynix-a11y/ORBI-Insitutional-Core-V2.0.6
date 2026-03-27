@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
@@ -1614,33 +1615,129 @@ v1.get('/user/lookup', authenticate as any, async (req, res) => {
 
 v1.post('/auth/verify', authenticate as any, async (req, res) => {
     const session = (req as any).session;
-    const { requestId, code } = req.body;
+    const { requestId, code, refreshSession, device } = req.body;
     try {
         const result = await LogicCore.verifySensitiveAction(requestId, code, session.sub);
         if (result?.success === true) {
             const accessToken = req.headers.authorization?.startsWith('Bearer ')
                 ? req.headers.authorization.substring(7)
                 : null;
-            const deviceId =
-                session?.deviceId ||
-                session?.user?.user_metadata?.fingerprint ||
-                session?.user?.user_metadata?.device_id;
-            const refreshToken = Sessions.createRefreshToken(session.sub, deviceId);
-            const user = {
+            let effectiveAccessToken = accessToken;
+            let effectiveRefreshToken: string | null = null;
+            let effectiveUser = {
                 id: session.sub,
                 email: session.user?.email,
                 phone: session.user?.phone,
                 ...session.user?.user_metadata
             };
 
+            if (refreshSession === true) {
+                const adminSb = getAdminSupabase();
+                const publicSb = getSupabase();
+                if (!adminSb || !publicSb) {
+                    throw new Error('SUPABASE_SESSION_FAILED');
+                }
+
+                const authUserResult = await adminSb.auth.admin.getUserById(session.sub);
+                const authUser = authUserResult.data?.user;
+                const loginEmail = authUser?.email || authUser?.user_metadata?.email;
+                if (!authUser || !loginEmail) {
+                    throw new Error('IDENTITY_NOT_FOUND');
+                }
+
+                const linkResult = await adminSb.auth.admin.generateLink({
+                    type: 'magiclink',
+                    email: loginEmail,
+                });
+                if (linkResult.error || !linkResult.data?.properties?.hashed_token) {
+                    throw new Error(linkResult.error?.message || 'SUPABASE_SESSION_FAILED');
+                }
+
+                const supaSessionResult = await publicSb.auth.verifyOtp({
+                    type: 'magiclink',
+                    token_hash: linkResult.data.properties.hashed_token,
+                });
+                const supaSession = supaSessionResult.data?.session;
+                if (supaSessionResult.error || !supaSession) {
+                    throw new Error(supaSessionResult.error?.message || 'SUPABASE_SESSION_FAILED');
+                }
+
+                effectiveAccessToken = supaSession.access_token;
+                effectiveRefreshToken = supaSession.refresh_token || null;
+                effectiveUser = {
+                    id: authUser.id,
+                    email: authUser.email,
+                    phone: authUser.phone,
+                    ...authUser.user_metadata
+                };
+
+                const fingerprintSource = {
+                    platform: device?.platform,
+                    manufacturer: device?.manufacturer,
+                    brand: device?.brand,
+                    model: device?.deviceModel || device?.model,
+                    deviceName: device?.deviceName,
+                    deviceCodeName: device?.deviceCodeName,
+                    screenResolution: device?.screenResolution,
+                };
+                const deviceFingerprint = crypto
+                    .createHash('sha256')
+                    .update(JSON.stringify(fingerprintSource))
+                    .digest('hex');
+                const userAgent = [
+                    `orbi/${String(device?.platform || 'mobile').toLowerCase()}`,
+                    device?.deviceName || device?.model || 'Unknown Device',
+                    device?.osRelease || device?.systemVersion || device?.os || '',
+                    device?.appVersion ? `app=${device.appVersion}` : '',
+                ].filter(Boolean).join(' | ');
+
+                await adminSb.from('user_devices').upsert({
+                    user_id: session.sub,
+                    device_fingerprint: deviceFingerprint,
+                    device_name: device?.deviceName || device?.model || 'Unknown Device',
+                    device_type: String(device?.platform || 'mobile').toLowerCase(),
+                    user_agent: userAgent,
+                    last_active_at: new Date().toISOString(),
+                    is_trusted: true,
+                    status: 'active',
+                }, {
+                    onConflict: 'user_id,device_fingerprint',
+                });
+
+                if (effectiveRefreshToken) {
+                    const refreshTokenHash = crypto
+                        .createHash('sha256')
+                        .update(effectiveRefreshToken)
+                        .digest('hex');
+                    await adminSb.from('user_sessions').insert({
+                        user_id: session.sub,
+                        refresh_token_hash: refreshTokenHash,
+                        device_fingerprint: deviceFingerprint,
+                        ip_address: req.ip,
+                        user_agent: userAgent,
+                        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+                        last_active_at: new Date().toISOString(),
+                        is_trusted_device: true,
+                    });
+                }
+            }
+
+            if (!effectiveAccessToken) {
+                const deviceId =
+                    session?.deviceId ||
+                    session?.user?.user_metadata?.fingerprint ||
+                    session?.user?.user_metadata?.device_id;
+                effectiveRefreshToken = effectiveRefreshToken || Sessions.createRefreshToken(session.sub, deviceId);
+            }
+
             return res.json({
                 success: true,
                 data: {
                     success: true,
                     verified: true,
-                    access_token: accessToken,
-                    refresh_token: refreshToken,
-                    user
+                    access_token: effectiveAccessToken,
+                    refresh_token: effectiveRefreshToken,
+                    user: effectiveUser
                 }
             });
         }
@@ -3882,24 +3979,6 @@ import { SandboxController } from './backend/sandbox/sandboxController.js';
 // ... existing imports ...
 
 // ... inside v1 routes ...
-
-// --- SANDBOX / DEMO TOOLS ---
-if (sandboxRoutesEnabled) v1.post('/sandbox/fund', authenticate as any, async (req, res) => {
-    const session = (req as any).session;
-    
-    // Default to current user if not provided
-    if (!req.body.userId) req.body.userId = session.sub;
-
-    // Security Check: Only admins can fund other users
-    if (req.body.userId !== session.sub) {
-        const role = session.role || session.user?.role;
-        if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
-            return res.status(403).json({ success: false, error: 'ACCESS_DENIED: You can only fund your own wallet.' });
-        }
-    }
-
-    await SandboxController.fundWallet(req, res);
-});
 
 if (sandboxRoutesEnabled) v1.post('/sandbox/activate', authenticate as any, async (req, res) => {
     const session = (req as any).session;

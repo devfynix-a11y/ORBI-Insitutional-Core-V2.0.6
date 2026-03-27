@@ -3,23 +3,31 @@ import { getAdminSupabase } from "../../supabaseClient.js";
 
 export interface DeviceData {
     model: string;
-    os: string;
-    screenResolution: string;
-    timezone: string;
-    language: string;
-    appVersion: string;
+    os?: string;
+    screenResolution?: string;
+    timezone?: string;
+    language?: string;
+    appVersion?: string;
+    deviceName?: string;
+    deviceModel?: string;
+    deviceCodeName?: string;
+    manufacturer?: string;
+    brand?: string;
+    platform?: string;
 }
 
 export class FingerprintService {
     generateFingerprint(device: DeviceData): string {
-        // Pick only stable fields to ensure the fingerprint doesn't change on every login
+        // Pick only stable hardware-ish fields so the same handset does not
+        // look "new" after an app update, locale change, or timezone shift.
         const stableData = {
-            model: device.model,
-            os: device.os,
-            screenResolution: device.screenResolution,
-            timezone: device.timezone,
-            language: device.language,
-            appVersion: device.appVersion
+            platform: (device.platform || '').toString().trim().toLowerCase(),
+            manufacturer: (device.manufacturer || '').toString().trim().toLowerCase(),
+            brand: (device.brand || '').toString().trim().toLowerCase(),
+            model: (device.deviceModel || device.model || '').toString().trim().toLowerCase(),
+            deviceName: (device.deviceName || '').toString().trim().toLowerCase(),
+            deviceCodeName: (device.deviceCodeName || '').toString().trim().toLowerCase(),
+            screenResolution: (device.screenResolution || '').toString().trim().toLowerCase(),
         };
         const raw = JSON.stringify(stableData);
         return crypto

@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import crypto from "crypto";
 import { Passkeys } from "../passkey/passkey.service.js";
 import { Fingerprint } from "../../services/fingerprint.service.js";
 import { Behavior } from "../../services/behavior.service.js";
@@ -156,6 +157,134 @@ const validateBiometricContext = (req: any) => {
     return { rpID: finalRpId, origin };
 };
 
+const resolveDeviceName = (device: any) =>
+    String(
+        device?.deviceName ||
+        device?.device_name ||
+        device?.deviceModel ||
+        device?.model ||
+        'Unknown Device',
+    ).trim();
+
+const resolveDeviceType = (device: any) =>
+    String(device?.platform || device?.deviceType || device?.device_type || 'mobile')
+        .trim()
+        .toLowerCase();
+
+const buildBiometricUserAgent = (device: any) => {
+    const name = resolveDeviceName(device);
+    const platform = resolveDeviceType(device);
+    const model = String(device?.deviceModel || device?.model || '').trim();
+    const os = String(device?.osRelease || device?.systemVersion || device?.os || '').trim();
+    const appVersion = String(device?.appVersion || '').trim();
+
+    return [
+        `orbi/${platform}`,
+        name,
+        model,
+        os ? `os=${os}` : '',
+        appVersion ? `app=${appVersion}` : '',
+    ]
+        .filter(Boolean)
+        .join(' | ');
+};
+
+const issueSupabaseSessionForUser = async (userId: string) => {
+    const sb = getAdminSupabase();
+    const publicSb = getSupabase();
+    if (!sb || !publicSb) {
+        throw new Error('SUPABASE_SESSION_FAILED');
+    }
+
+    const userRecord = await sb.auth.admin.getUserById(userId);
+    const authUser = userRecord.data?.user;
+    if (!authUser) {
+        throw new Error('IDENTITY_NOT_FOUND');
+    }
+
+    const loginEmail = authUser.email || authUser.user_metadata?.email;
+    if (!loginEmail) {
+        throw new Error('SUPABASE_SESSION_FAILED');
+    }
+
+    const linkResult = await sb.auth.admin.generateLink({
+        type: 'magiclink',
+        email: loginEmail,
+    });
+    if (linkResult.error || !linkResult.data?.properties?.hashed_token) {
+        throw new Error(linkResult.error?.message || 'SUPABASE_SESSION_FAILED');
+    }
+
+    const supaSessionResult = await publicSb.auth.verifyOtp({
+        type: 'magiclink',
+        token_hash: linkResult.data.properties.hashed_token,
+    });
+    if (supaSessionResult.error || !supaSessionResult.data?.session) {
+        throw new Error(supaSessionResult.error?.message || 'SUPABASE_SESSION_FAILED');
+    }
+
+    return {
+        authUser,
+        supaSession: supaSessionResult.data.session,
+    };
+};
+
+const persistBiometricDevice = async (
+    userId: string,
+    fingerprint: string,
+    device: any,
+    ipAddress?: string,
+    isTrusted = true,
+) => {
+    const sb = getAdminSupabase();
+    if (!sb || !fingerprint) return;
+
+    const payload = {
+        user_id: userId,
+        device_fingerprint: fingerprint,
+        device_name: resolveDeviceName(device),
+        device_type: resolveDeviceType(device),
+        user_agent: buildBiometricUserAgent(device),
+        last_active_at: new Date().toISOString(),
+        is_trusted: isTrusted,
+        status: 'active',
+    };
+
+    await sb.from('user_devices').upsert(payload, {
+        onConflict: 'user_id,device_fingerprint',
+    });
+
+    if (ipAddress) {
+        await sb
+            .from('users')
+            .update({ last_active: new Date().toISOString() })
+            .eq('id', userId);
+    }
+};
+
+const persistBiometricSession = async (
+    userId: string,
+    refreshToken: string,
+    fingerprint: string,
+    device: any,
+    ipAddress?: string,
+) => {
+    const sb = getAdminSupabase();
+    if (!sb || !refreshToken) return;
+
+    const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+    await sb.from('user_sessions').insert({
+        user_id: userId,
+        refresh_token_hash: tokenHash,
+        device_fingerprint: fingerprint,
+        ip_address: ipAddress || null,
+        user_agent: buildBiometricUserAgent(device),
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        last_active_at: new Date().toISOString(),
+        is_trusted_device: true,
+    });
+};
+
 export class AuthController {
     async startPasskeyLogin(req: Request, res: Response) {
         try {
@@ -243,17 +372,12 @@ export class AuthController {
             const fingerprint = Fingerprint.generateFingerprint(device);
             const isNewDevice = await Fingerprint.validateDevice(userId, fingerprint);
             
-            // If biometric login is successful, we can trust this device
+            // If biometric login is successful, we can trust and hydrate this device
             const sb = getAdminSupabase();
-            if (sb) {
-                await sb.from('user_devices')
-                    .update({ is_trusted: true, last_active_at: new Date().toISOString() })
-                    .eq('user_id', userId)
-                    .eq('device_fingerprint', fingerprint);
-            }
+            await persistBiometricDevice(userId, fingerprint, device, req.ip, true);
 
             if (isNewDevice) {
-                Messaging.sendNewDeviceAlert(userId, device.model || 'Unknown Device').catch(console.error);
+                Messaging.sendNewDeviceAlert(userId, resolveDeviceName(device)).catch(console.error);
             }
 
             // 4. Risk Scoring & AI Fraud Detection
@@ -332,29 +456,6 @@ export class AuthController {
             );
             const refreshToken = Sessions.createRefreshToken(userId, fingerprint);
 
-            const publicSb = getSupabase();
-            const loginEmail = authUser.email || userMetadata.email;
-            if (!publicSb || !loginEmail) {
-                throw new Error('SUPABASE_SESSION_FAILED');
-            }
-
-            const linkResult = await sb!.auth.admin.generateLink({
-                type: 'magiclink',
-                email: loginEmail,
-            });
-            if (linkResult.error || !linkResult.data?.properties?.hashed_token) {
-                throw new Error(linkResult.error?.message || 'SUPABASE_SESSION_FAILED');
-            }
-
-            const supaSessionResult = await publicSb.auth.verifyOtp({
-                type: 'magiclink',
-                token_hash: linkResult.data.properties.hashed_token,
-            });
-            if (supaSessionResult.error || !supaSessionResult.data?.session) {
-                throw new Error(supaSessionResult.error?.message || 'SUPABASE_SESSION_FAILED');
-            }
-            const supaSession = supaSessionResult.data.session;
-
             // 7. Require Step-up if needed
             decision = Risk.getDecision(totalRiskScore);
             if (decision === 'REQUIRE_OTP') {
@@ -387,6 +488,14 @@ export class AuthController {
             }
 
             if (decision === 'ALLOW') {
+                const { supaSession } = await issueSupabaseSessionForUser(userId);
+                await persistBiometricSession(
+                    userId,
+                    supaSession.refresh_token || refreshToken,
+                    fingerprint,
+                    device,
+                    req.ip,
+                );
                 await Audit.log('IDENTITY', userId, 'LOGIN_SUCCESS', { device: device.model, platform });
                 res.json({
                     success: true,
@@ -433,7 +542,7 @@ export class AuthController {
 
     async completePasskeyRegistration(req: Request, res: Response) {
         try {
-            const { userId, response, challenge, platform } = req.body;
+            const { userId, response, challenge, platform, device } = req.body;
             const { rpID, origin } = validateBiometricContext(req);
             const { appIdentity, appIdHeader, isTrustedApp } = resolveTrustedAppIdentity(req);
 
@@ -449,6 +558,10 @@ export class AuthController {
 
             const verified = await Passkeys.verifyRegistration(userId, response, challenge, origin, rpID);
             if (verified) {
+                if (device) {
+                    const fingerprint = Fingerprint.generateFingerprint(device);
+                    await persistBiometricDevice(userId, fingerprint, device, req.ip, true);
+                }
                 console.log(`[Auth] Passkey registration successful for user ${userId}`);
                 res.json({ success: true });
             } else {
