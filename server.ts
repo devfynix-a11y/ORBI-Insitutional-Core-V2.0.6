@@ -51,6 +51,7 @@ import { Messaging } from './backend/features/MessagingService.js';
 import { ServiceActorOps } from './backend/features/ServiceActorOps.js';
 import gatewayRoutes from './backend/payments/gatewayRoutes.js';
 import { settlementScheduler } from './backend/payments/settlementScheduler.js';
+import { KMS } from './backend/security/kms.js';
 
 // Helper for Gemini calls with retry logic
 async function callGeminiWithRetry(ai: GoogleGenAI, params: any, retries = 3, delay = 1000): Promise<any> {
@@ -3887,6 +3888,34 @@ v1.post('/admin/config/fx-rates', authenticate as any, adminOnly as any, async (
         
         await ConfigClient.saveConfig(updatedConfig);
         res.json({ success: true, message: 'Exchange rates updated successfully.' });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/admin/kms/rewrap', authenticate as any, adminOnly as any, async (req, res) => {
+    try {
+        const confirm = String(req.body?.confirm || '').trim().toUpperCase();
+        if (confirm !== 'REWRAP_KEYS') {
+            return res.status(400).json({
+                success: false,
+                error: 'CONFIRMATION_REQUIRED',
+                message: 'Set confirm=REWRAP_KEYS to proceed.'
+            });
+        }
+
+        const newMasterKey = String(req.body?.newMasterKey || '').trim();
+        const resolvedMasterKey = newMasterKey || String(process.env.KMS_MASTER_KEY || '').trim();
+        if (!resolvedMasterKey) {
+            return res.status(400).json({
+                success: false,
+                error: 'KMS_MASTER_KEY_MISSING',
+                message: 'No master key provided or configured.'
+            });
+        }
+
+        await KMS.reWrapAllKeys(resolvedMasterKey);
+        res.json({ success: true, message: 'KMS keys re-wrapped successfully.' });
     } catch (e: any) {
         res.status(500).json({ success: false, error: e.message });
     }
