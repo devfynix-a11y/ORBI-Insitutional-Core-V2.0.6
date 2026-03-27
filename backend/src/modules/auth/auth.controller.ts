@@ -8,7 +8,7 @@ import { Sessions } from "../session/session.service.js";
 import { Attestation } from "../device/attestation.service.js";
 import { AIFraud } from "../fraud/ai-fraud.service.js";
 import { HSM } from "../security/hsm.service.js";
-import { getAdminSupabase } from "../../../supabaseClient.js";
+import { getAdminSupabase, getSupabase } from "../../../supabaseClient.js";
 import { OTPService } from "../../../security/otpService.js";
 import { Messaging } from "../../../features/MessagingService.js";
 import { Audit } from "../../../security/audit.js";
@@ -332,6 +332,29 @@ export class AuthController {
             );
             const refreshToken = Sessions.createRefreshToken(userId, fingerprint);
 
+            const publicSb = getSupabase();
+            const loginEmail = authUser.email || userMetadata.email;
+            if (!publicSb || !loginEmail) {
+                throw new Error('SUPABASE_SESSION_FAILED');
+            }
+
+            const linkResult = await sb!.auth.admin.generateLink({
+                type: 'magiclink',
+                email: loginEmail,
+            });
+            if (linkResult.error || !linkResult.data?.properties?.hashed_token) {
+                throw new Error(linkResult.error?.message || 'SUPABASE_SESSION_FAILED');
+            }
+
+            const supaSessionResult = await publicSb.auth.verifyOtp({
+                type: 'magiclink',
+                token_hash: linkResult.data.properties.hashed_token,
+            });
+            if (supaSessionResult.error || !supaSessionResult.data?.session) {
+                throw new Error(supaSessionResult.error?.message || 'SUPABASE_SESSION_FAILED');
+            }
+            const supaSession = supaSessionResult.data.session;
+
             // 7. Require Step-up if needed
             decision = Risk.getDecision(totalRiskScore);
             if (decision === 'REQUIRE_OTP') {
@@ -369,8 +392,9 @@ export class AuthController {
                     success: true,
                     data: {
                         status: 'SUCCESS',
-                        access_token: sessionToken,
-                        refresh_token: refreshToken
+                        access_token: supaSession.access_token,
+                        refresh_token: supaSession.refresh_token || refreshToken,
+                        session: supaSession
                     }
                 });
             } else if (decision === 'BLOCK') {
