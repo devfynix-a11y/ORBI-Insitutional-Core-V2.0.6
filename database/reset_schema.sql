@@ -1,0 +1,2569 @@
+-- ORBI RESET SCHEMA (FULL REBUILD)
+-- Generated from the master schema with settlement_lifecycle fixes merged in.
+-- WARNING: THIS SCRIPT WILL DROP AND RECREATE OBJECTS.
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+DROP FUNCTION IF EXISTS public.handle_new_user() CASCADE;
+DROP FUNCTION IF EXISTS public.post_transaction_v2(UUID, UUID, UUID, UUID, TEXT, TEXT, TEXT, TEXT, DATE, JSONB, UUID, JSONB, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS public.append_ledger_entries_v1(UUID, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS public.update_wallet_balance(UUID, NUMERIC, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS public.delete_old_activity() CASCADE;
+DROP FUNCTION IF EXISTS public.get_auth_role() CASCADE;
+DROP FUNCTION IF EXISTS public.set_settlement_lifecycle_updated_at() CASCADE;
+
+DROP VIEW IF EXISTS public.user_profiles CASCADE;
+
+DROP TABLE IF EXISTS public.revoked_tokens CASCADE;
+DROP TABLE IF EXISTS public.background_jobs CASCADE;
+DROP TABLE IF EXISTS public.outbox_events CASCADE;
+DROP TABLE IF EXISTS public.merchant_card_settings CASCADE;
+DROP TABLE IF EXISTS public.settlement_lifecycle CASCADE;
+DROP TABLE IF EXISTS public.reconciliation_reports CASCADE;
+DROP TABLE IF EXISTS public.item_reconciliation_audit CASCADE;
+DROP TABLE IF EXISTS public.fee_correction_logs CASCADE;
+DROP TABLE IF EXISTS public.fee_correction_rules CASCADE;
+DROP TABLE IF EXISTS public.user_documents CASCADE;
+DROP TABLE IF EXISTS public.user_devices CASCADE;
+DROP TABLE IF EXISTS public.user_sessions CASCADE;
+DROP TABLE IF EXISTS public.kyc_requests CASCADE;
+DROP TABLE IF EXISTS public.transfer_tax_rules CASCADE;
+DROP TABLE IF EXISTS public.regulatory_config CASCADE;
+DROP TABLE IF EXISTS public.digital_merchants CASCADE;
+DROP TABLE IF EXISTS public.financial_partners CASCADE;
+DROP TABLE IF EXISTS public.external_fund_movements CASCADE;
+DROP TABLE IF EXISTS public.institutional_payment_accounts CASCADE;
+DROP TABLE IF EXISTS public.provider_routing_rules CASCADE;
+DROP TABLE IF EXISTS public.outbound_sms_messages CASCADE;
+DROP TABLE IF EXISTS public.offline_transaction_sessions CASCADE;
+DROP TABLE IF EXISTS public.inbound_sms_messages CASCADE;
+DROP TABLE IF EXISTS public.provider_anomalies CASCADE;
+DROP TABLE IF EXISTS public.kms_keys CASCADE;
+DROP TABLE IF EXISTS public.audit_trail CASCADE;
+DROP TABLE IF EXISTS public.audit_logs CASCADE;
+DROP TABLE IF EXISTS public.staff_messages CASCADE;
+DROP TABLE IF EXISTS public.user_messages CASCADE;
+DROP TABLE IF EXISTS public.aml_alerts CASCADE;
+DROP TABLE IF EXISTS public.tasks CASCADE;
+DROP TABLE IF EXISTS public.categories CASCADE;
+DROP TABLE IF EXISTS public.goals CASCADE;
+DROP TABLE IF EXISTS public.financial_ledger CASCADE;
+DROP TABLE IF EXISTS public.transaction_events CASCADE;
+DROP TABLE IF EXISTS public.financial_events CASCADE;
+DROP TABLE IF EXISTS public.transactions CASCADE;
+DROP TABLE IF EXISTS public.platform_vaults CASCADE;
+DROP TABLE IF EXISTS public.wallets CASCADE;
+DROP TABLE IF EXISTS public.staff CASCADE;
+DROP TABLE IF EXISTS public.users CASCADE;
+DROP TABLE IF EXISTS public.secrets CASCADE;
+DROP TABLE IF EXISTS public.wal_logs CASCADE;
+DROP TABLE IF EXISTS public.organizations CASCADE;
+DROP TABLE IF EXISTS public.fee_collector_wallets CASCADE;
+DROP TABLE IF EXISTS public.budget_alerts CASCADE;
+DROP TABLE IF EXISTS public.escrow_agreements CASCADE;
+DROP TABLE IF EXISTS public.treasury_policies CASCADE;
+DROP TABLE IF EXISTS public.treasury_approvers CASCADE;
+DROP TABLE IF EXISTS public.merchant_fees CASCADE;
+DROP TABLE IF EXISTS public.platform_fee_configs CASCADE;
+DROP TABLE IF EXISTS public.merchant_settlements CASCADE;
+DROP TABLE IF EXISTS public.service_commissions CASCADE;
+DROP TABLE IF EXISTS public.service_access_requests CASCADE;
+DROP TABLE IF EXISTS public.service_actor_customer_links CASCADE;
+DROP TABLE IF EXISTS public.agent_transactions CASCADE;
+DROP TABLE IF EXISTS public.merchant_transactions CASCADE;
+DROP TABLE IF EXISTS public.agent_wallets CASCADE;
+DROP TABLE IF EXISTS public.agents CASCADE;
+DROP TABLE IF EXISTS public.merchant_wallets CASCADE;
+DROP TABLE IF EXISTS public.merchants CASCADE;
+DROP TABLE IF EXISTS public.app_registry CASCADE;
+DROP TABLE IF EXISTS public.platform_configs CASCADE;
+DROP TABLE IF EXISTS public.infra_snapshots CASCADE;
+DROP TABLE IF EXISTS public.infra_tx_limits CASCADE;
+DROP TABLE IF EXISTS public.infra_app_tokens CASCADE;
+DROP TABLE IF EXISTS public.infra_system_matrix CASCADE;
+DROP TABLE IF EXISTS public.legal_holds CASCADE;
+DROP TABLE IF EXISTS public.approval_requests CASCADE;
+DROP TABLE IF EXISTS public.staff_issues CASCADE;
+DROP TABLE IF EXISTS public.support_tickets CASCADE;
+DROP TABLE IF EXISTS public.security_rules CASCADE;
+DROP TABLE IF EXISTS public.rule_violations CASCADE;
+DROP TABLE IF EXISTS public.ai_reports CASCADE;
+DROP TABLE IF EXISTS public.reported_issues CASCADE;
+DROP TABLE IF EXISTS public.system_catalog CASCADE;
+DROP TABLE IF EXISTS public.ctr_reports CASCADE;
+DROP TABLE IF EXISTS public.transaction_status_logs CASCADE;
+DROP TABLE IF EXISTS public.payment_metrics_snapshots CASCADE;
+DROP TABLE IF EXISTS public.payment_reviews CASCADE;
+DROP TABLE IF EXISTS public.chargeback_cases CASCADE;
+DROP TABLE IF EXISTS public.system_nodes CASCADE;
+DROP TABLE IF EXISTS public.passkeys CASCADE;
+DROP TABLE IF EXISTS public.device_fingerprints CASCADE;
+DROP TABLE IF EXISTS public.behavioral_biometrics CASCADE;
+DROP TABLE IF EXISTS public.ai_risk_logs CASCADE;
+DROP TABLE IF EXISTS public.secure_enclave_keys CASCADE;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='address') THEN
+        ALTER TABLE public.staff ADD COLUMN address TEXT;
+    END IF;
+END $$;
+-- ORBI SOVEREIGN RESET SCHEMA V93.0 (FULL REBUILD)
+-- This script is generated for full reset and rebuild.
+-- It drops existing objects, then recreates the schema with the settlement_lifecycle fixes merged in.
+-- V93.0: Includes settlement_lifecycle creation and corrected settlement indexes.
+
+-- 1. CORE EXTENSIONS
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- 2. TABLES DEFINITION (IDEMPOTENT)
+
+CREATE TABLE IF NOT EXISTS public.secrets (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.wal_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    data TEXT NOT NULL,
+    status TEXT DEFAULT 'PENDING',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    action TEXT NOT NULL,
+    meta JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.users (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name TEXT,
+    email TEXT UNIQUE NOT NULL,
+    customer_id TEXT UNIQUE NOT NULL, 
+    phone TEXT,
+    nationality TEXT DEFAULT 'Tanzania',
+    address TEXT,
+    avatar_url TEXT,
+    currency TEXT DEFAULT 'TZS',
+    account_status TEXT DEFAULT 'active',
+    registry_type TEXT DEFAULT 'CONSUMER',
+    role TEXT DEFAULT 'USER',
+    app_origin TEXT DEFAULT 'OBI_INSTITUTIONAL_CORE_V25',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    kyc_level INTEGER DEFAULT 0,
+    kyc_status TEXT DEFAULT 'unverified',
+    id_type TEXT,
+    id_number TEXT,
+    language TEXT DEFAULT 'en',
+    notif_security BOOLEAN DEFAULT TRUE,
+    notif_financial BOOLEAN DEFAULT TRUE,
+    notif_budget BOOLEAN DEFAULT TRUE,
+    notif_marketing BOOLEAN DEFAULT FALSE,
+    fcm_token TEXT,
+    security_tx_pin_hash TEXT,
+    security_tx_pin_enabled BOOLEAN DEFAULT FALSE,
+    security_biometric_enabled BOOLEAN DEFAULT FALSE,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Compatibility View for user_profiles
+CREATE OR REPLACE VIEW public.user_profiles AS SELECT * FROM public.users;
+
+CREATE TABLE IF NOT EXISTS public.staff (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    role TEXT NOT NULL DEFAULT 'USER',
+    account_status TEXT DEFAULT 'pending',
+    customer_id TEXT UNIQUE NOT NULL,
+    phone TEXT,
+    avatar_url TEXT,
+    nationality TEXT DEFAULT 'Tanzania',
+    language TEXT DEFAULT 'en',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.wallets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    name TEXT NOT NULL, 
+    balance NUMERIC DEFAULT 0, 
+    currency TEXT DEFAULT 'TZS', 
+    color TEXT, 
+    icon TEXT, 
+    management_tier TEXT DEFAULT 'linked', 
+    type TEXT DEFAULT 'operating', 
+    is_primary BOOLEAN DEFAULT FALSE,
+    status TEXT DEFAULT 'active',
+    is_locked BOOLEAN DEFAULT FALSE,
+    locked_at TIMESTAMP WITH TIME ZONE,
+    lock_reason TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.platform_vaults (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    vault_role TEXT, 
+    name TEXT,
+    balance NUMERIC DEFAULT 0, 
+    encrypted_balance TEXT, 
+    currency TEXT DEFAULT 'TZS', 
+    color TEXT, 
+    icon TEXT,
+    status TEXT DEFAULT 'active',
+    is_locked BOOLEAN DEFAULT FALSE,
+    locked_at TIMESTAMP WITH TIME ZONE,
+    lock_reason TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='wallets' AND column_name='is_locked'
+    ) THEN
+        ALTER TABLE public.wallets ADD COLUMN is_locked BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='wallets' AND column_name='locked_at'
+    ) THEN
+        ALTER TABLE public.wallets ADD COLUMN locked_at TIMESTAMP WITH TIME ZONE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='wallets' AND column_name='lock_reason'
+    ) THEN
+        ALTER TABLE public.wallets ADD COLUMN lock_reason TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='platform_vaults' AND column_name='status'
+    ) THEN
+        ALTER TABLE public.platform_vaults ADD COLUMN status TEXT DEFAULT 'active';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='platform_vaults' AND column_name='is_locked'
+    ) THEN
+        ALTER TABLE public.platform_vaults ADD COLUMN is_locked BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='platform_vaults' AND column_name='locked_at'
+    ) THEN
+        ALTER TABLE public.platform_vaults ADD COLUMN locked_at TIMESTAMP WITH TIME ZONE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='platform_vaults' AND column_name='lock_reason'
+    ) THEN
+        ALTER TABLE public.platform_vaults ADD COLUMN lock_reason TEXT;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    reference_id TEXT UNIQUE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    wallet_id UUID,
+    to_wallet_id UUID,
+    amount TEXT NOT NULL,
+    currency TEXT DEFAULT 'TZS',
+    description TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('created', 'pending', 'authorized', 'processing', 'settled', 'completed', 'failed', 'cancelled', 'held_for_review', 'reversed', 'refunded')),
+    status_notes TEXT,
+    date DATE DEFAULT CURRENT_DATE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.transaction_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    old_state TEXT,
+    new_state TEXT NOT NULL,
+    actor TEXT DEFAULT 'system',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Ensure category_id exists in transactions
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transactions' AND column_name='category_id') THEN
+        ALTER TABLE public.transactions ADD COLUMN category_id UUID;
+    END IF;
+    
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transactions' AND column_name='reference_id') THEN
+        ALTER TABLE public.transactions ADD COLUMN reference_id TEXT UNIQUE;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transactions' AND column_name='currency') THEN
+        ALTER TABLE public.transactions ADD COLUMN currency TEXT DEFAULT 'TZS';
+    END IF;
+
+    -- Add User Setting Columns
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='language') THEN
+        ALTER TABLE public.users ADD COLUMN language TEXT DEFAULT 'en';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_security') THEN
+        ALTER TABLE public.users ADD COLUMN notif_security BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_financial') THEN
+        ALTER TABLE public.users ADD COLUMN notif_financial BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_budget') THEN
+        ALTER TABLE public.users ADD COLUMN notif_budget BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_marketing') THEN
+        ALTER TABLE public.users ADD COLUMN notif_marketing BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='security_tx_pin_hash') THEN
+        ALTER TABLE public.users ADD COLUMN security_tx_pin_hash TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='security_tx_pin_enabled') THEN
+        ALTER TABLE public.users ADD COLUMN security_tx_pin_enabled BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='security_biometric_enabled') THEN
+        ALTER TABLE public.users ADD COLUMN security_biometric_enabled BOOLEAN DEFAULT FALSE;
+    END IF;
+
+    -- Add language to staff
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='language') THEN
+        ALTER TABLE public.staff ADD COLUMN language TEXT DEFAULT 'en';
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    tx_constraint RECORD;
+BEGIN
+    FOR tx_constraint IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'transactions'
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) LIKE '%status%'
+          AND pg_get_constraintdef(c.oid) NOT LIKE '%settled%'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE public.transactions DROP CONSTRAINT %I',
+            tx_constraint.conname
+        );
+    END LOOP;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'transactions'
+          AND c.conname = 'transactions_status_check_v2'
+    ) THEN
+        ALTER TABLE public.transactions
+            ADD CONSTRAINT transactions_status_check_v2
+            CHECK (
+                status IN (
+                    'created',
+                    'pending',
+                    'authorized',
+                    'processing',
+                    'settled',
+                    'completed',
+                    'failed',
+                    'cancelled',
+                    'held_for_review',
+                    'reversed',
+                    'refunded'
+                )
+            );
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.financial_ledger (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    wallet_id UUID,
+    entry_type TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    balance_after TEXT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Ensure balance_after_encrypted exists in financial_ledger
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_ledger' AND column_name='balance_after_encrypted') THEN
+        ALTER TABLE public.financial_ledger ADD COLUMN balance_after_encrypted TEXT;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.goals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    name TEXT NOT NULL, 
+    target NUMERIC NOT NULL, 
+    current NUMERIC DEFAULT 0, 
+    deadline TIMESTAMP WITH TIME ZONE, 
+    color TEXT, 
+    icon TEXT, 
+    funding_strategy TEXT DEFAULT 'manual', 
+    auto_allocation_enabled BOOLEAN DEFAULT FALSE, 
+    linked_income_percentage NUMERIC,
+    monthly_target NUMERIC,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    name TEXT NOT NULL, 
+    budget TEXT, 
+    color TEXT, 
+    icon TEXT, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ENTERPRISE UPGRADE: Organizations & B2B Multi-Tenancy
+CREATE TABLE IF NOT EXISTS public.organizations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    registration_number TEXT,
+    tax_id TEXT,
+    country TEXT,
+    base_currency TEXT DEFAULT 'USD',
+    status TEXT DEFAULT 'ACTIVE',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TRUSTBRIDGE: Escrow Agreements
+CREATE TABLE IF NOT EXISTS public.escrow_agreements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID NOT NULL REFERENCES public.transactions(id) ON DELETE CASCADE,
+    sender_id UUID NOT NULL REFERENCES auth.users(id),
+    receiver_id UUID NOT NULL REFERENCES auth.users(id),
+    amount NUMERIC NOT NULL,
+    currency TEXT NOT NULL,
+    conditions JSONB DEFAULT '{}'::jsonb,
+    status TEXT DEFAULT 'HELD' CHECK (status IN ('HELD', 'RELEASED', 'DISPUTED', 'REFUNDED')),
+    dispute_metadata JSONB DEFAULT '{}'::jsonb,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TREASURY: Multi-Sig Policies & Approvers
+CREATE TABLE IF NOT EXISTS public.treasury_policies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    min_approvals INTEGER DEFAULT 1,
+    max_amount_per_tx NUMERIC,
+    daily_limit NUMERIC,
+    currency TEXT DEFAULT 'USD',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.treasury_approvers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    role TEXT DEFAULT 'APPROVER',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(organization_id, user_id)
+);
+
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='organization_id') THEN
+        ALTER TABLE public.users ADD COLUMN organization_id UUID REFERENCES public.organizations(id);
+        ALTER TABLE public.users ADD COLUMN org_role TEXT;
+    END IF;
+END $$;
+
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='goals' AND column_name='organization_id') THEN
+        ALTER TABLE public.goals ADD COLUMN organization_id UUID REFERENCES public.organizations(id);
+        ALTER TABLE public.goals ADD COLUMN currency TEXT DEFAULT 'TZS';
+        ALTER TABLE public.goals ADD COLUMN status TEXT DEFAULT 'ACTIVE';
+        ALTER TABLE public.goals ADD COLUMN is_corporate BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='goals' AND column_name='linked_income_percentage') THEN
+        ALTER TABLE public.goals ADD COLUMN linked_income_percentage NUMERIC;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='goals' AND column_name='monthly_target') THEN
+        ALTER TABLE public.goals ADD COLUMN monthly_target NUMERIC;
+    END IF;
+END $$;
+
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='categories' AND column_name='organization_id') THEN
+        ALTER TABLE public.categories ADD COLUMN organization_id UUID REFERENCES public.organizations(id);
+        ALTER TABLE public.categories ADD COLUMN currency TEXT DEFAULT 'TZS';
+        ALTER TABLE public.categories ADD COLUMN period TEXT DEFAULT 'MONTHLY';
+        ALTER TABLE public.categories ADD COLUMN hard_limit BOOLEAN DEFAULT FALSE;
+        ALTER TABLE public.categories ADD COLUMN is_corporate BOOLEAN DEFAULT FALSE;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.budget_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID REFERENCES public.categories(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    organization_id UUID REFERENCES public.organizations(id) ON DELETE CASCADE,
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    amount NUMERIC NOT NULL,
+    alert_type TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.background_jobs (
+    id UUID PRIMARY KEY,
+    type TEXT NOT NULL,
+    payload JSONB,
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3,
+    last_error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS public.tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    text TEXT NOT NULL, 
+    completed BOOLEAN DEFAULT FALSE, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    due_date TIMESTAMP WITH TIME ZONE,
+    linked_goal_id UUID REFERENCES public.goals(id) ON DELETE SET NULL,
+    bounty NUMERIC DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS public.aml_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    risk_score NUMERIC NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.user_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    subject TEXT NOT NULL, 
+    body TEXT NOT NULL, 
+    category TEXT NOT NULL, 
+    is_read BOOLEAN DEFAULT FALSE, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.staff_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    sender_id UUID REFERENCES auth.users(id) ON DELETE CASCADE, 
+    recipient_id UUID REFERENCES auth.users(id) ON DELETE CASCADE, 
+    sender_name TEXT, 
+    content TEXT NOT NULL, 
+    type TEXT DEFAULT 'staff', 
+    is_flagged BOOLEAN DEFAULT FALSE, 
+    target_role TEXT, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.kms_keys (
+    key_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    wrapped_jwk TEXT NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.audit_trail (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    prev_hash TEXT, 
+    hash TEXT NOT NULL, 
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), 
+    event_type TEXT NOT NULL, 
+    actor_id TEXT, 
+    transaction_id TEXT, 
+    action TEXT NOT NULL, 
+    metadata JSONB, 
+    signature TEXT
+);
+
+CREATE TABLE IF NOT EXISTS public.provider_anomalies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE, 
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
+    wallet_id UUID, 
+    risk_score NUMERIC NOT NULL, 
+    detection_flags TEXT[] NOT NULL, 
+    status TEXT DEFAULT 'OPEN', 
+    resolution_notes TEXT, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.financial_partners (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    name VARCHAR(50) NOT NULL,
+    type VARCHAR(20) NOT NULL CHECK (LOWER(type) IN ('mobile_money', 'bank', 'card', 'crypto')),
+    icon TEXT,
+    color TEXT,
+    connection_secret VARCHAR(255),
+    client_id TEXT,
+    client_secret TEXT,
+    api_base_url TEXT,
+    webhook_secret TEXT,
+    token_cache TEXT,
+    token_expiry BIGINT,
+    provider_metadata JSONB DEFAULT '{}'::jsonb,
+    mapping_config JSONB DEFAULT '{}'::jsonb,
+    logic_type TEXT DEFAULT 'REGISTRY',
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.institutional_payment_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    role TEXT NOT NULL,
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE SET NULL,
+    bank_name TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    account_number TEXT NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'TZS',
+    country_code TEXT,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    is_primary BOOLEAN DEFAULT FALSE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.external_fund_movements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    direction TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'initiated',
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE SET NULL,
+    institutional_source_account_id UUID REFERENCES public.institutional_payment_accounts(id) ON DELETE SET NULL,
+    institutional_target_account_id UUID REFERENCES public.institutional_payment_accounts(id) ON DELETE SET NULL,
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    source_wallet_id UUID,
+    target_wallet_id UUID,
+    gross_amount NUMERIC NOT NULL DEFAULT 0,
+    net_amount NUMERIC NOT NULL DEFAULT 0,
+    fee_amount NUMERIC NOT NULL DEFAULT 0,
+    tax_amount NUMERIC NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'TZS',
+    description TEXT,
+    external_reference TEXT,
+    source_external_ref TEXT,
+    target_external_ref TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.provider_routing_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rail TEXT NOT NULL,
+    country_code TEXT,
+    currency TEXT,
+    operation_code TEXT NOT NULL,
+    provider_id UUID NOT NULL REFERENCES public.financial_partners(id) ON DELETE CASCADE,
+    priority INTEGER NOT NULL DEFAULT 100,
+    conditions JSONB DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.platform_fee_configs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    flow_code TEXT NOT NULL,
+    transaction_type TEXT,
+    operation_type TEXT,
+    direction TEXT,
+    rail TEXT,
+    channel TEXT,
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE CASCADE,
+    currency TEXT,
+    country_code TEXT,
+    percentage_rate NUMERIC NOT NULL DEFAULT 0,
+    fixed_amount NUMERIC NOT NULL DEFAULT 0,
+    minimum_fee NUMERIC NOT NULL DEFAULT 0,
+    maximum_fee NUMERIC,
+    tax_rate NUMERIC NOT NULL DEFAULT 0,
+    gov_fee_rate NUMERIC NOT NULL DEFAULT 0,
+    stamp_duty_fixed NUMERIC NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 100,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.inbound_sms_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    gateway_id TEXT NOT NULL,
+    phone_number TEXT NOT NULL,
+    raw_message TEXT NOT NULL,
+    normalized_message TEXT,
+    message_type TEXT,
+    request_id TEXT,
+    carrier_ref TEXT,
+    received_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    parse_status TEXT,
+    signature_status TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.offline_transaction_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id TEXT NOT NULL UNIQUE,
+    tenant_id UUID,
+    phone_number TEXT NOT NULL,
+    user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    device_id TEXT,
+    action TEXT NOT NULL,
+    amount NUMERIC(20, 2),
+    currency TEXT,
+    source_wallet_id TEXT,
+    budget_id TEXT,
+    recipient_ref TEXT,
+    status TEXT NOT NULL,
+    challenge_code TEXT,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    confirmed_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    failure_reason TEXT,
+    correlation_id TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.outbound_sms_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id TEXT,
+    phone_number TEXT NOT NULL,
+    message_body TEXT NOT NULL,
+    message_type TEXT,
+    send_status TEXT,
+    gateway_ref TEXT,
+    sent_at TIMESTAMP WITH TIME ZONE,
+    delivered_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+DECLARE
+    partner_constraint RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='client_id') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN client_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='client_secret') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN client_secret TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='api_base_url') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN api_base_url TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='webhook_secret') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN webhook_secret TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='token_cache') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN token_cache TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='token_expiry') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN token_expiry BIGINT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='financial_partners' AND column_name='logic_type') THEN
+        ALTER TABLE public.financial_partners ADD COLUMN logic_type TEXT DEFAULT 'REGISTRY';
+    END IF;
+
+    BEGIN
+        ALTER TABLE public.financial_partners ALTER COLUMN connection_secret DROP NOT NULL;
+    EXCEPTION
+        WHEN others THEN NULL;
+    END;
+
+    UPDATE public.financial_partners
+    SET type = LOWER(type)
+    WHERE type IS NOT NULL
+      AND type <> LOWER(type);
+
+    FOR partner_constraint IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'financial_partners'
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) LIKE '%type%'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE public.financial_partners DROP CONSTRAINT %I',
+            partner_constraint.conname
+        );
+    END LOOP;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'financial_partners'
+          AND c.conname = 'financial_partners_type_check_v2'
+    ) THEN
+        ALTER TABLE public.financial_partners
+            ADD CONSTRAINT financial_partners_type_check_v2
+            CHECK (LOWER(type) IN ('mobile_money', 'bank', 'card', 'crypto'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'financial_partners'
+          AND c.conname = 'financial_partners_logic_type_check'
+    ) THEN
+        ALTER TABLE public.financial_partners
+            ADD CONSTRAINT financial_partners_logic_type_check
+            CHECK (logic_type IN ('REGISTRY', 'GENERIC_REST', 'SPECIALIZED'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'institutional_payment_accounts'
+          AND c.conname = 'institutional_payment_accounts_role_check'
+    ) THEN
+        ALTER TABLE public.institutional_payment_accounts
+            ADD CONSTRAINT institutional_payment_accounts_role_check
+            CHECK (role IN ('MAIN_COLLECTION', 'FEE_COLLECTION', 'TAX_COLLECTION', 'TRANSFER_SAVINGS'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'institutional_payment_accounts'
+          AND c.conname = 'institutional_payment_accounts_status_check'
+    ) THEN
+        ALTER TABLE public.institutional_payment_accounts
+            ADD CONSTRAINT institutional_payment_accounts_status_check
+            CHECK (status IN ('ACTIVE', 'INACTIVE'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'external_fund_movements'
+          AND c.conname = 'external_fund_movements_direction_check'
+    ) THEN
+        ALTER TABLE public.external_fund_movements
+            ADD CONSTRAINT external_fund_movements_direction_check
+            CHECK (direction IN ('INTERNAL_TO_EXTERNAL', 'EXTERNAL_TO_INTERNAL', 'EXTERNAL_TO_EXTERNAL'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'external_fund_movements'
+          AND c.conname = 'external_fund_movements_status_check'
+    ) THEN
+        ALTER TABLE public.external_fund_movements
+            ADD CONSTRAINT external_fund_movements_status_check
+            CHECK (status IN ('previewed', 'initiated', 'processing', 'completed', 'failed', 'recorded', 'reversed'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'provider_routing_rules'
+          AND c.conname = 'provider_routing_rules_rail_check'
+    ) THEN
+        ALTER TABLE public.provider_routing_rules
+            ADD CONSTRAINT provider_routing_rules_rail_check
+            CHECK (rail IN ('MOBILE_MONEY', 'BANK', 'CARD_GATEWAY', 'CRYPTO', 'WALLET'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'provider_routing_rules'
+          AND c.conname = 'provider_routing_rules_status_check'
+    ) THEN
+        ALTER TABLE public.provider_routing_rules
+            ADD CONSTRAINT provider_routing_rules_status_check
+            CHECK (status IN ('ACTIVE', 'INACTIVE'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'platform_fee_configs'
+          AND c.conname = 'platform_fee_configs_status_check'
+    ) THEN
+        ALTER TABLE public.platform_fee_configs
+            ADD CONSTRAINT platform_fee_configs_status_check
+            CHECK (status IN ('ACTIVE', 'INACTIVE'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'offline_transaction_sessions'
+          AND c.conname = 'offline_transaction_sessions_status_check'
+    ) THEN
+        ALTER TABLE public.offline_transaction_sessions
+            ADD CONSTRAINT offline_transaction_sessions_status_check
+            CHECK (status IN ('RECEIVED', 'PARSED', 'VALIDATED', 'PENDING_CONFIRMATION', 'FORWARDED_TO_ORBI', 'CHALLENGE_SENT', 'CONFIRMED', 'SUCCESS', 'FAILED', 'EXPIRED', 'REJECTED'));
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.digital_merchants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    name TEXT NOT NULL,
+    category TEXT,
+    status TEXT DEFAULT 'ACTIVE',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Multi-Tenant Merchant Architecture
+CREATE TABLE IF NOT EXISTS public.merchants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_name TEXT NOT NULL,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    status TEXT DEFAULT 'pending', -- pending, active, suspended, closed
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.merchant_wallets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    base_wallet_id UUID,
+    name TEXT NOT NULL,
+    wallet_type TEXT DEFAULT 'operating',
+    is_primary BOOLEAN DEFAULT FALSE,
+    balance NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'active',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.merchant_settlements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE UNIQUE,
+    bank_name TEXT NOT NULL,
+    bank_account TEXT NOT NULL,
+    settlement_schedule TEXT DEFAULT 'daily',
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+
+
+-- Settlement Lifecycle
+CREATE TABLE IF NOT EXISTS public.settlement_lifecycle (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    external_movement_id UUID REFERENCES public.external_fund_movements(id) ON DELETE SET NULL,
+    merchant_settlement_id UUID REFERENCES public.merchant_settlements(id) ON DELETE SET NULL,
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE SET NULL,
+
+    lifecycle_key TEXT UNIQUE,
+    settlement_batch_id TEXT,
+    provider_reference TEXT,
+    provider_status TEXT,
+
+    rail TEXT,
+    direction TEXT,
+    operation_type TEXT,
+    currency TEXT DEFAULT 'TZS',
+
+    gross_amount NUMERIC NOT NULL DEFAULT 0,
+    fee_amount NUMERIC NOT NULL DEFAULT 0,
+    tax_amount NUMERIC NOT NULL DEFAULT 0,
+    net_amount NUMERIC NOT NULL DEFAULT 0,
+
+    stage TEXT NOT NULL DEFAULT 'INITIATED',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+
+    initiated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    queued_at TIMESTAMP WITH TIME ZONE,
+    processing_at TIMESTAMP WITH TIME ZONE,
+    sent_to_provider_at TIMESTAMP WITH TIME ZONE,
+    provider_confirmed_at TIMESTAMP WITH TIME ZONE,
+    settled_at TIMESTAMP WITH TIME ZONE,
+    reconciled_at TIMESTAMP WITH TIME ZONE,
+    failed_at TIMESTAMP WITH TIME ZONE,
+    reversed_at TIMESTAMP WITH TIME ZONE,
+
+    metadata JSONB DEFAULT '{}'::jsonb,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+DECLARE
+    settlement_constraint RECORD;
+BEGIN
+    FOR settlement_constraint IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'settlement_lifecycle'
+          AND c.contype = 'c'
+          AND (
+              pg_get_constraintdef(c.oid) LIKE '%stage%'
+              OR pg_get_constraintdef(c.oid) LIKE '%status%'
+          )
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE public.settlement_lifecycle DROP CONSTRAINT %I',
+            settlement_constraint.conname
+        );
+    END LOOP;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'settlement_lifecycle'
+          AND c.conname = 'settlement_lifecycle_stage_check_v1'
+    ) THEN
+        ALTER TABLE public.settlement_lifecycle
+            ADD CONSTRAINT settlement_lifecycle_stage_check_v1
+            CHECK (
+                stage IN (
+                    'INITIATED',
+                    'QUEUED',
+                    'PROCESSING',
+                    'SENT_TO_PROVIDER',
+                    'PROVIDER_CONFIRMED',
+                    'SETTLED',
+                    'RECONCILED',
+                    'FAILED',
+                    'REVERSED'
+                )
+            );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'settlement_lifecycle'
+          AND c.conname = 'settlement_lifecycle_status_check_v1'
+    ) THEN
+        ALTER TABLE public.settlement_lifecycle
+            ADD CONSTRAINT settlement_lifecycle_status_check_v1
+            CHECK (
+                status IN (
+                    'ACTIVE',
+                    'COMPLETED',
+                    'FAILED',
+                    'CANCELLED',
+                    'REVERSED'
+                )
+            );
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.set_settlement_lifecycle_updated_at()
+RETURNS trigger AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_settlement_lifecycle_updated_at ON public.settlement_lifecycle;
+CREATE TRIGGER trg_settlement_lifecycle_updated_at
+BEFORE UPDATE ON public.settlement_lifecycle
+FOR EACH ROW
+EXECUTE FUNCTION public.set_settlement_lifecycle_updated_at();
+
+CREATE TABLE IF NOT EXISTS public.merchant_fees (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE UNIQUE,
+    transaction_fee_percent NUMERIC DEFAULT 0.01,
+    fixed_fee NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='owner_user_id') THEN
+        ALTER TABLE public.merchants ADD COLUMN owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_wallets' AND column_name='owner_user_id') THEN
+        ALTER TABLE public.merchant_wallets ADD COLUMN owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_wallets' AND column_name='base_wallet_id') THEN
+        ALTER TABLE public.merchant_wallets ADD COLUMN base_wallet_id UUID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_wallets' AND column_name='wallet_type') THEN
+        ALTER TABLE public.merchant_wallets ADD COLUMN wallet_type TEXT DEFAULT 'operating';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_wallets' AND column_name='is_primary') THEN
+        ALTER TABLE public.merchant_wallets ADD COLUMN is_primary BOOLEAN DEFAULT FALSE;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID UNIQUE REFERENCES public.users(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    commission_enabled BOOLEAN DEFAULT TRUE,
+    service_pay_number TEXT UNIQUE,
+    cash_withdraw_till TEXT UNIQUE,
+    service_wallet_id UUID,
+    commission_wallet_id UUID,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.agent_wallets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID REFERENCES public.agents(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    base_wallet_id UUID,
+    name TEXT NOT NULL,
+    wallet_type TEXT DEFAULT 'operating',
+    is_primary BOOLEAN DEFAULT FALSE,
+    balance NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'active',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='service_pay_number') THEN
+        ALTER TABLE public.agents ADD COLUMN service_pay_number TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='cash_withdraw_till') THEN
+        ALTER TABLE public.agents ADD COLUMN cash_withdraw_till TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='service_wallet_id') THEN
+        ALTER TABLE public.agents ADD COLUMN service_wallet_id UUID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agents' AND column_name='commission_wallet_id') THEN
+        ALTER TABLE public.agents ADD COLUMN commission_wallet_id UUID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agent_wallets' AND column_name='owner_user_id') THEN
+        ALTER TABLE public.agent_wallets ADD COLUMN owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agent_wallets' AND column_name='base_wallet_id') THEN
+        ALTER TABLE public.agent_wallets ADD COLUMN base_wallet_id UUID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agent_wallets' AND column_name='wallet_type') THEN
+        ALTER TABLE public.agent_wallets ADD COLUMN wallet_type TEXT DEFAULT 'operating';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agent_wallets' AND column_name='is_primary') THEN
+        ALTER TABLE public.agent_wallets ADD COLUMN is_primary BOOLEAN DEFAULT FALSE;
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_service_pay_number
+    ON public.agents(service_pay_number)
+    WHERE service_pay_number IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_cash_withdraw_till
+    ON public.agents(cash_withdraw_till)
+    WHERE cash_withdraw_till IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.merchant_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID UNIQUE REFERENCES public.transactions(id) ON DELETE CASCADE,
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    merchant_wallet_id UUID REFERENCES public.merchant_wallets(id) ON DELETE SET NULL,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    direction TEXT DEFAULT 'inbound',
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'pending',
+    service_type TEXT DEFAULT 'merchant_payment',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_transactions' AND column_name='owner_user_id') THEN
+        ALTER TABLE public.merchant_transactions ADD COLUMN owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='merchant_transactions' AND column_name='customer_user_id') THEN
+        ALTER TABLE public.merchant_transactions ADD COLUMN customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.agent_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID UNIQUE REFERENCES public.transactions(id) ON DELETE CASCADE,
+    agent_id UUID REFERENCES public.agents(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    agent_wallet_id UUID REFERENCES public.agent_wallets(id) ON DELETE SET NULL,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    direction TEXT DEFAULT 'inbound',
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'pending',
+    service_type TEXT DEFAULT 'agent_cash',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agent_transactions' AND column_name='owner_user_id') THEN
+        ALTER TABLE public.agent_transactions ADD COLUMN owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='agent_transactions' AND column_name='customer_user_id') THEN
+        ALTER TABLE public.agent_transactions ADD COLUMN customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.service_actor_customer_links (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    actor_role TEXT NOT NULL,
+    actor_registry_type TEXT,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    customer_customer_id TEXT,
+    relationship_type TEXT DEFAULT 'sponsored_registration',
+    status TEXT DEFAULT 'active',
+    commission_enabled BOOLEAN DEFAULT TRUE,
+    commission_started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    commission_expires_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_by UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.service_commissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    actor_role TEXT NOT NULL,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    source_transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    payout_transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    commission_type TEXT NOT NULL,
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    rate NUMERIC DEFAULT 0,
+    fixed_amount NUMERIC DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    effective_from TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    effective_until TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.service_access_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    requested_role TEXT NOT NULL,
+    requested_registry_type TEXT NOT NULL,
+    current_user_role TEXT,
+    current_user_registry_type TEXT,
+    status TEXT DEFAULT 'pending',
+    business_name TEXT,
+    phone TEXT,
+    submitted_via TEXT DEFAULT 'mobile_app',
+    note TEXT,
+    review_note TEXT,
+    reviewed_by UUID REFERENCES public.staff(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    approved_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'service_access_requests'
+          AND column_name = 'current_role'
+    ) THEN
+        ALTER TABLE public.service_access_requests
+            RENAME COLUMN "current_role" TO current_user_role;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'service_access_requests'
+          AND column_name = 'current_registry_type'
+    ) THEN
+        ALTER TABLE public.service_access_requests
+            RENAME COLUMN "current_registry_type" TO current_user_registry_type;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'service_access_requests'
+          AND column_name = 'current_user_role'
+    ) THEN
+        ALTER TABLE public.service_access_requests
+            ADD COLUMN current_user_role TEXT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'service_access_requests'
+          AND column_name = 'current_user_registry_type'
+    ) THEN
+        ALTER TABLE public.service_access_requests
+            ADD COLUMN current_user_registry_type TEXT;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_merchants_owner ON public.merchants(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_wallets_merchant ON public.merchant_wallets(merchant_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_wallets_owner_user ON public.merchant_wallets(owner_user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_actor_customer_unique
+    ON public.service_actor_customer_links(actor_user_id, customer_user_id);
+CREATE INDEX IF NOT EXISTS idx_agents_user ON public.agents(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_wallets_agent ON public.agent_wallets(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_wallets_owner_user ON public.agent_wallets(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_transactions_owner ON public.merchant_transactions(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_transactions_customer ON public.merchant_transactions(customer_user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_transactions_owner ON public.agent_transactions(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_transactions_customer ON public.agent_transactions(customer_user_id);
+CREATE INDEX IF NOT EXISTS idx_service_links_actor ON public.service_actor_customer_links(actor_user_id);
+CREATE INDEX IF NOT EXISTS idx_service_links_customer ON public.service_actor_customer_links(customer_user_id);
+CREATE INDEX IF NOT EXISTS idx_service_commissions_actor ON public.service_commissions(actor_user_id);
+CREATE INDEX IF NOT EXISTS idx_service_commissions_source_tx ON public.service_commissions(source_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_service_access_requests_user ON public.service_access_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_service_access_requests_status ON public.service_access_requests(status);
+CREATE INDEX IF NOT EXISTS idx_service_access_requests_role ON public.service_access_requests(requested_role);
+
+CREATE TABLE IF NOT EXISTS public.regulatory_config (
+    id TEXT PRIMARY KEY, 
+    vat_rate NUMERIC DEFAULT 0.05, 
+    service_fee_rate NUMERIC DEFAULT 0.01, 
+    gov_fee_rate NUMERIC DEFAULT 0.005, 
+    stamp_duty_fixed NUMERIC DEFAULT 1.0, 
+    is_active BOOLEAN DEFAULT TRUE, 
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), 
+    updated_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS public.transfer_tax_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    rate NUMERIC NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.kyc_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    id_type TEXT NOT NULL CHECK (id_type IN ('NATIONAL_ID', 'DRIVER_LICENSE', 'VOTER_ID', 'PASSPORT')),
+    id_number TEXT NOT NULL,
+    document_url TEXT NOT NULL,
+    selfie_url TEXT NOT NULL,
+    status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
+    reviewer_id UUID,
+    rejection_reason TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS public.user_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    refresh_token_hash TEXT NOT NULL,
+    device_fingerprint TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    is_revoked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    last_active_at TIMESTAMPTZ DEFAULT NOW(),
+    replaced_by TEXT,
+    is_trusted_device BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS public.user_devices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    device_fingerprint TEXT NOT NULL,
+    device_name TEXT,
+    device_type TEXT,
+    user_agent TEXT,
+    last_active_at TIMESTAMPTZ DEFAULT NOW(),
+    is_trusted BOOLEAN DEFAULT FALSE,
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, device_fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS public.user_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    document_type TEXT NOT NULL,
+    file_url TEXT NOT NULL,
+    file_name TEXT,
+    mime_type TEXT,
+    size_bytes BIGINT,
+    status TEXT DEFAULT 'pending',
+    uploaded_at TIMESTAMPTZ DEFAULT NOW(),
+    verified_at TIMESTAMPTZ,
+    verified_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    rejection_reason TEXT,
+    metadata JSONB DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS public.fee_collector_wallets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fee_type TEXT NOT NULL UNIQUE,
+    vault_id UUID REFERENCES public.platform_vaults(id) ON DELETE CASCADE,
+    external_bank_account_id TEXT,
+    balance NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.system_nodes (node_type TEXT PRIMARY KEY, vault_id UUID NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.chargeback_cases (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.payment_reviews (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.payment_metrics_snapshots (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.transaction_status_logs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.ctr_reports (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.system_catalog (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.reported_issues (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.ai_reports (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.rule_violations (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.security_rules (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.support_tickets (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.staff_issues (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), data JSONB, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.approval_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+    type TEXT NOT NULL, 
+    target_id UUID NOT NULL, 
+    requester_id UUID REFERENCES auth.users(id) ON DELETE CASCADE, 
+    organization_id UUID REFERENCES public.organizations(id),
+    policy_id UUID REFERENCES public.treasury_policies(id),
+    status TEXT DEFAULT 'PENDING', 
+    metadata JSONB, 
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS public.legal_holds (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), target_type TEXT NOT NULL, target_id UUID NOT NULL, reason TEXT, active BOOLEAN DEFAULT TRUE, issued_by TEXT, issued_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), released_at TIMESTAMP WITH TIME ZONE);
+CREATE TABLE IF NOT EXISTS public.infra_system_matrix (config_key TEXT PRIMARY KEY, config_data JSONB NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_by TEXT);
+CREATE TABLE IF NOT EXISTS public.infra_app_tokens (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, app_id TEXT UNIQUE NOT NULL, app_token TEXT NOT NULL, tier TEXT NOT NULL, status TEXT DEFAULT 'ACTIVE', created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.infra_tx_limits (id TEXT PRIMARY KEY, max_per_transaction NUMERIC, max_daily_total NUMERIC, max_monthly_total NUMERIC, category_limits JSONB, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_by TEXT);
+CREATE TABLE IF NOT EXISTS public.infra_snapshots (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), actor_id TEXT, snapshot_data JSONB NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS public.platform_configs (config_key TEXT PRIMARY KEY, config_data JSONB NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_by TEXT);
+CREATE TABLE IF NOT EXISTS public.app_registry (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, app_id TEXT UNIQUE NOT NULL, app_token TEXT NOT NULL, tier TEXT NOT NULL, status TEXT DEFAULT 'ACTIVE', developer_id TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+
+CREATE TABLE IF NOT EXISTS public.fee_correction_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rule_name TEXT NOT NULL,
+    description TEXT,
+    transaction_type TEXT, 
+    fee_type TEXT, 
+    correction_formula TEXT, 
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.fee_correction_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID REFERENCES public.transactions(id),
+    original_fee_amount NUMERIC,
+    corrected_fee_amount NUMERIC,
+    correction_rule_id UUID REFERENCES public.fee_correction_rules(id),
+    reason TEXT,
+    corrected_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.item_reconciliation_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    vault_id UUID REFERENCES public.platform_vaults(id) ON DELETE CASCADE,
+    partner_id TEXT,
+    internal_balance NUMERIC DEFAULT 0,
+    external_balance NUMERIC DEFAULT 0,
+    discrepancy NUMERIC DEFAULT 0,
+    status TEXT DEFAULT 'MATCHED',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.reconciliation_reports (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    type TEXT NOT NULL, -- INTERNAL, SYSTEM, EXTERNAL
+    expected_balance NUMERIC NOT NULL,
+    actual_balance NUMERIC NOT NULL,
+    difference NUMERIC NOT NULL,
+    status TEXT NOT NULL, -- MATCHED, MISMATCH, INVESTIGATING
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 3. CORE FUNCTIONS (REPLACEABLE)
+CREATE OR REPLACE FUNCTION public.get_auth_role()
+RETURNS TEXT AS $$
+DECLARE
+  r TEXT;
+BEGIN
+  SELECT role INTO r FROM public.staff WHERE id = auth.uid();
+  IF r IS NULL THEN
+    SELECT role INTO r FROM public.users WHERE id = auth.uid();
+  END IF;
+  RETURN COALESCE(r, 'USER');
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.update_wallet_balance(target_wallet_id UUID, new_balance NUMERIC, new_encrypted TEXT)
+RETURNS void AS $$
+BEGIN
+    UPDATE public.wallets SET balance = new_balance WHERE id = target_wallet_id;
+    UPDATE public.platform_vaults SET balance = new_balance, encrypted_balance = new_encrypted WHERE id = target_wallet_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.delete_old_activity()
+RETURNS void AS $$
+BEGIN
+    DELETE FROM public.audit_trail WHERE timestamp < NOW() - INTERVAL '1 year';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Atomic Banking RPC
+CREATE OR REPLACE FUNCTION public.post_transaction_v2(
+    p_tx_id UUID,
+    p_user_id UUID,
+    p_wallet_id UUID,
+    p_to_wallet_id UUID,
+    p_amount TEXT,
+    p_description TEXT,
+    p_type TEXT,
+    p_status TEXT,
+    p_date DATE,
+    p_metadata JSONB,
+    p_category_id UUID,
+    p_legs JSONB,
+    p_reference_id TEXT DEFAULT NULL
+)
+RETURNS void AS $$
+DECLARE
+    leg JSONB;
+BEGIN
+    IF p_wallet_id IS NOT NULL AND (
+        EXISTS (
+            SELECT 1 FROM public.wallets w
+            WHERE w.id = p_wallet_id
+              AND (COALESCE(w.is_locked, FALSE)
+                   OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.platform_vaults v
+            WHERE v.id = p_wallet_id
+              AND (COALESCE(v.is_locked, FALSE)
+                   OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        )
+    ) THEN
+        RAISE EXCEPTION 'WALLET_LOCKED: Source wallet is locked';
+    END IF;
+
+    IF p_to_wallet_id IS NOT NULL AND (
+        EXISTS (
+            SELECT 1 FROM public.wallets w
+            WHERE w.id = p_to_wallet_id
+              AND (COALESCE(w.is_locked, FALSE)
+                   OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.platform_vaults v
+            WHERE v.id = p_to_wallet_id
+              AND (COALESCE(v.is_locked, FALSE)
+                   OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        )
+    ) THEN
+        RAISE EXCEPTION 'WALLET_LOCKED: Target wallet is locked';
+    END IF;
+
+    INSERT INTO public.transactions (
+        id, reference_id, user_id, wallet_id, to_wallet_id, amount, description, type, status, date, metadata, category_id
+    ) VALUES (
+        p_tx_id, p_reference_id, p_user_id, p_wallet_id, p_to_wallet_id, p_amount, p_description, p_type, p_status, p_date, p_metadata, p_category_id
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
+    LOOP
+        IF EXISTS (
+            SELECT 1 FROM public.wallets w
+            WHERE w.id = (leg->>'wallet_id')::UUID
+              AND (COALESCE(w.is_locked, FALSE)
+                   OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.platform_vaults v
+            WHERE v.id = (leg->>'wallet_id')::UUID
+              AND (COALESCE(v.is_locked, FALSE)
+                   OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        ) THEN
+            RAISE EXCEPTION 'WALLET_LOCKED: Wallet % is locked', (leg->>'wallet_id');
+        END IF;
+
+        INSERT INTO public.financial_ledger (
+            id, transaction_id, user_id, wallet_id, entry_type, amount, balance_after, balance_after_encrypted, description
+        ) VALUES (
+            gen_random_uuid(), p_tx_id, p_user_id, 
+            (leg->>'wallet_id')::UUID, 
+            leg->>'entry_type', 
+            leg->>'amount', 
+            (leg->>'balance_after')::TEXT, 
+            leg->>'balance_after_encrypted', 
+            leg->>'description'
+        );
+
+        UPDATE public.wallets 
+        SET balance = (leg->>'balance_after')::NUMERIC 
+        WHERE id = (leg->>'wallet_id')::UUID;
+
+        UPDATE public.platform_vaults 
+        SET balance = (leg->>'balance_after')::NUMERIC, 
+            encrypted_balance = leg->>'balance_after_encrypted' 
+        WHERE id = (leg->>'wallet_id')::UUID;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Atomic Append Ledger Legs RPC
+CREATE OR REPLACE FUNCTION public.append_ledger_entries_v1(
+    p_tx_id UUID,
+    p_legs JSONB
+)
+RETURNS void AS $$
+DECLARE
+    leg JSONB;
+BEGIN
+    FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
+    LOOP
+        IF EXISTS (
+            SELECT 1 FROM public.wallets w
+            WHERE w.id = (leg->>'wallet_id')::UUID
+              AND (COALESCE(w.is_locked, FALSE)
+                   OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.platform_vaults v
+            WHERE v.id = (leg->>'wallet_id')::UUID
+              AND (COALESCE(v.is_locked, FALSE)
+                   OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
+        ) THEN
+            RAISE EXCEPTION 'WALLET_LOCKED: Wallet % is locked', (leg->>'wallet_id');
+        END IF;
+
+        INSERT INTO public.financial_ledger (
+            id, transaction_id, user_id, wallet_id, entry_type, amount, balance_after, balance_after_encrypted, description
+        ) VALUES (
+            gen_random_uuid(), p_tx_id, 
+            (SELECT user_id FROM public.transactions WHERE id = p_tx_id),
+            (leg->>'wallet_id')::UUID, 
+            leg->>'entry_type', 
+            leg->>'amount', 
+            (leg->>'balance_after')::TEXT, 
+            leg->>'balance_after_encrypted', 
+            leg->>'description'
+        );
+
+        UPDATE public.wallets 
+        SET balance = (leg->>'balance_after')::NUMERIC 
+        WHERE id = (leg->>'wallet_id')::UUID;
+
+        UPDATE public.platform_vaults 
+        SET balance = (leg->>'balance_after')::NUMERIC, 
+            encrypted_balance = leg->>'balance_after_encrypted' 
+        WHERE id = (leg->>'wallet_id')::UUID;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- User Registration Handler
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
+DECLARE
+    new_user_id UUID;
+    new_customer_id TEXT;
+    encrypted_zero TEXT;
+    wallet1_id UUID;
+    wallet2_id UUID;
+    meta_customer_id TEXT;
+BEGIN
+    new_user_id := NEW.id;
+    meta_customer_id := NEW.raw_user_meta_data->>'customer_id';
+    
+    IF meta_customer_id IS NOT NULL THEN
+        new_customer_id := meta_customer_id;
+    ELSE
+        new_customer_id := 'OB' || to_char(NOW(), 'YY') || '-' || 
+                           (floor(random() * 9000 + 1000)::text) || '-' || 
+                           (floor(random() * 9000 + 1000)::text);
+    END IF;
+    
+    encrypted_zero := 'enc_v2_eyJ2ZXJzaW9uIjoxLCJpdiI6IkFBQUFBQUFBQUFBQSIsImNpcGhlcnRleHQiOiJBQUFBQUFBQUFBQUEiLCJ0YWciOiJBQUFBQUFBQUFBQUEiLCJ0aW1lc3RhbXAiOjAsImtleUlkIjoicC1ub2RlLWFjdGl2ZSIsImFsZ29yaXRobSI6IkFFUy1HQ00tMjU2In0='; 
+    
+    wallet1_id := md5(new_user_id::text || 'Orbi')::uuid;
+    wallet2_id := md5(new_user_id::text || 'PaySafe')::uuid;
+
+    INSERT INTO public.users (
+        id, email, full_name, customer_id, phone, nationality, currency, registry_type, role, app_origin, metadata
+    )
+    VALUES (
+        new_user_id,
+        NEW.email,
+        NEW.raw_user_meta_data->>'full_name',
+        new_customer_id,
+        NEW.raw_user_meta_data->>'phone',
+        COALESCE(NEW.raw_user_meta_data->>'nationality', 'Tanzania'),
+        'TZS',
+        COALESCE(NEW.raw_user_meta_data->>'registry_type', 'CONSUMER'),
+        COALESCE(NEW.raw_user_meta_data->>'role', 'USER'),
+        COALESCE(NEW.raw_user_meta_data->>'app_origin', 'OBI_INSTITUTIONAL_CORE_V25'),
+        jsonb_build_object('transfer_card', jsonb_build_object(
+            'holder_name', NEW.raw_user_meta_data->>'full_name',
+            'card_number_masked', new_customer_id,
+            'brand', 'mastercard_style',
+            'status', 'ready',
+            'provisioned_at', NOW(),
+            'product_name', 'Orbi'
+        ))
+    )
+    ON CONFLICT (id) DO UPDATE SET
+        email = EXCLUDED.email,
+        full_name = COALESCE(EXCLUDED.full_name, public.users.full_name),
+        customer_id = COALESCE(public.users.customer_id, EXCLUDED.customer_id),
+        metadata = public.users.metadata || EXCLUDED.metadata;
+
+    INSERT INTO public.platform_vaults (
+        id, user_id, vault_role, name, balance, encrypted_balance, currency, color, icon, metadata
+    )
+    VALUES (
+        wallet1_id, new_user_id, 'OPERATING', 'Orbi', 0, encrypted_zero, 'TZS', '#10B981', 'credit-card',
+        jsonb_build_object(
+            'linked_customer_id', new_customer_id,
+            'account_number', new_customer_id,
+            'display_name', NEW.raw_user_meta_data->>'full_name',
+            'card_type', 'Virtual Master'
+        )
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO public.platform_vaults (
+        id, user_id, vault_role, name, balance, encrypted_balance, currency, color, icon, metadata
+    )
+    VALUES (
+        wallet2_id, new_user_id, 'INTERNAL_TRANSFER', 'PaySafe', 0, encrypted_zero, 'TZS', '#6366F1', 'shield-check',
+        jsonb_build_object(
+            'is_secure_escrow', true,
+            'slogan', 'Secure Internal Transfers',
+            'display_mode', 'mask',
+            'account_number', 'ESC-' || new_customer_id
+        )
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO public.user_messages (
+        user_id, subject, body, category, is_read
+    )
+    VALUES (
+        new_user_id,
+        'Welcome to ORBI: Your Sovereign Financial Node',
+        'Welcome to the future of money. Your sovereign vault is active and ready.
+
+We are here to support your financial journey. If you need assistance, please reach out to our platform team:
+
+• Email: support@orbi.io
+• Phone: +255 700 000 000
+• Help Center: help.orbi.io
+
+Stay Sovereign,
+The ORBI Team',
+        'system',
+        FALSE
+    )
+    ON CONFLICT DO NOTHING;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- 4. TRIGGERS
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 5. RLS POLICIES (IDEMPOTENT)
+DO $$ 
+BEGIN
+    -- Enable RLS for all tables
+    ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.staff ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.financial_ledger ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.financial_partners ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.institutional_payment_accounts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.external_fund_movements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.settlement_lifecycle ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.provider_routing_rules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.inbound_sms_messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.offline_transaction_sessions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.outbound_sms_messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.system_nodes ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.chargeback_cases ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.payment_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.payment_metrics_snapshots ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.transaction_status_logs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.ctr_reports ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.digital_merchants ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.system_catalog ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.reported_issues ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.ai_reports ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.rule_violations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.security_rules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.support_tickets ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.staff_issues ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.audit_trail ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.approval_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.legal_holds ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.infra_system_matrix ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.infra_app_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.infra_tx_limits ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.user_messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.regulatory_config ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.transfer_tax_rules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.wallets ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.platform_vaults ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.staff_messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.goals ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.categories ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.infra_snapshots ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.platform_configs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.app_registry ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.provider_anomalies ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.kyc_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.user_sessions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.user_devices ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.user_documents ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.fee_correction_rules ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.fee_correction_logs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.item_reconciliation_audit ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.escrow_agreements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.treasury_policies ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.treasury_approvers ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.budget_alerts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.reconciliation_reports ENABLE ROW LEVEL SECURITY;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- Drop and Recreate Policies to ensure latest logic
+DROP POLICY IF EXISTS "Users view own organization" ON public.organizations;
+CREATE POLICY "Users view own organization" ON public.organizations 
+    FOR SELECT USING (id IN (SELECT organization_id FROM public.users WHERE id = auth.uid()));
+
+DROP POLICY IF EXISTS "Users view corporate goals" ON public.goals;
+DROP POLICY IF EXISTS "Users manage own goals" ON public.goals;
+CREATE POLICY "Users view corporate goals" ON public.goals 
+    FOR SELECT USING (
+        user_id = auth.uid() OR 
+        (is_corporate = true AND organization_id IN (SELECT organization_id FROM public.users WHERE id = auth.uid()))
+    );
+
+CREATE POLICY "Users manage own goals" ON public.goals
+    FOR ALL
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users view corporate budgets" ON public.categories;
+CREATE POLICY "Users view corporate budgets" ON public.categories 
+    FOR SELECT USING (
+        user_id = auth.uid() OR 
+        (is_corporate = true AND organization_id IN (SELECT organization_id FROM public.users WHERE id = auth.uid()))
+    );
+
+DROP POLICY IF EXISTS "Forensic Ledger Read" ON public.audit_trail;
+CREATE POLICY "Forensic Ledger Read" ON public.audit_trail FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT'));
+
+DROP POLICY IF EXISTS "Audit WORM Write" ON public.audit_trail;
+CREATE POLICY "Audit WORM Write" ON public.audit_trail FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+
+-- SYSTEM BYPASS: Ensure service_role (Admin Client) can always manage audit trails
+DROP POLICY IF EXISTS "System bypass audit trail" ON public.audit_trail;
+CREATE POLICY "System bypass audit trail" ON public.audit_trail FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users create transactions" ON public.transactions;
+CREATE POLICY "Users create transactions" ON public.transactions FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users view own transactions" ON public.transactions;
+CREATE POLICY "Users view own transactions" ON public.transactions FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Service role transaction bypass" ON public.transactions;
+CREATE POLICY "Service role transaction bypass" ON public.transactions FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Admin manage institutional accounts" ON public.institutional_payment_accounts;
+CREATE POLICY "Admin manage institutional accounts" ON public.institutional_payment_accounts
+    FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'))
+    WITH CHECK ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role institutional account bypass" ON public.institutional_payment_accounts;
+CREATE POLICY "Service role institutional account bypass" ON public.institutional_payment_accounts
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users view own external fund movements" ON public.external_fund_movements;
+CREATE POLICY "Users view own external fund movements" ON public.external_fund_movements
+    FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users create own external fund movements" ON public.external_fund_movements;
+CREATE POLICY "Users create own external fund movements" ON public.external_fund_movements
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Admin view external fund movements" ON public.external_fund_movements;
+CREATE POLICY "Admin view external fund movements" ON public.external_fund_movements
+    FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role external fund movement bypass" ON public.external_fund_movements;
+CREATE POLICY "Service role external fund movement bypass" ON public.external_fund_movements
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users view own settlement lifecycle" ON public.settlement_lifecycle;
+CREATE POLICY "Users view own settlement lifecycle"
+ON public.settlement_lifecycle
+FOR SELECT
+USING (
+    EXISTS (
+        SELECT 1
+        FROM public.transactions t
+        WHERE t.id = settlement_lifecycle.transaction_id
+          AND t.user_id = auth.uid()
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM public.external_fund_movements efm
+        WHERE efm.id = settlement_lifecycle.external_movement_id
+          AND efm.user_id = auth.uid()
+    )
+);
+
+DROP POLICY IF EXISTS "Admin view settlement lifecycle" ON public.settlement_lifecycle;
+CREATE POLICY "Admin view settlement lifecycle"
+ON public.settlement_lifecycle
+FOR SELECT
+USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role settlement lifecycle bypass" ON public.settlement_lifecycle;
+CREATE POLICY "Service role settlement lifecycle bypass"
+ON public.settlement_lifecycle
+FOR ALL TO service_role
+USING (true)
+WITH CHECK (true);
+
+
+DROP POLICY IF EXISTS "Admin manage provider routing rules" ON public.provider_routing_rules;
+CREATE POLICY "Admin manage provider routing rules" ON public.provider_routing_rules
+    FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'))
+    WITH CHECK ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role provider routing bypass" ON public.provider_routing_rules;
+CREATE POLICY "Service role provider routing bypass" ON public.provider_routing_rules
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role inbound sms bypass" ON public.inbound_sms_messages;
+CREATE POLICY "Service role inbound sms bypass" ON public.inbound_sms_messages
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role offline session bypass" ON public.offline_transaction_sessions;
+CREATE POLICY "Service role offline session bypass" ON public.offline_transaction_sessions
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role outbound sms bypass" ON public.outbound_sms_messages;
+CREATE POLICY "Service role outbound sms bypass" ON public.outbound_sms_messages
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Workforce Consumer Access" ON public.users;
+CREATE POLICY "Workforce Consumer Access" ON public.users FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'CUSTOMER_CARE'));
+
+DROP POLICY IF EXISTS "Consumer Self Management" ON public.users;
+CREATE POLICY "Consumer Self Management" ON public.users FOR SELECT USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "Admins manage workforce" ON public.staff;
+CREATE POLICY "Admins manage workforce" ON public.staff FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN'));
+
+DROP POLICY IF EXISTS "Staff visible to themselves" ON public.staff;
+CREATE POLICY "Staff visible to themselves" ON public.staff FOR SELECT USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "Users manage own wallets" ON public.wallets;
+CREATE POLICY "Users manage own wallets" ON public.wallets FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users manage own vaults" ON public.platform_vaults;
+CREATE POLICY "Users manage own vaults" ON public.platform_vaults FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Service role vault bypass" ON public.platform_vaults;
+CREATE POLICY "Service role vault bypass" ON public.platform_vaults FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users view own messages" ON public.user_messages;
+CREATE POLICY "Users view own messages" ON public.user_messages FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Staff view messages" ON public.staff_messages;
+CREATE POLICY "Staff view messages" ON public.staff_messages FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'CUSTOMER_CARE', 'AUDIT'));
+
+DROP POLICY IF EXISTS "Admin Node Management" ON public.infra_system_matrix;
+CREATE POLICY "Admin Node Management" ON public.infra_system_matrix FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'IT'));
+
+DROP POLICY IF EXISTS "Admin manage regulatory" ON public.regulatory_config;
+CREATE POLICY "Admin manage regulatory" ON public.regulatory_config FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT'));
+
+DROP POLICY IF EXISTS "Admins manage KYC requests" ON public.kyc_requests;
+CREATE POLICY "Admins manage KYC requests" ON public.kyc_requests FOR ALL USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'CUSTOMER_CARE'));
+
+DROP POLICY IF EXISTS "Admins view fee logs" ON public.fee_correction_logs;
+CREATE POLICY "Admins view fee logs" ON public.fee_correction_logs FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'FINANCE', 'AUDIT'));
+
+DROP POLICY IF EXISTS "Admins view reconciliation audits" ON public.item_reconciliation_audit;
+CREATE POLICY "Admins view reconciliation audits" ON public.item_reconciliation_audit FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT'));
+
+DROP POLICY IF EXISTS "Admins insert reconciliation audits" ON public.item_reconciliation_audit;
+CREATE POLICY "Admins insert reconciliation audits" ON public.item_reconciliation_audit FOR INSERT WITH CHECK ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'IT', 'AUDIT'));
+
+-- SYSTEM BYPASS: Ensure service_role (Admin Client) can always manage reconciliation logs
+DROP POLICY IF EXISTS "System bypass reconciliation" ON public.item_reconciliation_audit;
+CREATE POLICY "System bypass reconciliation" ON public.item_reconciliation_audit FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Admins view reconciliation reports" ON public.reconciliation_reports;
+CREATE POLICY "Admins view reconciliation reports" ON public.reconciliation_reports 
+    FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT'));
+
+DROP POLICY IF EXISTS "System manage reconciliation reports" ON public.reconciliation_reports;
+CREATE POLICY "System manage reconciliation reports" ON public.reconciliation_reports 
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- ==========================================
+-- NEXT-GEN SECURITY ARCHITECTURE (V26)
+-- ==========================================
+
+-- Layer 1: Passkeys (WebAuthn)
+CREATE TABLE IF NOT EXISTS public.passkeys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    credential_id TEXT UNIQUE NOT NULL,
+    public_key TEXT NOT NULL,
+    counter BIGINT DEFAULT 0,
+    transports JSONB DEFAULT '[]'::jsonb,
+    device_type TEXT,
+    backed_up BOOLEAN DEFAULT FALSE,
+    last_used_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_passkey_user ON public.passkeys(user_id);
+
+-- Layer 2: Device Fingerprinting
+CREATE TABLE IF NOT EXISTS public.device_fingerprints (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    device_hash TEXT NOT NULL,
+    platform TEXT,
+    os_version TEXT,
+    browser TEXT,
+    ip_address TEXT,
+    is_trusted BOOLEAN DEFAULT FALSE,
+    risk_score NUMERIC DEFAULT 0,
+    last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(user_id, device_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_device_fp_user ON public.device_fingerprints(user_id);
+
+-- Layer 3: Behavioral Biometrics
+CREATE TABLE IF NOT EXISTS public.behavioral_biometrics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    session_id TEXT,
+    typing_speed NUMERIC,
+    swipe_velocity NUMERIC,
+    touch_pressure NUMERIC,
+    anomaly_score NUMERIC DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_behavior_user ON public.behavioral_biometrics(user_id);
+
+-- Layer 5 & 6: AI Fraud & Risk Logs
+CREATE TABLE IF NOT EXISTS public.ai_risk_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    risk_score NUMERIC NOT NULL,
+    ai_confidence NUMERIC,
+    features JSONB DEFAULT '{}'::jsonb,
+    action_taken TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ai_risk_user ON public.ai_risk_logs(user_id);
+
+-- Layer 8: Hardware Security Modules (HSM) / Secure Enclave
+CREATE TABLE IF NOT EXISTS public.secure_enclave_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    device_id UUID REFERENCES public.device_fingerprints(id) ON DELETE CASCADE,
+    public_key TEXT NOT NULL,
+    attestation_token TEXT,
+    status TEXT DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_enclave_user ON public.secure_enclave_keys(user_id);
+
+-- Security Tables
+ALTER TABLE public.passkeys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.device_fingerprints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.behavioral_biometrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ai_risk_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.secure_enclave_keys ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users manage own passkeys" ON public.passkeys;
+CREATE POLICY "Users manage own passkeys" ON public.passkeys FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users view own device fingerprints" ON public.device_fingerprints;
+CREATE POLICY "Users view own device fingerprints" ON public.device_fingerprints FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users view own behavioral biometrics" ON public.behavioral_biometrics;
+CREATE POLICY "Users view own behavioral biometrics" ON public.behavioral_biometrics FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users view own ai risk logs" ON public.ai_risk_logs;
+CREATE POLICY "Users view own ai risk logs" ON public.ai_risk_logs FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users manage own secure enclave keys" ON public.secure_enclave_keys;
+CREATE POLICY "Users manage own secure enclave keys" ON public.secure_enclave_keys FOR ALL USING (auth.uid() = user_id);
+
+-- System bypass for security tables
+DROP POLICY IF EXISTS "Service role passkeys bypass" ON public.passkeys;
+CREATE POLICY "Service role passkeys bypass" ON public.passkeys FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role device fingerprints bypass" ON public.device_fingerprints;
+CREATE POLICY "Service role device fingerprints bypass" ON public.device_fingerprints FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role behavioral biometrics bypass" ON public.behavioral_biometrics;
+CREATE POLICY "Service role behavioral biometrics bypass" ON public.behavioral_biometrics FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role ai risk logs bypass" ON public.ai_risk_logs;
+CREATE POLICY "Service role ai risk logs bypass" ON public.ai_risk_logs FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role secure enclave keys bypass" ON public.secure_enclave_keys;
+CREATE POLICY "Service role secure enclave keys bypass" ON public.secure_enclave_keys FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Escrow Agreements
+DROP POLICY IF EXISTS "Users view own escrow agreements" ON public.escrow_agreements;
+CREATE POLICY "Users view own escrow agreements" ON public.escrow_agreements
+    FOR SELECT USING (auth.uid() = sender_id OR auth.uid() = receiver_id);
+
+-- Treasury Policies
+DROP POLICY IF EXISTS "Org members view treasury policies" ON public.treasury_policies;
+CREATE POLICY "Org members view treasury policies" ON public.treasury_policies
+    FOR SELECT USING (
+        organization_id IN (SELECT organization_id FROM public.users WHERE id = auth.uid())
+    );
+
+-- Treasury Approvers
+DROP POLICY IF EXISTS "Approvers view assignments" ON public.treasury_approvers;
+CREATE POLICY "Approvers view assignments" ON public.treasury_approvers
+    FOR SELECT USING (
+        organization_id IN (SELECT organization_id FROM public.users WHERE id = auth.uid())
+    );
+
+-- 6. INDEXES
+CREATE INDEX IF NOT EXISTS idx_tx_user_date ON public.transactions(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_ledger_tx ON public.financial_ledger(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_wallet ON public.transactions(user_id, wallet_id);
+CREATE INDEX IF NOT EXISTS idx_institutional_payment_accounts_role ON public.institutional_payment_accounts(role, currency, status);
+CREATE INDEX IF NOT EXISTS idx_institutional_payment_accounts_provider ON public.institutional_payment_accounts(provider_id);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_user_date ON public.external_fund_movements(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_transaction ON public.external_fund_movements(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_provider_status ON public.external_fund_movements(provider_id, status);
+CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup ON public.provider_routing_rules(rail, operation_code, status, priority);
+CREATE INDEX IF NOT EXISTS idx_inbound_sms_request_id ON public.inbound_sms_messages(request_id);
+CREATE INDEX IF NOT EXISTS idx_offline_transaction_sessions_request_id ON public.offline_transaction_sessions(request_id);
+CREATE INDEX IF NOT EXISTS idx_offline_transaction_sessions_status ON public.offline_transaction_sessions(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_outbound_sms_request_id ON public.outbound_sms_messages(request_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_user ON public.wallets(user_id);
+CREATE INDEX IF NOT EXISTS idx_goals_user ON public.goals(user_id);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_user ON public.external_fund_movements(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_provider ON public.external_fund_movements(provider_id, status);
+CREATE INDEX IF NOT EXISTS idx_external_fund_movements_reference ON public.external_fund_movements(external_reference);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_tx ON public.settlement_lifecycle(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_external_movement ON public.settlement_lifecycle(external_movement_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_merchant_settlement ON public.settlement_lifecycle(merchant_settlement_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_provider ON public.settlement_lifecycle(provider_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_stage ON public.settlement_lifecycle(stage);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_status ON public.settlement_lifecycle(status);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_created_at ON public.settlement_lifecycle(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_batch ON public.settlement_lifecycle(settlement_batch_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_provider_reference ON public.settlement_lifecycle(provider_reference);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_lifecycle_key ON public.settlement_lifecycle(lifecycle_key);
+CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup ON public.provider_routing_rules(rail, operation_code, currency, country_code, status, priority);
+CREATE INDEX IF NOT EXISTS idx_platform_fee_configs_lookup ON public.platform_fee_configs(flow_code, status, currency, provider_id, rail, channel, direction, operation_type, transaction_type, priority);
+CREATE INDEX IF NOT EXISTS idx_service_commissions_actor ON public.service_commissions(actor_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_service_commissions_source ON public.service_commissions(source_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_agent_transactions_owner ON public.agent_transactions(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_merchant_transactions_owner ON public.merchant_transactions(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_categories_user ON public.categories(user_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_user ON public.tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_messages_user_read ON public.user_messages(user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_kyc_requests_user_id ON public.kyc_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_kyc_requests_status ON public.kyc_requests(status);
+CREATE INDEX IF NOT EXISTS idx_user_devices_user ON public.user_devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_documents_user ON public.user_documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON public.user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_escrow_tx_id ON public.escrow_agreements(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_escrow_sender ON public.escrow_agreements(sender_id);
+CREATE INDEX IF NOT EXISTS idx_escrow_receiver ON public.escrow_agreements(receiver_id);
+CREATE INDEX IF NOT EXISTS idx_treasury_org ON public.treasury_policies(organization_id);
+
+-- 7. SYSTEM PROVISIONING (IDEMPOTENT)
+DO $$
+DECLARE
+    enc_zero TEXT := 'enc_v2_eyJ2ZXJzaW9uIjoxLCJpdiI6IkFBQUFBQUFBQUFBQSIsImNpcGhlcnRleHQiOiJBQUFBQUFBQUFBQUEiLCJ0YWciOiJBQUFBQUFBQUFBQUEiLCJ0aW1lc3RhbXAiOjAsImtleUlkIjoicC1ub2RlLWFjdGl2ZSIsImFsZ29yaXRobSI6IkFFUy1HQ00tMjU2In0=';
+BEGIN
+    -- Provision System Vaults
+    INSERT INTO public.platform_vaults (id, user_id, vault_role, name, balance, encrypted_balance, currency, color, icon)
+    VALUES ('00000000-0000-0000-0000-000000000003', NULL, 'FEE_COLLECTOR', 'System Fee Collector', 0, enc_zero, 'USD', '#F59E0B', 'bank')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO public.platform_vaults (id, user_id, vault_role, name, balance, encrypted_balance, currency, color, icon)
+    VALUES ('00000000-0000-0000-0000-000000000001', NULL, 'ESCROW_VAULT', 'System Escrow Vault', 0, enc_zero, 'USD', '#6366F1', 'shield-check')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO public.platform_vaults (id, user_id, vault_role, name, balance, encrypted_balance, currency, color, icon)
+    VALUES ('00000000-0000-0000-0000-000000000004', NULL, 'TAX_RESERVE', 'System Tax Reserve', 0, enc_zero, 'USD', '#EF4444', 'landmark')
+    ON CONFLICT (id) DO NOTHING;
+
+    -- Provision Fee Collector Wallets
+    INSERT INTO public.fee_collector_wallets (fee_type, vault_id, currency)
+    VALUES ('GOV_TAX', '00000000-0000-0000-0000-000000000004', 'TZS')
+    ON CONFLICT (fee_type) DO NOTHING;
+
+    INSERT INTO public.fee_collector_wallets (fee_type, vault_id, currency)
+    VALUES ('SERVICE_FEE', '00000000-0000-0000-0000-000000000003', 'TZS')
+    ON CONFLICT (fee_type) DO NOTHING;
+
+    -- Map System Nodes
+    INSERT INTO public.system_nodes (node_type, vault_id) VALUES ('FEE_COLLECTOR', '00000000-0000-0000-0000-000000000003') ON CONFLICT (node_type) DO UPDATE SET vault_id = EXCLUDED.vault_id;
+    INSERT INTO public.system_nodes (node_type, vault_id) VALUES ('ESCROW_VAULT', '00000000-0000-0000-0000-000000000001') ON CONFLICT (node_type) DO UPDATE SET vault_id = EXCLUDED.vault_id;
+    INSERT INTO public.system_nodes (node_type, vault_id) VALUES ('TAX_RESERVE', '00000000-0000-0000-0000-000000000004') ON CONFLICT (node_type) DO UPDATE SET vault_id = EXCLUDED.vault_id;
+    INSERT INTO public.system_nodes (node_type, vault_id) VALUES ('PLATFORM_FEE', '00000000-0000-0000-0000-000000000003') ON CONFLICT (node_type) DO UPDATE SET vault_id = EXCLUDED.vault_id;
+    INSERT INTO public.system_nodes (node_type, vault_id) VALUES ('GOV_TAX', '00000000-0000-0000-0000-000000000004') ON CONFLICT (node_type) DO UPDATE SET vault_id = EXCLUDED.vault_id;
+END $$;
+
+-- 8. EVENT SOURCING LAYER
+CREATE TABLE IF NOT EXISTS public.financial_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type TEXT NOT NULL,
+    aggregate_id UUID NOT NULL, -- Transaction ID or Wallet ID
+    payload JSONB NOT NULL,
+    actor TEXT DEFAULT 'system',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_financial_events_aggregate ON public.financial_events(aggregate_id);
+CREATE INDEX IF NOT EXISTS idx_financial_events_type ON public.financial_events(event_type);
+
+-- ==========================================
+-- ENTERPRISE FALLBACKS (NO-REDIS MODE)
+-- ==========================================
+
+-- 1. Database-Backed Idempotency
+CREATE TABLE IF NOT EXISTS public.ent_idempotency_keys (
+    key TEXT PRIMARY KEY,
+    client_id TEXT,
+    request_path TEXT,
+    status TEXT DEFAULT 'PROCESSING',
+    response_status INTEGER,
+    response_body JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 2. Database-Backed Distributed Locks
+CREATE TABLE IF NOT EXISTS public.ent_locks (
+    lock_key TEXT PRIMARY KEY,
+    acquired_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+
+-- 3. Transactional Outbox (EventBus)
+CREATE TABLE IF NOT EXISTS public.outbox_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    status TEXT DEFAULT 'PENDING',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS public.fraud_checks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    payload JSONB NOT NULL,
+    risk_score NUMERIC NOT NULL,
+    decision TEXT NOT NULL,
+    flags TEXT[] NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- PAYMENT CARD PROCESSING (PCI-DSS Compliant)
+CREATE TABLE IF NOT EXISTS public.card_tokens (
+    id TEXT PRIMARY KEY,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    masked_card_number TEXT NOT NULL,
+    tokenized_card_number TEXT NOT NULL, -- Encrypted
+    expiry_month INTEGER NOT NULL,
+    expiry_year INTEGER NOT NULL,
+    cardholder_name TEXT NOT NULL,
+    card_brand TEXT NOT NULL CHECK (card_brand IN ('VISA', 'MASTERCARD', 'AMEX', 'DISCOVERY')),
+    card_type TEXT DEFAULT 'CREDIT' CHECK (card_type IN ('CREDIT', 'DEBIT')),
+    last_four_digits TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    is_default BOOLEAN DEFAULT FALSE,
+    status TEXT DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'EXPIRED')),
+    encrypted_cvv TEXT, -- Encrypted CVV for one-click payments
+    billing_address JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE,
+    UNIQUE(user_id, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS public.card_transactions (
+    id TEXT PRIMARY KEY,
+    card_token_id TEXT REFERENCES public.card_tokens(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE SET NULL,
+    amount NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'AUTHORIZED', 'SETTLED', 'FAILED', 'DECLINED', 'REVERSED')),
+    authorization_code TEXT,
+    rrn TEXT, -- Retrieval Reference Number
+    stan_number TEXT, -- System Trace Audit Number
+    response_code TEXT,
+    response_message TEXT,
+    risk_score NUMERIC DEFAULT 0,
+    fraud_flags TEXT[] DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    settled_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+-- Card Transaction Audit Trail
+CREATE TABLE IF NOT EXISTS public.card_transaction_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    card_transaction_id TEXT REFERENCES public.card_transactions(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    old_status TEXT,
+    new_status TEXT,
+    actor TEXT DEFAULT 'system',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Merchant Card Acceptance Settings
+CREATE TABLE IF NOT EXISTS public.merchant_card_settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE,
+    min_amount NUMERIC DEFAULT 0,
+    max_amount NUMERIC,
+    accepted_card_brands TEXT[] DEFAULT ARRAY['VISA', 'MASTERCARD'],
+    avs_enabled BOOLEAN DEFAULT TRUE,
+    cvv_required BOOLEAN DEFAULT TRUE,
+    three_d_secure_enabled BOOLEAN DEFAULT TRUE,
+    fraud_check_level TEXT DEFAULT 'MEDIUM' CHECK (fraud_check_level IN ('LOW', 'MEDIUM', 'HIGH')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(merchant_id)
+);
+
+-- Card Network Processing Fees
+CREATE TABLE IF NOT EXISTS public.card_processing_fees (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    card_brand TEXT NOT NULL,
+    transaction_type TEXT NOT NULL,
+    percentage_fee NUMERIC DEFAULT 0.025, -- 2.5% default
+    fixed_fee NUMERIC DEFAULT 0.30,
+    currency TEXT DEFAULT 'TZS',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for Card Processing
+CREATE INDEX IF NOT EXISTS idx_card_tokens_user ON public.card_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_card_tokens_status ON public.card_tokens(status);
+CREATE INDEX IF NOT EXISTS idx_card_tokens_fingerprint ON public.card_tokens(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_card_transactions_user ON public.card_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_card_transactions_card_token ON public.card_transactions(card_token_id);
+CREATE INDEX IF NOT EXISTS idx_card_transactions_status ON public.card_transactions(status);
+CREATE INDEX IF NOT EXISTS idx_card_transactions_merchant ON public.card_transactions(merchant_id);
+CREATE INDEX IF NOT EXISTS idx_card_transactions_created ON public.card_transactions(created_at);
+CREATE INDEX IF NOT EXISTS idx_card_transaction_audit_user ON public.card_transaction_audit(user_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_card_settings_merchant ON public.merchant_card_settings(merchant_id);
+
+-- Enable RLS for Card Tables
+ALTER TABLE public.card_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.card_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.card_transaction_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.merchant_card_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.card_processing_fees ENABLE ROW LEVEL SECURITY;
+
+-- Card Processing RLS Policies
+DROP POLICY IF EXISTS "Users manage own card tokens" ON public.card_tokens;
+CREATE POLICY "Users manage own card tokens" ON public.card_tokens
+    FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Service role card tokens bypass" ON public.card_tokens;
+CREATE POLICY "Service role card tokens bypass" ON public.card_tokens
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users view own card transactions" ON public.card_transactions;
+CREATE POLICY "Users view own card transactions" ON public.card_transactions
+    FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Service role card transactions bypass" ON public.card_transactions;
+CREATE POLICY "Service role card transactions bypass" ON public.card_transactions
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Admins view card settings" ON public.merchant_card_settings;
+CREATE POLICY "Admins view card settings" ON public.merchant_card_settings
+    FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN'));
+
+CREATE TABLE IF NOT EXISTS public.background_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    type TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3,
+    last_error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON public.background_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_claim ON public.background_jobs(status, attempts, created_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_pending ON public.outbox_events(status, created_at);
+
+-- 4. JWT Revocation Blocklist
+CREATE TABLE IF NOT EXISTS public.revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    revoked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);

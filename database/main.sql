@@ -929,6 +929,140 @@ CREATE TABLE IF NOT EXISTS public.merchant_settlements (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+
+
+-- Settlement Lifecycle
+CREATE TABLE IF NOT EXISTS public.settlement_lifecycle (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    external_movement_id UUID REFERENCES public.external_fund_movements(id) ON DELETE SET NULL,
+    merchant_settlement_id UUID REFERENCES public.merchant_settlements(id) ON DELETE SET NULL,
+    provider_id UUID REFERENCES public.financial_partners(id) ON DELETE SET NULL,
+
+    lifecycle_key TEXT UNIQUE,
+    settlement_batch_id TEXT,
+    provider_reference TEXT,
+    provider_status TEXT,
+
+    rail TEXT,
+    direction TEXT,
+    operation_type TEXT,
+    currency TEXT DEFAULT 'TZS',
+
+    gross_amount NUMERIC NOT NULL DEFAULT 0,
+    fee_amount NUMERIC NOT NULL DEFAULT 0,
+    tax_amount NUMERIC NOT NULL DEFAULT 0,
+    net_amount NUMERIC NOT NULL DEFAULT 0,
+
+    stage TEXT NOT NULL DEFAULT 'INITIATED',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+
+    initiated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    queued_at TIMESTAMP WITH TIME ZONE,
+    processing_at TIMESTAMP WITH TIME ZONE,
+    sent_to_provider_at TIMESTAMP WITH TIME ZONE,
+    provider_confirmed_at TIMESTAMP WITH TIME ZONE,
+    settled_at TIMESTAMP WITH TIME ZONE,
+    reconciled_at TIMESTAMP WITH TIME ZONE,
+    failed_at TIMESTAMP WITH TIME ZONE,
+    reversed_at TIMESTAMP WITH TIME ZONE,
+
+    metadata JSONB DEFAULT '{}'::jsonb,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+DO $$
+DECLARE
+    settlement_constraint RECORD;
+BEGIN
+    FOR settlement_constraint IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'settlement_lifecycle'
+          AND c.contype = 'c'
+          AND (
+              pg_get_constraintdef(c.oid) LIKE '%stage%'
+              OR pg_get_constraintdef(c.oid) LIKE '%status%'
+          )
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE public.settlement_lifecycle DROP CONSTRAINT %I',
+            settlement_constraint.conname
+        );
+    END LOOP;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'settlement_lifecycle'
+          AND c.conname = 'settlement_lifecycle_stage_check_v1'
+    ) THEN
+        ALTER TABLE public.settlement_lifecycle
+            ADD CONSTRAINT settlement_lifecycle_stage_check_v1
+            CHECK (
+                stage IN (
+                    'INITIATED',
+                    'QUEUED',
+                    'PROCESSING',
+                    'SENT_TO_PROVIDER',
+                    'PROVIDER_CONFIRMED',
+                    'SETTLED',
+                    'RECONCILED',
+                    'FAILED',
+                    'REVERSED'
+                )
+            );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'settlement_lifecycle'
+          AND c.conname = 'settlement_lifecycle_status_check_v1'
+    ) THEN
+        ALTER TABLE public.settlement_lifecycle
+            ADD CONSTRAINT settlement_lifecycle_status_check_v1
+            CHECK (
+                status IN (
+                    'ACTIVE',
+                    'COMPLETED',
+                    'FAILED',
+                    'CANCELLED',
+                    'REVERSED'
+                )
+            );
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.set_settlement_lifecycle_updated_at()
+RETURNS trigger AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_settlement_lifecycle_updated_at ON public.settlement_lifecycle;
+CREATE TRIGGER trg_settlement_lifecycle_updated_at
+BEFORE UPDATE ON public.settlement_lifecycle
+FOR EACH ROW
+EXECUTE FUNCTION public.set_settlement_lifecycle_updated_at();
+
 CREATE TABLE IF NOT EXISTS public.merchant_fees (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE UNIQUE,
@@ -1680,6 +1814,7 @@ BEGIN
     ALTER TABLE public.financial_partners ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.institutional_payment_accounts ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.external_fund_movements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.settlement_lifecycle ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.provider_routing_rules ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.inbound_sms_messages ENABLE ROW LEVEL SECURITY;
     ALTER TABLE public.offline_transaction_sessions ENABLE ROW LEVEL SECURITY;
@@ -1801,6 +1936,39 @@ CREATE POLICY "Admin view external fund movements" ON public.external_fund_movem
 DROP POLICY IF EXISTS "Service role external fund movement bypass" ON public.external_fund_movements;
 CREATE POLICY "Service role external fund movement bypass" ON public.external_fund_movements
     FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Users view own settlement lifecycle" ON public.settlement_lifecycle;
+CREATE POLICY "Users view own settlement lifecycle"
+ON public.settlement_lifecycle
+FOR SELECT
+USING (
+    EXISTS (
+        SELECT 1
+        FROM public.transactions t
+        WHERE t.id = settlement_lifecycle.transaction_id
+          AND t.user_id = auth.uid()
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM public.external_fund_movements efm
+        WHERE efm.id = settlement_lifecycle.external_movement_id
+          AND efm.user_id = auth.uid()
+    )
+);
+
+DROP POLICY IF EXISTS "Admin view settlement lifecycle" ON public.settlement_lifecycle;
+CREATE POLICY "Admin view settlement lifecycle"
+ON public.settlement_lifecycle
+FOR SELECT
+USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN', 'AUDIT', 'FINANCE'));
+
+DROP POLICY IF EXISTS "Service role settlement lifecycle bypass" ON public.settlement_lifecycle;
+CREATE POLICY "Service role settlement lifecycle bypass"
+ON public.settlement_lifecycle
+FOR ALL TO service_role
+USING (true)
+WITH CHECK (true);
+
 
 DROP POLICY IF EXISTS "Admin manage provider routing rules" ON public.provider_routing_rules;
 CREATE POLICY "Admin manage provider routing rules" ON public.provider_routing_rules
@@ -2031,8 +2199,16 @@ CREATE INDEX IF NOT EXISTS idx_goals_user ON public.goals(user_id);
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_user ON public.external_fund_movements(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_provider ON public.external_fund_movements(provider_id, status);
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_reference ON public.external_fund_movements(external_reference);
-CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_phase ON public.settlement_lifecycle(current_phase, auto_settle_at);
-CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_user ON public.settlement_lifecycle(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_tx ON public.settlement_lifecycle(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_external_movement ON public.settlement_lifecycle(external_movement_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_merchant_settlement ON public.settlement_lifecycle(merchant_settlement_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_provider ON public.settlement_lifecycle(provider_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_stage ON public.settlement_lifecycle(stage);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_status ON public.settlement_lifecycle(status);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_created_at ON public.settlement_lifecycle(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_batch ON public.settlement_lifecycle(settlement_batch_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_provider_reference ON public.settlement_lifecycle(provider_reference);
+CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_lifecycle_key ON public.settlement_lifecycle(lifecycle_key);
 CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup ON public.provider_routing_rules(rail, operation_code, currency, country_code, status, priority);
 CREATE INDEX IF NOT EXISTS idx_platform_fee_configs_lookup ON public.platform_fee_configs(flow_code, status, currency, provider_id, rail, channel, direction, operation_type, transaction_type, priority);
 CREATE INDEX IF NOT EXISTS idx_service_commissions_actor ON public.service_commissions(actor_user_id, status, created_at DESC);
