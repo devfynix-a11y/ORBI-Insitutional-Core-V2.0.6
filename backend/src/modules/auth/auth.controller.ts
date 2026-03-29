@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import { Passkeys } from "../passkey/passkey.service.js";
 import { Fingerprint } from "../../services/fingerprint.service.js";
 import { Behavior } from "../../services/behavior.service.js";
@@ -265,6 +266,162 @@ const persistBiometricSession = async (
     });
 };
 
+const PIN_PARENT_WINDOW_MS = 10 * 60 * 1000;
+const PIN_MAX_ATTEMPTS = 3;
+const PIN_LOCK_MINUTES = 15;
+
+const resolveFingerprint = (req: Request, device?: any) => {
+    const explicitDeviceId = String(req.body?.device_id || req.body?.deviceId || '').trim();
+    if (explicitDeviceId) return explicitDeviceId;
+    const metadataFingerprint = String(req.body?.metadata?.fingerprint || '').trim();
+    if (metadataFingerprint) return metadataFingerprint;
+    const headerFingerprint = String(req.headers['x-orbi-fingerprint'] || '').trim();
+    if (headerFingerprint) return headerFingerprint;
+    if (device) return Fingerprint.generateFingerprint(device);
+    return '';
+};
+
+const markPinParentVerification = async (
+    userId: string,
+    fingerprint: string,
+    source: 'biometric_login' | 'biometric_register',
+) => {
+    const sb = getAdminSupabase();
+    if (!sb || !fingerprint) return;
+    const userResult = await sb.auth.admin.getUserById(userId);
+    const authUser = userResult.data?.user;
+    if (!authUser) return;
+    const metadata = {
+        ...(authUser.user_metadata || {}),
+        security_biometric_enabled: true,
+        pin_parent_verified_at: new Date().toISOString(),
+        pin_parent_device_fingerprint: fingerprint,
+        pin_parent_source: source,
+    };
+    await sb.auth.admin.updateUserById(userId, { user_metadata: metadata });
+};
+
+const hasRegisteredPasskey = async (userId: string) => {
+    const sb = getAdminSupabase();
+    if (!sb) throw new Error('DB_OFFLINE');
+    const { data, error } = await sb
+        .from('passkeys')
+        .select('id, credential_id')
+        .eq('user_id', userId)
+        .limit(1);
+    if (error) throw error;
+    return Array.isArray(data) && data.length > 0;
+};
+
+const getTrustedDevice = async (userId: string, fingerprint: string) => {
+    const sb = getAdminSupabase();
+    if (!sb) throw new Error('DB_OFFLINE');
+    const { data, error } = await sb
+        .from('user_devices')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('device_fingerprint', fingerprint)
+        .maybeSingle();
+    if (error) throw error;
+    return data;
+};
+
+const assertRecentBiometricParent = async (userId: string, fingerprint: string) => {
+    const sb = getAdminSupabase();
+    if (!sb) throw new Error('DB_OFFLINE');
+    const userResult = await sb.auth.admin.getUserById(userId);
+    const authUser = userResult.data?.user;
+    if (!authUser) throw new Error('IDENTITY_NOT_FOUND');
+    const metadata = authUser.user_metadata || {};
+    const verifiedAt = String(metadata.pin_parent_verified_at || '').trim();
+    const parentFingerprint = String(metadata.pin_parent_device_fingerprint || '').trim();
+    if (!verifiedAt || !parentFingerprint) {
+        throw new Error('BIOMETRIC_PARENT_REQUIRED');
+    }
+    if (parentFingerprint !== fingerprint) {
+        throw new Error('DEVICE_BINDING_REQUIRED');
+    }
+    const ts = Date.parse(verifiedAt);
+    if (Number.isNaN(ts) || Date.now() - ts > PIN_PARENT_WINDOW_MS) {
+        throw new Error('BIOMETRIC_PARENT_EXPIRED');
+    }
+    return authUser;
+};
+
+const upsertPinCredential = async (
+    userId: string,
+    fingerprint: string,
+    pin: string,
+    source: 'enroll' | 'update',
+) => {
+    const sb = getAdminSupabase();
+    if (!sb) throw new Error('DB_OFFLINE');
+    const pinHash = await bcrypt.hash(pin.trim(), 12);
+    const now = new Date().toISOString();
+    const payload = {
+        user_id: userId,
+        device_fingerprint: fingerprint,
+        pin_hash: pinHash,
+        parent_type: 'biometric',
+        source,
+        failed_attempts: 0,
+        locked_until: null,
+        last_biometric_verified_at: now,
+        updated_at: now,
+    };
+    const { error } = await sb.from('user_pin_credentials').upsert(payload, {
+        onConflict: 'user_id,device_fingerprint',
+    });
+    if (error) throw error;
+};
+
+const verifyPinCredential = async (userId: string, fingerprint: string, pin: string) => {
+    const sb = getAdminSupabase();
+    if (!sb) throw new Error('DB_OFFLINE');
+    const { data: credential, error } = await sb
+        .from('user_pin_credentials')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('device_fingerprint', fingerprint)
+        .maybeSingle();
+    if (error) throw error;
+    if (!credential) throw new Error('PIN_NOT_ENROLLED');
+
+    const lockedUntil = credential.locked_until ? Date.parse(String(credential.locked_until)) : null;
+    if (lockedUntil && !Number.isNaN(lockedUntil) && lockedUntil > Date.now()) {
+        throw new Error('PIN_LOCKED_USE_BIOMETRIC');
+    }
+
+    const ok = await bcrypt.compare(pin.trim(), String(credential.pin_hash || ''));
+    if (!ok) {
+        const nextAttempts = Number(credential.failed_attempts || 0) + 1;
+        const lockNow = nextAttempts >= PIN_MAX_ATTEMPTS;
+        await sb
+            .from('user_pin_credentials')
+            .update({
+                failed_attempts: nextAttempts,
+                locked_until: lockNow
+                    ? new Date(Date.now() + PIN_LOCK_MINUTES * 60 * 1000).toISOString()
+                    : null,
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', credential.id);
+        throw new Error(lockNow ? 'PIN_LOCKED_USE_BIOMETRIC' : 'PIN_INVALID');
+    }
+
+    await sb
+        .from('user_pin_credentials')
+        .update({
+            failed_attempts: 0,
+            locked_until: null,
+            last_used_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+        })
+        .eq('id', credential.id);
+
+    return credential;
+};
+
 export class AuthController {
     async startPasskeyLogin(req: Request, res: Response) {
         try {
@@ -355,6 +512,7 @@ export class AuthController {
             // If biometric login is successful, we can trust and hydrate this device
             const sb = getAdminSupabase();
             await persistBiometricDevice(userId, fingerprint, device, req.ip, true);
+            await markPinParentVerification(userId, fingerprint, 'biometric_login');
 
             if (isNewDevice) {
                 Messaging.sendNewDeviceAlert(userId, resolveDeviceName(device)).catch(console.error);
@@ -541,6 +699,7 @@ export class AuthController {
                 if (device) {
                     const fingerprint = Fingerprint.generateFingerprint(device);
                     await persistBiometricDevice(userId, fingerprint, device, req.ip, true);
+                    await markPinParentVerification(userId, fingerprint, 'biometric_register');
                 }
                 console.log(`[Auth] Passkey registration successful for user ${userId}`);
                 res.json({ success: true });
@@ -556,6 +715,176 @@ export class AuthController {
                 IP=${req.ip}
             `);
             res.status(e.status || 500).json({ error: e.message });
+        }
+    }
+
+    async enrollPin(req: Request, res: Response) {
+        try {
+            const session = (req as any).session;
+            const pin = String(req.body?.pin || '').trim();
+            const fingerprint = resolveFingerprint(req);
+            if (!session?.sub) {
+                return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
+            }
+            if (!/^\d{4}$/.test(pin)) {
+                return res.status(400).json({ success: false, error: 'PIN_MUST_BE_4_DIGITS' });
+            }
+            if (!fingerprint) {
+                return res.status(400).json({ success: false, error: 'DEVICE_BINDING_REQUIRED' });
+            }
+
+            await assertRecentBiometricParent(session.sub, fingerprint);
+            const passkeyExists = await hasRegisteredPasskey(session.sub);
+            if (!passkeyExists) {
+                return res.status(403).json({ success: false, error: 'BIOMETRIC_PARENT_REQUIRED' });
+            }
+
+            const trustedDevice = await getTrustedDevice(session.sub, fingerprint);
+            if (!trustedDevice?.is_trusted || String(trustedDevice?.status || '').toLowerCase() !== 'active') {
+                return res.status(403).json({ success: false, error: 'DEVICE_NOT_TRUSTED' });
+            }
+
+            await upsertPinCredential(session.sub, fingerprint, pin, 'enroll');
+            return res.json({
+                success: true,
+                data: { pin_enrolled: true, device_bound: true, biometric_parent: true },
+            });
+        } catch (e: any) {
+            console.error('[Auth] PIN enroll error:', e);
+            const status = ['BIOMETRIC_PARENT_REQUIRED', 'BIOMETRIC_PARENT_EXPIRED', 'DEVICE_BINDING_REQUIRED'].includes(e.message)
+                ? 403
+                : 500;
+            return res.status(status).json({ success: false, error: e.message || 'PIN_ENROLL_FAILED' });
+        }
+    }
+
+    async updatePin(req: Request, res: Response) {
+        try {
+            const session = (req as any).session;
+            const pin = String(req.body?.new_pin || req.body?.pin || '').trim();
+            const fingerprint = resolveFingerprint(req);
+            if (!session?.sub) {
+                return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
+            }
+            if (!/^\d{4}$/.test(pin)) {
+                return res.status(400).json({ success: false, error: 'PIN_MUST_BE_4_DIGITS' });
+            }
+            if (!fingerprint) {
+                return res.status(400).json({ success: false, error: 'DEVICE_BINDING_REQUIRED' });
+            }
+
+            await assertRecentBiometricParent(session.sub, fingerprint);
+            const passkeyExists = await hasRegisteredPasskey(session.sub);
+            if (!passkeyExists) {
+                return res.status(403).json({ success: false, error: 'BIOMETRIC_PARENT_REQUIRED' });
+            }
+            const trustedDevice = await getTrustedDevice(session.sub, fingerprint);
+            if (!trustedDevice?.is_trusted || String(trustedDevice?.status || '').toLowerCase() !== 'active') {
+                return res.status(403).json({ success: false, error: 'DEVICE_NOT_TRUSTED' });
+            }
+
+            await upsertPinCredential(session.sub, fingerprint, pin, 'update');
+            return res.json({
+                success: true,
+                data: { pin_updated: true, device_bound: true, biometric_parent: true },
+            });
+        } catch (e: any) {
+            console.error('[Auth] PIN update error:', e);
+            const status = ['BIOMETRIC_PARENT_REQUIRED', 'BIOMETRIC_PARENT_EXPIRED', 'DEVICE_BINDING_REQUIRED', 'DEVICE_NOT_TRUSTED'].includes(e.message)
+                ? 403
+                : 500;
+            return res.status(status).json({ success: false, error: e.message || 'PIN_UPDATE_FAILED' });
+        }
+    }
+
+    async pinLogin(req: Request, res: Response) {
+        try {
+            const email = String(req.body?.email || req.body?.e || '').trim().toLowerCase();
+            const pin = String(req.body?.pin || '').trim();
+            const device = req.body?.device || req.body?.metadata || {};
+            const fingerprint = resolveFingerprint(req, device);
+            if (!email || !/^\d{4}$/.test(pin)) {
+                return res.status(400).json({ success: false, error: 'MISSING_PIN_LOGIN_FIELDS' });
+            }
+            if (!fingerprint) {
+                return res.status(400).json({ success: false, error: 'DEVICE_BINDING_REQUIRED' });
+            }
+
+            const sb = getAdminSupabase();
+            if (!sb) {
+                return res.status(500).json({ success: false, error: 'DB_OFFLINE' });
+            }
+
+            const { data: userRow, error: userError } = await sb
+                .from('users')
+                .select('id,email')
+                .eq('email', email)
+                .maybeSingle();
+            if (userError) throw userError;
+            if (!userRow?.id) {
+                return res.status(404).json({ success: false, error: 'IDENTITY_NOT_FOUND' });
+            }
+
+            const passkeyExists = await hasRegisteredPasskey(userRow.id);
+            if (!passkeyExists) {
+                return res.status(403).json({ success: false, error: 'BIOMETRIC_PARENT_REQUIRED' });
+            }
+
+            const trustedDevice = await getTrustedDevice(userRow.id, fingerprint);
+            if (!trustedDevice) {
+                return res.status(403).json({ success: false, error: 'DEVICE_BINDING_REQUIRED' });
+            }
+            if (!trustedDevice.is_trusted || String(trustedDevice.status || '').toLowerCase() !== 'active') {
+                return res.status(403).json({ success: false, error: 'DEVICE_NOT_TRUSTED' });
+            }
+
+            await verifyPinCredential(userRow.id, fingerprint, pin);
+
+            const authUserResult = await sb.auth.admin.getUserById(userRow.id);
+            const authUser = authUserResult.data?.user;
+            if (!authUser) {
+                return res.status(404).json({ success: false, error: 'IDENTITY_NOT_FOUND' });
+            }
+
+            const { supaSession } = await issueSupabaseSessionForUser(userRow.id);
+            await persistBiometricSession(
+                userRow.id,
+                supaSession.refresh_token || Sessions.createRefreshToken(userRow.id, fingerprint),
+                fingerprint,
+                device,
+                req.ip,
+            );
+            await markPinParentVerification(userRow.id, fingerprint, 'biometric_login');
+
+            return res.json({
+                success: true,
+                data: {
+                    status: 'SUCCESS',
+                    access_token: supaSession.access_token,
+                    refresh_token: supaSession.refresh_token || null,
+                    session: supaSession,
+                    user: {
+                        id: authUser.id,
+                        email: authUser.email,
+                        phone: authUser.phone,
+                        ...authUser.user_metadata,
+                    },
+                    biometric_setup_required: false,
+                },
+            });
+        } catch (e: any) {
+            console.error('[Auth] PIN login error:', e);
+            const statusMap: Record<string, number> = {
+                PIN_NOT_ENROLLED: 404,
+                PIN_INVALID: 401,
+                PIN_LOCKED_USE_BIOMETRIC: 403,
+                DEVICE_NOT_TRUSTED: 403,
+                DEVICE_BINDING_REQUIRED: 403,
+                BIOMETRIC_PARENT_REQUIRED: 403,
+            };
+            return res
+                .status(statusMap[e.message] || 500)
+                .json({ success: false, error: e.message || 'PIN_LOGIN_FAILED' });
         }
     }
 

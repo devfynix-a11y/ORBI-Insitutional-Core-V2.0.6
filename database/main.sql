@@ -14,7 +14,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- 2. TABLES DEFINITION (IDEMPOTENT)
-
+                                                                                                                                                                                                                                                                                                                                       
 CREATE TABLE IF NOT EXISTS public.secrets (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -1648,6 +1648,27 @@ ALTER TABLE public.user_sessions
     ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE public.user_sessions
     ADD COLUMN IF NOT EXISTS is_trusted_device BOOLEAN DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS public.user_pin_credentials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    device_fingerprint TEXT NOT NULL,
+    pin_hash TEXT NOT NULL,
+    parent_type TEXT DEFAULT 'biometric',
+    source TEXT DEFAULT 'enroll',
+    failed_attempts INTEGER DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    last_biometric_verified_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, device_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_pin_credentials_user
+    ON public.user_pin_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_pin_credentials_user_device
+    ON public.user_pin_credentials(user_id, device_fingerprint);
 
 CREATE TABLE IF NOT EXISTS public.user_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

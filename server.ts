@@ -1607,6 +1607,9 @@ v1.post('/auth/passkey/register/start', authenticate as any, (req, res) => NewAu
 v1.post('/auth/passkey/register/finish', authenticate as any, (req, res) => NewAuth.completePasskeyRegistration(req, res));
 v1.post('/auth/passkey/login/start', (req, res) => NewAuth.startPasskeyLogin(req, res));
 v1.post('/auth/passkey/login/finish', (req, res) => NewAuth.completePasskeyLogin(req, res));
+v1.post('/auth/pin/enroll', authenticate as any, (req, res) => NewAuth.enrollPin(req, res));
+v1.post('/auth/pin/update', authenticate as any, (req, res) => NewAuth.updatePin(req, res));
+v1.post('/auth/pin-login', (req, res) => NewAuth.pinLogin(req, res));
 
 if (legacyBiometricAliasesEnabled) {
     // --- Legacy/Mobile App Aliases for Biometric Auth ---
