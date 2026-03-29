@@ -270,7 +270,89 @@ const PIN_PARENT_WINDOW_MS = 10 * 60 * 1000;
 const PIN_MAX_ATTEMPTS = 3;
 const PIN_LOCK_MINUTES = 15;
 
+const normalizeEmailIdentifier = (value: string) => value.trim().toLowerCase();
+
+const normalizePhoneIdentifier = (value: string) =>
+    value
+        .trim()
+        .replace(/[^\d+]/g, '')
+        .replace(/(?!^)\+/g, '');
+
+const isEmailIdentifier = (value: string) => value.includes('@');
+
+const buildPhoneIdentifierCandidates = (value: string) => {
+    const normalized = normalizePhoneIdentifier(value);
+    const digitsOnly = normalized.replace(/\D/g, '');
+    return Array.from(new Set([value.trim(), normalized, digitsOnly].filter(Boolean)));
+};
+
+const extractAuthPhoneCandidates = (authUser: any, userRow?: any) =>
+    Array.from(
+        new Set(
+            [
+                authUser?.phone,
+                authUser?.user_metadata?.phone,
+                authUser?.user_metadata?.msisdn,
+                userRow?.phone,
+            ]
+                .filter(Boolean)
+                .map((value) => normalizePhoneIdentifier(String(value))),
+        ),
+    );
+
+const identifierMatchesBiometricIdentity = (identifier: string, authUser: any, userRow?: any) => {
+    if (isEmailIdentifier(identifier)) {
+        const normalizedEmail = normalizeEmailIdentifier(identifier);
+        const authEmails = Array.from(
+            new Set(
+                [
+                    authUser?.email,
+                    authUser?.user_metadata?.email,
+                    userRow?.email,
+                ]
+                    .filter(Boolean)
+                    .map((value) => normalizeEmailIdentifier(String(value))),
+            ),
+        );
+        return authEmails.includes(normalizedEmail);
+    }
+
+    const phoneCandidates = buildPhoneIdentifierCandidates(identifier);
+    const authPhones = extractAuthPhoneCandidates(authUser, userRow);
+    return phoneCandidates.some((candidate) =>
+        authPhones.includes(normalizePhoneIdentifier(candidate)),
+    );
+};
+
+const findUserByPinIdentifier = async (identifier: string) => {
+    const sb = getAdminSupabase();
+    if (!sb) throw new Error('DB_OFFLINE');
+
+    if (isEmailIdentifier(identifier)) {
+        const { data, error } = await sb
+            .from('users')
+            .select('id,email,phone')
+            .eq('email', normalizeEmailIdentifier(identifier))
+            .maybeSingle();
+        if (error) throw error;
+        return data;
+    }
+
+    const phoneCandidates = buildPhoneIdentifierCandidates(identifier);
+    const { data, error } = await sb
+        .from('users')
+        .select('id,email,phone')
+        .in('phone', phoneCandidates)
+        .limit(1)
+        .maybeSingle();
+    if (error) throw error;
+    return data;
+};
+
 const resolveFingerprint = (req: Request, device?: any) => {
+    if (device && typeof device === 'object' && Object.keys(device).length > 0) {
+        return Fingerprint.generateFingerprint(device);
+    }
     const explicitDeviceId = String(req.body?.device_id || req.body?.deviceId || '').trim();
     if (explicitDeviceId) return explicitDeviceId;
     const metadataFingerprint = String(req.body?.metadata?.fingerprint || '').trim();
@@ -722,7 +804,8 @@ export class AuthController {
         try {
             const session = (req as any).session;
             const pin = String(req.body?.pin || '').trim();
-            const fingerprint = resolveFingerprint(req);
+            const device = req.body?.device || req.body?.metadata || {};
+            const fingerprint = resolveFingerprint(req, device);
             if (!session?.sub) {
                 return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
             }
@@ -762,7 +845,8 @@ export class AuthController {
         try {
             const session = (req as any).session;
             const pin = String(req.body?.new_pin || req.body?.pin || '').trim();
-            const fingerprint = resolveFingerprint(req);
+            const device = req.body?.device || req.body?.metadata || {};
+            const fingerprint = resolveFingerprint(req, device);
             if (!session?.sub) {
                 return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
             }
@@ -799,11 +883,18 @@ export class AuthController {
 
     async pinLogin(req: Request, res: Response) {
         try {
-            const email = String(req.body?.email || req.body?.e || '').trim().toLowerCase();
+            const identifier = String(
+                req.body?.email ||
+                req.body?.e ||
+                req.body?.phone ||
+                req.body?.msisdn ||
+                req.body?.identifier ||
+                '',
+            ).trim();
             const pin = String(req.body?.pin || '').trim();
             const device = req.body?.device || req.body?.metadata || {};
             const fingerprint = resolveFingerprint(req, device);
-            if (!email || !/^\d{4}$/.test(pin)) {
+            if (!identifier || !/^\d{4}$/.test(pin)) {
                 return res.status(400).json({ success: false, error: 'MISSING_PIN_LOGIN_FIELDS' });
             }
             if (!fingerprint) {
@@ -815,12 +906,7 @@ export class AuthController {
                 return res.status(500).json({ success: false, error: 'DB_OFFLINE' });
             }
 
-            const { data: userRow, error: userError } = await sb
-                .from('users')
-                .select('id,email')
-                .eq('email', email)
-                .maybeSingle();
-            if (userError) throw userError;
+            const userRow = await findUserByPinIdentifier(identifier);
             if (!userRow?.id) {
                 return res.status(404).json({ success: false, error: 'IDENTITY_NOT_FOUND' });
             }
@@ -844,6 +930,9 @@ export class AuthController {
             const authUser = authUserResult.data?.user;
             if (!authUser) {
                 return res.status(404).json({ success: false, error: 'IDENTITY_NOT_FOUND' });
+            }
+            if (!identifierMatchesBiometricIdentity(identifier, authUser, userRow)) {
+                return res.status(403).json({ success: false, error: 'IDENTITY_MISMATCH' });
             }
 
             const { supaSession } = await issueSupabaseSessionForUser(userRow.id);
@@ -881,6 +970,7 @@ export class AuthController {
                 DEVICE_NOT_TRUSTED: 403,
                 DEVICE_BINDING_REQUIRED: 403,
                 BIOMETRIC_PARENT_REQUIRED: 403,
+                IDENTITY_MISMATCH: 403,
             };
             return res
                 .status(statusMap[e.message] || 500)
