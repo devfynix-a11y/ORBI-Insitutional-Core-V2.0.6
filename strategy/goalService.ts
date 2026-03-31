@@ -1,20 +1,360 @@
 
 import { Goal } from '../types.js';
 import { Storage, STORAGE_KEYS } from '../backend/storage.js';
-import { getSupabase, createAuthenticatedClient } from '../services/supabaseClient.js';
+import { getSupabase, getAdminSupabase, createAuthenticatedClient } from '../services/supabaseClient.js';
 import { DataVault } from '../backend/security/encryption.js';
 import { TransactionService } from '../ledger/transactionService.js';
+import { Audit } from '../backend/security/audit.js';
 
 import { UUID } from '../services/utils.js';
 
 export class GoalService {
     private ledger = new TransactionService();
+    private static readonly AUTO_TRIGGER_TYPES = new Set([
+        'DEPOSIT',
+        'SALARY',
+        'REMITTANCE',
+        'CARD_DEPOSIT',
+        'EXTERNAL_DEPOSIT',
+        'AGENT_CASH_DEPOSIT',
+        'MANUAL_REPLAY',
+    ]);
     private getDb(token?: string) {
         if (token) {
             const client = createAuthenticatedClient(token);
             if (client) return client;
         }
         return getSupabase();
+    }
+
+    private getAdminDb() {
+        return getAdminSupabase() || getSupabase();
+    }
+
+    private roundMoney(value: number): number {
+        return Math.round((Number(value) || 0) * 100) / 100;
+    }
+
+    private getMonthBounds(anchor: Date = new Date()) {
+        const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+        const end = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1);
+        return { start, end };
+    }
+
+    private async getMonthlyAutoAllocated(
+        sb: any,
+        goalId: string,
+        anchor: Date = new Date(),
+    ): Promise<number> {
+        const { start, end } = this.getMonthBounds(anchor);
+        const { data, error } = await sb
+            .from('goal_auto_allocation_events')
+            .select('allocated_amount')
+            .eq('goal_id', goalId)
+            .eq('status', 'COMPLETED')
+            .gte('created_at', start.toISOString())
+            .lt('created_at', end.toISOString());
+
+        if (error || !data) return 0;
+        return data.reduce((sum: number, row: any) => sum + Number(row.allocated_amount || 0), 0);
+    }
+
+    private async reserveAutoAllocationEvent(sb: any, payload: any) {
+        const now = new Date().toISOString();
+        const eventPayload = {
+            status: 'PROCESSING',
+            allocated_amount: 0,
+            metadata: {},
+            reason: null,
+            ...payload,
+            updated_at: now,
+        };
+        const { data, error } = await sb
+            .from('goal_auto_allocation_events')
+            .insert(eventPayload)
+            .select('*')
+            .single();
+
+        if (error) {
+            if (error.code === '23505') {
+                return null;
+            }
+            throw new Error(error.message);
+        }
+
+        return data;
+    }
+
+    private async markAutoAllocationEvent(
+        sb: any,
+        eventId: string,
+        status: 'COMPLETED' | 'SKIPPED' | 'FAILED',
+        updates?: Record<string, any>,
+    ) {
+        const { error } = await sb
+            .from('goal_auto_allocation_events')
+            .update({
+                status,
+                updated_at: new Date().toISOString(),
+                ...updates,
+            })
+            .eq('id', eventId);
+
+        if (error) {
+            console.error('[GoalService] Failed to update auto-allocation event:', error.message);
+        }
+    }
+
+    async runAutoAllocationsForCredit(args: {
+        userId: string;
+        sourceTransactionId: string;
+        sourceReferenceId?: string | null;
+        sourceWalletId?: string | null;
+        sourceAmount: number;
+        currency?: string | null;
+        triggerType: string;
+        metadata?: Record<string, any>;
+    }) {
+        const sb = this.getAdminDb();
+        if (!sb) {
+            return { success: false, applied: [], skipped: [], reason: 'DB_OFFLINE' };
+        }
+
+        const normalizedTrigger = String(args.triggerType || '').trim().toUpperCase();
+        if (!GoalService.AUTO_TRIGGER_TYPES.has(normalizedTrigger)) {
+            return { success: true, applied: [], skipped: [], reason: 'TRIGGER_NOT_SUPPORTED' };
+        }
+
+        const grossSourceAmount = this.roundMoney(args.sourceAmount);
+        if (grossSourceAmount <= 0) {
+            return { success: true, applied: [], skipped: [], reason: 'NO_SOURCE_AMOUNT' };
+        }
+
+        const { data: sourceTx, error: txError } = await sb
+            .from('transactions')
+            .select('id, user_id, wallet_id, to_wallet_id, type, status, reference_id, metadata')
+            .eq('id', args.sourceTransactionId)
+            .maybeSingle();
+
+        if (txError) throw new Error(txError.message);
+        if (!sourceTx) {
+            return { success: false, applied: [], skipped: [], reason: 'SOURCE_TRANSACTION_NOT_FOUND' };
+        }
+        if (String(sourceTx.user_id || '') !== String(args.userId)) {
+            return { success: false, applied: [], skipped: [], reason: 'SOURCE_TRANSACTION_MISMATCH' };
+        }
+        if (!['completed', 'settled'].includes(String(sourceTx.status || '').toLowerCase())) {
+            return { success: false, applied: [], skipped: [], reason: 'SOURCE_TRANSACTION_NOT_SETTLED' };
+        }
+
+        const operatingWalletId = await this.resolveOperatingWalletId(sb, args.userId);
+        const sourceWalletId = String(args.sourceWalletId || sourceTx.to_wallet_id || operatingWalletId);
+        if (String(sourceWalletId) !== String(operatingWalletId)) {
+            return {
+                success: true,
+                applied: [],
+                skipped: [],
+                reason: 'NON_OPERATING_CREDIT',
+            };
+        }
+
+        const { data: goals, error: goalsError } = await sb
+            .from('goals')
+            .select('id, user_id, name, target, current, funding_strategy, auto_allocation_enabled, linked_income_percentage, monthly_target, created_at')
+            .eq('user_id', args.userId)
+            .eq('auto_allocation_enabled', true)
+            .order('created_at', { ascending: true });
+
+        if (goalsError) throw new Error(goalsError.message);
+        if (!goals || goals.length === 0) {
+            return { success: true, applied: [], skipped: [], reason: 'NO_AUTO_GOALS' };
+        }
+
+        let remainingAvailable = grossSourceAmount;
+        const applied: any[] = [];
+        const skipped: any[] = [];
+
+        for (const rawGoal of goals) {
+            const goalId = String(rawGoal.id);
+            const fundingStrategy = String(rawGoal.funding_strategy || 'manual').toLowerCase();
+            const currentAmount = Number(rawGoal.current || 0);
+            const targetAmount = Number(rawGoal.target || 0);
+            const goalRemaining = this.roundMoney(targetAmount - currentAmount);
+
+            const reservedEvent = await this.reserveAutoAllocationEvent(sb, {
+                user_id: args.userId,
+                goal_id: goalId,
+                source_transaction_id: args.sourceTransactionId,
+                source_reference_id: args.sourceReferenceId || sourceTx.reference_id || null,
+                source_wallet_id: sourceWalletId,
+                source_amount: grossSourceAmount,
+                trigger_type: normalizedTrigger,
+                metadata: {
+                    currency: args.currency || null,
+                    funding_strategy: fundingStrategy,
+                    source_transaction_type: sourceTx.type || null,
+                    ...(args.metadata || {}),
+                },
+            });
+
+            if (!reservedEvent) {
+                skipped.push({ goalId, reason: 'ALREADY_PROCESSED' });
+                continue;
+            }
+
+            if (goalRemaining <= 0) {
+                await this.markAutoAllocationEvent(sb, reservedEvent.id, 'SKIPPED', {
+                    reason: 'GOAL_ALREADY_FUNDED',
+                });
+                skipped.push({ goalId, reason: 'GOAL_ALREADY_FUNDED' });
+                continue;
+            }
+
+            if (remainingAvailable <= 0) {
+                await this.markAutoAllocationEvent(sb, reservedEvent.id, 'SKIPPED', {
+                    reason: 'SOURCE_FUNDS_CONSUMED',
+                });
+                skipped.push({ goalId, reason: 'SOURCE_FUNDS_CONSUMED' });
+                continue;
+            }
+
+            let desiredAmount = 0;
+            if (fundingStrategy === 'percentage') {
+                const percentage = Number(rawGoal.linked_income_percentage || 0);
+                if (percentage <= 0) {
+                    await this.markAutoAllocationEvent(sb, reservedEvent.id, 'SKIPPED', {
+                        reason: 'PERCENTAGE_NOT_CONFIGURED',
+                    });
+                    skipped.push({ goalId, reason: 'PERCENTAGE_NOT_CONFIGURED' });
+                    continue;
+                }
+                desiredAmount = this.roundMoney((grossSourceAmount * percentage) / 100);
+            } else if (fundingStrategy === 'fixed') {
+                const monthlyTarget = Number(rawGoal.monthly_target || 0);
+                if (monthlyTarget <= 0) {
+                    await this.markAutoAllocationEvent(sb, reservedEvent.id, 'SKIPPED', {
+                        reason: 'MONTHLY_TARGET_NOT_CONFIGURED',
+                    });
+                    skipped.push({ goalId, reason: 'MONTHLY_TARGET_NOT_CONFIGURED' });
+                    continue;
+                }
+                const alreadyAllocatedThisMonth = await this.getMonthlyAutoAllocated(sb, goalId);
+                desiredAmount = this.roundMoney(monthlyTarget - alreadyAllocatedThisMonth);
+            } else {
+                await this.markAutoAllocationEvent(sb, reservedEvent.id, 'SKIPPED', {
+                    reason: 'MANUAL_STRATEGY',
+                });
+                skipped.push({ goalId, reason: 'MANUAL_STRATEGY' });
+                continue;
+            }
+
+            desiredAmount = this.roundMoney(Math.min(desiredAmount, goalRemaining, remainingAvailable));
+            if (desiredAmount <= 0) {
+                await this.markAutoAllocationEvent(sb, reservedEvent.id, 'SKIPPED', {
+                    reason: 'NO_ALLOCATABLE_AMOUNT',
+                });
+                skipped.push({ goalId, reason: 'NO_ALLOCATABLE_AMOUNT' });
+                continue;
+            }
+
+            try {
+                const allocation = await this.allocateFunds(goalId, desiredAmount, sourceWalletId);
+                remainingAvailable = this.roundMoney(remainingAvailable - desiredAmount);
+                await this.markAutoAllocationEvent(sb, reservedEvent.id, 'COMPLETED', {
+                    allocated_amount: desiredAmount,
+                    metadata: {
+                        ...(reservedEvent.metadata || {}),
+                        allocation_result: allocation,
+                    },
+                    reason: null,
+                });
+                applied.push({
+                    goalId,
+                    name: rawGoal.name,
+                    amount: desiredAmount,
+                    strategy: fundingStrategy,
+                });
+            } catch (error: any) {
+                await this.markAutoAllocationEvent(sb, reservedEvent.id, 'FAILED', {
+                    reason: error?.message || 'AUTO_ALLOCATION_FAILED',
+                });
+                skipped.push({
+                    goalId,
+                    reason: error?.message || 'AUTO_ALLOCATION_FAILED',
+                });
+                console.error('[GoalService] Auto-allocation failed:', error);
+            }
+        }
+
+        await Audit.log('FINANCIAL', args.userId, 'GOAL_AUTO_ALLOCATION_RUN', {
+            sourceTransactionId: args.sourceTransactionId,
+            sourceReferenceId: args.sourceReferenceId || sourceTx.reference_id || null,
+            triggerType: normalizedTrigger,
+            sourceAmount: grossSourceAmount,
+            sourceWalletId,
+            appliedCount: applied.length,
+            appliedAmount: applied.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+            skippedCount: skipped.length,
+        });
+
+        return {
+            success: true,
+            triggerType: normalizedTrigger,
+            sourceTransactionId: args.sourceTransactionId,
+            sourceWalletId,
+            sourceAmount: grossSourceAmount,
+            applied,
+            skipped,
+            remainingAvailable,
+        };
+    }
+
+    async replayAutoAllocationsForTransaction(
+        userId: string,
+        sourceTransactionId: string,
+        token?: string,
+    ) {
+        const sb = this.getAdminDb();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const { data: tx, error } = await sb
+            .from('transactions')
+            .select('id, user_id, amount, currency, type, status, wallet_id, to_wallet_id, reference_id, metadata')
+            .eq('id', sourceTransactionId)
+            .maybeSingle();
+        if (error) throw new Error(error.message);
+        if (!tx) throw new Error('SOURCE_TRANSACTION_NOT_FOUND');
+        if (String(tx.user_id || '') !== String(userId)) throw new Error('SOURCE_TRANSACTION_MISMATCH');
+
+        const txType = String(tx.type || '').toLowerCase();
+        const triggerType =
+            txType === 'salary'
+                ? 'SALARY'
+                : txType === 'deposit' && tx.metadata?.service_context === 'AGENT_CASH'
+                    ? 'AGENT_CASH_DEPOSIT'
+                    : 'MANUAL_REPLAY';
+        let sourceAmount = Number(tx.amount || 0);
+        if (typeof tx.amount === 'string') {
+            try {
+                sourceAmount = Number(await DataVault.decrypt(tx.amount));
+            } catch {
+                sourceAmount = Number(tx.amount || 0);
+            }
+        }
+
+        return this.runAutoAllocationsForCredit({
+            userId,
+            sourceTransactionId: String(tx.id),
+            sourceReferenceId: tx.reference_id || null,
+            sourceWalletId: tx.to_wallet_id || tx.wallet_id || null,
+            sourceAmount,
+            currency: tx.currency || null,
+            triggerType,
+            metadata: {
+                replayed: true,
+                replay_token_present: Boolean(token),
+            },
+        });
     }
 
     private async resolveOwnedWalletRecord(sb: any, userId: string, walletId: string): Promise<{ id: string; user_id: string; currency?: string; table: 'wallets' | 'platform_vaults' } | null> {

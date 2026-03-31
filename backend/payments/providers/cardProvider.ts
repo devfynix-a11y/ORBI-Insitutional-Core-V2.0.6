@@ -18,6 +18,7 @@ import { getSupabase, getAdminSupabase } from '../../supabaseClient.js';
 import { DataVault } from '../../security/encryption.js';
 import { Audit } from '../../security/audit.js';
 import { v4 as uuidv4 } from 'uuid';
+import { GoalService } from '../../../strategy/goalService.js';
 
 export interface CardTokenRequest {
   cardNumber: string;
@@ -54,6 +55,7 @@ export interface CardToken {
 }
 
 export class CardProvider implements IPaymentProvider {
+  private readonly goals = new GoalService();
   private readonly BIN_PATTERNS = {
     VISA: /^4[0-9]{12}(?:[0-9]{3})?$/,
     MASTERCARD: /^5[1-5][0-9]{14}$/,
@@ -477,6 +479,24 @@ export class CardProvider implements IPaymentProvider {
         amount: transactionAmount,
         fee,
       });
+
+      try {
+        await this.goals.runAutoAllocationsForCredit({
+          userId: String(targetWallet.user_id),
+          sourceTransactionId: financialTxId,
+          sourceReferenceId: financialTxId,
+          sourceWalletId: String(targetWalletId),
+          sourceAmount: transactionAmount,
+          currency: cardTx.currency,
+          triggerType: 'CARD_DEPOSIT',
+          metadata: {
+            source: 'card_provider',
+            card_transaction_id: transactionId,
+          },
+        });
+      } catch (autoAllocationError: any) {
+        console.error('[GoalAutoAllocation] Card settlement trigger failed:', autoAllocationError?.message || autoAllocationError);
+      }
 
       return {
         settlementId: financialTxId,

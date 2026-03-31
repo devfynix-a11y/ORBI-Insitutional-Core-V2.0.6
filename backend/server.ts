@@ -382,6 +382,39 @@ class OrbiServer {
 
         if (result?.success && result.transaction) {
             await ServiceActorOps.handleTransactionPosted(sessionUser, payload, result.transaction);
+
+            const sourceTransactionId = String(result.transaction.internalId || result.transaction.id || '');
+            const normalizedType = String(payload?.type || '').trim().toUpperCase();
+            const cashDirection = String(payload?.metadata?.cash_direction || '').trim().toLowerCase();
+            const triggerType =
+                normalizedType === 'SALARY'
+                    ? 'SALARY'
+                    : normalizedType === 'DEPOSIT' && cashDirection === 'deposit'
+                        ? 'AGENT_CASH_DEPOSIT'
+                        : normalizedType === 'DEPOSIT'
+                            ? 'DEPOSIT'
+                            : null;
+
+            if (sourceTransactionId && triggerType) {
+                try {
+                    await this.goal.runAutoAllocationsForCredit({
+                        userId: String(sessionUser.id),
+                        sourceTransactionId,
+                        sourceReferenceId: result.transaction.referenceId || result.transaction.id || null,
+                        sourceWalletId: result.transaction.toWalletId || payload?.targetWalletId || null,
+                        sourceAmount: Number(payload?.amount || result.transaction.amount || 0),
+                        currency: payload?.currency || result.transaction.currency || null,
+                        triggerType,
+                        metadata: {
+                            source: 'secure_payment',
+                            payment_type: normalizedType,
+                            service_context: payload?.metadata?.service_context || null,
+                        },
+                    });
+                } catch (autoAllocationError: any) {
+                    console.error('[GoalAutoAllocation] Secure payment trigger failed:', autoAllocationError?.message || autoAllocationError);
+                }
+            }
         }
 
         return result;
@@ -551,6 +584,21 @@ class OrbiServer {
     async updateGoal(p: any, token?: string) { return this.goal.updateGoal(p, token); }
     async allocateToGoal(goalId: string, amount: number, walletId: string, token?: string) {
         return this.goal.allocateFunds(goalId, amount, walletId, token);
+    }
+    async runGoalAutoAllocationsForCredit(payload: {
+        userId: string;
+        sourceTransactionId: string;
+        sourceReferenceId?: string | null;
+        sourceWalletId?: string | null;
+        sourceAmount: number;
+        currency?: string | null;
+        triggerType: string;
+        metadata?: Record<string, any>;
+    }) {
+        return this.goal.runAutoAllocationsForCredit(payload);
+    }
+    async replayGoalAutoAllocations(userId: string, sourceTransactionId: string, token?: string) {
+        return this.goal.replayAutoAllocationsForTransaction(userId, sourceTransactionId, token);
     }
     async withdrawFromGoal(goalId: string, amount: number, walletId: string, verification?: any, token?: string) {
         return this.goal.withdrawFunds(goalId, amount, walletId, verification, token);
@@ -897,6 +945,75 @@ class OrbiServer {
                 merchant_role: user?.role || user?.user_metadata?.role || 'MERCHANT',
             },
         }, user);
+    }
+    async previewOrbiPayPayment(userId: string, payload: any) {
+        return this.getTransactionPreview(userId, {
+            ...payload,
+            type: payload.type || 'MERCHANT_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                service_context: 'MERCHANT',
+                payment_channel: payload.channel || 'ORBI_PAY',
+                merchant_pay_number: payload.merchantPayNumber,
+                merchant_reference: payload.reference,
+                merchant_name: payload.merchantName,
+            },
+        });
+    }
+    async processOrbiPayPayment(payload: any, user: any) {
+        return this.processSecurePayment({
+            ...payload,
+            type: payload.type || 'MERCHANT_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                service_context: 'MERCHANT',
+                payment_channel: payload.channel || 'ORBI_PAY',
+                merchant_pay_number: payload.merchantPayNumber,
+                merchant_reference: payload.reference,
+                merchant_name: payload.merchantName,
+                initiated_by_consumer: true,
+                payer_user_id: user?.id,
+            },
+        }, user);
+    }
+    async previewBillPayment(userId: string, payload: any) {
+        return this.getTransactionPreview(userId, {
+            ...payload,
+            type: payload.type || 'BILL_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                service_context: 'BILL_PAYMENT',
+                bill_provider: payload.provider,
+                bill_category: payload.billCategory,
+                bill_reference: payload.reference,
+            },
+        });
+    }
+    async processBillPayment(payload: any, user: any) {
+        return this.processSecurePayment({
+            ...payload,
+            type: payload.type || 'BILL_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                service_context: 'BILL_PAYMENT',
+                payment_channel: payload.channel || 'ORBI_BILL_PAY',
+                bill_provider: payload.provider,
+                bill_category: payload.billCategory,
+                bill_reference: payload.reference,
+                initiated_by_consumer: true,
+                payer_user_id: user?.id,
+            },
+        }, user);
+    }
+    getBillPaymentProviders() {
+        return [
+            { key: 'electricity', label: 'Electricity', providers: ['TANESCO', 'ZESCO', 'LUKU'] },
+            { key: 'school-fees', label: 'School fees', providers: ['Ada ya shule', 'Ada ya chuo', 'Hosteli'] },
+            { key: 'water-bills', label: 'Water bills', providers: ['DAWASA', 'RUWASA', 'Maji ya mkoa'] },
+            { key: 'gas', label: 'Gas', providers: ['Oryx Gas', 'Taifa Gas', 'Lake Gas'] },
+            { key: 'bundles', label: 'Bundles', providers: ['Vodacom', 'Airtel', 'Tigo', 'Halotel'] },
+            { key: 'entertainment', label: 'Entertainment', providers: ['DSTV', 'Azam TV', 'Startimes', 'Netflix'] },
+        ];
     }
     async processAgentCashOperation(payload: any, user: any, direction: 'deposit' | 'withdrawal') {
         const normalizedType = direction === 'deposit' ? 'DEPOSIT' : 'WITHDRAWAL';

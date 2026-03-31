@@ -1039,6 +1039,12 @@ const ExternalFundMovementSchema = z.object({
     ]).optional(),
     preferredProviderCode: z.string().optional(),
     description: z.string().optional(),
+    transactionType: z.string().optional(),
+    transaction_type: z.string().optional(),
+    providerInput: z.string().optional(),
+    provider_input: z.string().optional(),
+    counterpartyType: z.string().optional(),
+    counterparty_type: z.string().optional(),
     sourceWalletId: z.string().uuid().optional(),
     targetWalletId: z.string().uuid().optional(),
     sourceInstitutionalAccountId: z.string().uuid().optional(),
@@ -1513,6 +1519,57 @@ const SharedPotUpdateSchema = SharedPotCreateSchema.partial().extend({
 const SharedPotContributionSchema = z.object({
     amount: z.coerce.number().positive(),
     source_wallet_id: z.string().uuid().optional(),
+});
+
+const SharedPotMemberAddSchema = z.object({
+    identifier: z.string().min(3),
+    role: z.enum(['MANAGER', 'CONTRIBUTOR', 'VIEWER']).optional(),
+    message: z.string().max(240).optional(),
+});
+
+const SharedPotInviteResponseSchema = z.object({
+    action: z.enum(['ACCEPT', 'REJECT']),
+});
+
+const SharedPotWithdrawSchema = z.object({
+    amount: z.coerce.number().positive(),
+    target_wallet_id: z.string().uuid().optional(),
+});
+
+const SharedBudgetCreateSchema = z.object({
+    name: z.string().min(2),
+    purpose: z.string().optional(),
+    currency: z.string().min(3).max(8).optional(),
+    budget_limit: z.coerce.number().positive(),
+    period_type: z.enum(['WEEKLY', 'MONTHLY', 'CUSTOM']).optional(),
+    approval_mode: z.enum(['AUTO', 'REVIEW']).optional(),
+});
+
+const SharedBudgetUpdateSchema = SharedBudgetCreateSchema.partial().extend({
+    status: z.enum(['ACTIVE', 'PAUSED', 'ARCHIVED']).optional(),
+});
+
+const SharedBudgetMemberAddSchema = z.object({
+    identifier: z.string().min(3),
+    role: z.enum(['MANAGER', 'SPENDER', 'VIEWER']).optional(),
+    member_limit: z.coerce.number().positive().optional(),
+    message: z.string().max(240).optional(),
+});
+
+const SharedBudgetInviteResponseSchema = z.object({
+    action: z.enum(['ACCEPT', 'REJECT']),
+});
+
+const SharedBudgetSpendSchema = z.object({
+    source_wallet_id: z.string().uuid().optional(),
+    amount: z.coerce.number().positive(),
+    currency: z.string().min(3).max(8).optional(),
+    provider: z.string().min(2).optional(),
+    bill_category: z.string().min(2).optional(),
+    reference: z.string().min(2).optional(),
+    description: z.string().max(255).optional(),
+    type: z.enum(['EXTERNAL_PAYMENT', 'BILL_PAYMENT', 'MERCHANT_PAYMENT']).optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
 });
 
 const AllocationRuleCreateSchema = z.object({
@@ -3067,6 +3124,79 @@ v1.post('/merchant/payments/settle', authenticate as any, validate(PaymentIntent
     }
 });
 
+v1.post('/payments/orbi-pay/preview', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['CONSUMER', 'USER', 'MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.previewOrbiPayPayment(session.sub, req.body);
+        if (!result.success) return res.status(400).json(result);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/payments/orbi-pay/settle', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['CONSUMER', 'USER', 'MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.processOrbiPayPayment(req.body, session.user);
+        if (!result.success) {
+            return res.status(400).json(result);
+        }
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/payments/bills/providers', authenticate as any, async (_req, res) => {
+    try {
+        const result = LogicCore.getBillPaymentProviders();
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/payments/bills/preview', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['CONSUMER', 'USER', 'MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.previewBillPayment(session.sub, req.body);
+        if (!result.success) return res.status(400).json(result);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/payments/bills/settle', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['CONSUMER', 'USER', 'MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.processBillPayment(req.body, session.user);
+        if (!result.success) {
+            return res.status(400).json(result);
+        }
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 v1.get('/agent/transactions', authenticate as any, async (req, res) => {
     const session = (req as any).session;
     if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
@@ -3952,6 +4082,311 @@ v1.delete('/categories/:id', authenticate as any, async (req, res) => {
     }
 });
 
+const wealthNumber = (value: any) => {
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') return Number(value.replace(/,/g, '')) || 0;
+    return 0;
+};
+
+const resolveWealthSourceWallet = async (
+    sb: any,
+    userId: string,
+    sourceWalletId?: string,
+) => {
+    let sourceRecord: any = null;
+    let sourceTable: 'platform_vaults' | 'wallets' = 'platform_vaults';
+
+    if (sourceWalletId) {
+        const { data: vaultMatch } = await sb
+            .from('platform_vaults')
+            .select('*')
+            .eq('id', sourceWalletId)
+            .eq('user_id', userId)
+            .maybeSingle();
+        if (vaultMatch) {
+            sourceRecord = vaultMatch;
+            sourceTable = 'platform_vaults';
+        } else {
+            const { data: walletMatch } = await sb
+                .from('wallets')
+                .select('*')
+                .eq('id', sourceWalletId)
+                .eq('user_id', userId)
+                .maybeSingle();
+            if (walletMatch) {
+                sourceRecord = walletMatch;
+                sourceTable = 'wallets';
+            }
+        }
+    }
+
+    if (!sourceRecord) {
+        const { data: operatingVault } = await sb
+            .from('platform_vaults')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('vault_role', 'OPERATING')
+            .maybeSingle();
+        if (operatingVault) {
+            sourceRecord = operatingVault;
+            sourceTable = 'platform_vaults';
+        } else {
+            const { data: fallbackWallet } = await sb
+                .from('wallets')
+                .select('*')
+                .eq('user_id', userId)
+                .order('created_at', { ascending: true })
+                .limit(1)
+                .maybeSingle();
+            sourceRecord = fallbackWallet;
+            sourceTable = 'wallets';
+        }
+    }
+
+    if (!sourceRecord) throw new Error('NO_OPERATING_WALLET');
+    return { sourceRecord, sourceTable };
+};
+
+const updateWealthSourceBalance = async (
+    sb: any,
+    sourceTable: 'platform_vaults' | 'wallets',
+    sourceRecord: any,
+    userId: string,
+    nextBalance: number,
+) => {
+    const { error } = await sb
+        .from(sourceTable)
+        .update({
+            balance: nextBalance,
+            updated_at: new Date().toISOString(),
+        })
+        .eq('id', sourceRecord.id)
+        .eq('user_id', userId);
+    if (error) throw new Error(error.message);
+};
+
+const createWealthTransaction = async (
+    sb: any,
+    userId: string,
+    sourceRecord: any,
+    amount: number,
+    currency: string,
+    description: string,
+    wealthImpactType: string,
+    metadata: Record<string, any>,
+) => {
+    const reference = `wealth_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const { data, error } = await sb
+        .from('transactions')
+        .insert({
+            reference_id: reference,
+            user_id: userId,
+            wallet_id: sourceRecord.id,
+            amount: String(amount),
+            currency,
+            description,
+            type: 'internal_transfer',
+            status: 'completed',
+            wealth_impact_type: wealthImpactType,
+            protection_state: 'OPEN',
+            allocation_source: metadata.allocation_source || null,
+            metadata,
+        })
+        .select('*')
+        .single();
+    if (error || !data) throw new Error(error?.message || 'TX_CREATE_FAILED');
+    return data;
+};
+
+const insertBillReserveLedger = async (
+    sb: any,
+    {
+        transactionId,
+        userId,
+        sourceRecord,
+        reserveId,
+        amount,
+        sourceBalanceAfter,
+        reserveBalanceAfter,
+        action,
+    }: {
+        transactionId: string;
+        userId: string;
+        sourceRecord: any;
+        reserveId: string;
+        amount: number;
+        sourceBalanceAfter: number;
+        reserveBalanceAfter: number;
+        action: 'LOCK' | 'RELEASE';
+    },
+) => {
+    const isLock = action == 'LOCK';
+    const rows = [
+        {
+            transaction_id: transactionId,
+            user_id: userId,
+            wallet_id: sourceRecord.id,
+            bill_reserve_id: reserveId,
+            bucket_type: 'OPERATING',
+            entry_side: isLock ? 'DEBIT' : 'CREDIT',
+            entry_type: isLock ? 'DEBIT' : 'CREDIT',
+            amount: String(amount),
+            balance_after: String(sourceBalanceAfter),
+            description: isLock
+                ? 'Bill reserve funding debit'
+                : 'Bill reserve release credit',
+        },
+        {
+            transaction_id: transactionId,
+            user_id: userId,
+            wallet_id: sourceRecord.id,
+            bill_reserve_id: reserveId,
+            bucket_type: 'PLANNED',
+            entry_side: isLock ? 'CREDIT' : 'DEBIT',
+            entry_type: isLock ? 'CREDIT' : 'DEBIT',
+            amount: String(amount),
+            balance_after: String(reserveBalanceAfter),
+            description: isLock
+                ? 'Bill reserve protected balance credit'
+                : 'Bill reserve protected balance release',
+        },
+    ];
+    const { error } = await sb.from('financial_ledger').insert(rows);
+    if (error) throw new Error(error.message);
+};
+
+const normalizeWealthIdentifier = (value: string) => value.trim().toLowerCase();
+
+const normalizeWealthPhone = (value: string) =>
+    value
+        .trim()
+        .replace(/[^\d+]/g, '')
+        .replace(/(?!^)\+/g, '');
+
+const isEmailLikeIdentifier = (value: string) => value.includes('@');
+
+const resolveSharedPotMembership = async (sb: any, potId: string, userId: string) => {
+    const { data: pot, error: potError } = await sb
+        .from('shared_pots')
+        .select('*')
+        .eq('id', potId)
+        .maybeSingle();
+    if (potError) throw new Error(potError.message);
+    if (!pot) throw new Error('SHARED_POT_NOT_FOUND');
+
+    const { data: membership, error: memberError } = await sb
+        .from('shared_pot_members')
+        .select('*')
+        .eq('pot_id', potId)
+        .eq('user_id', userId)
+        .maybeSingle();
+    if (memberError) throw new Error(memberError.message);
+
+    const ownerMembership = pot.owner_user_id === userId
+        ? { role: 'OWNER', user_id: userId, pot_id: potId }
+        : null;
+
+    const effectiveMembership = membership || ownerMembership;
+    if (!effectiveMembership) throw new Error('SHARED_POT_ACCESS_DENIED');
+    return { pot, membership: effectiveMembership };
+};
+
+const canManageSharedPot = (role: string) => ['OWNER', 'MANAGER'].includes(role.toUpperCase());
+const canContributeToSharedPot = (role: string) =>
+    ['OWNER', 'MANAGER', 'CONTRIBUTOR'].includes(role.toUpperCase());
+
+const resolveUserBySharedPotIdentifier = async (sb: any, identifier: string) => {
+    if (isEmailLikeIdentifier(identifier)) {
+        const { data, error } = await sb
+            .from('users')
+            .select('id,email,phone,full_name')
+            .eq('email', normalizeWealthIdentifier(identifier))
+            .maybeSingle();
+        if (error) throw new Error(error.message);
+        return data;
+    }
+
+    const normalizedPhone = normalizeWealthPhone(identifier);
+    const candidates = Array.from(new Set([identifier.trim(), normalizedPhone, normalizedPhone.replace(/\D/g, '')].filter(Boolean)));
+    const { data, error } = await sb
+        .from('users')
+        .select('id,email,phone,full_name')
+        .in('phone', candidates)
+        .limit(1)
+        .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data;
+};
+
+const expireSharedPotInvitationIfNeeded = async (sb: any, invite: any) => {
+    if (!invite?.expires_at) return invite;
+    if (String(invite.status || '').toUpperCase() !== 'PENDING') return invite;
+    if (new Date(invite.expires_at).getTime() > Date.now()) return invite;
+
+    const { data, error } = await sb
+        .from('shared_pot_invitations')
+        .update({
+            status: 'EXPIRED',
+            updated_at: new Date().toISOString(),
+        })
+        .eq('id', invite.id)
+        .select('*')
+        .single();
+    if (error) throw new Error(error.message);
+    return data || invite;
+};
+
+const resolveSharedBudgetMembership = async (sb: any, budgetId: string, userId: string) => {
+    const { data: budget, error: budgetError } = await sb
+        .from('shared_budgets')
+        .select('*')
+        .eq('id', budgetId)
+        .maybeSingle();
+    if (budgetError) throw new Error(budgetError.message);
+    if (!budget) throw new Error('SHARED_BUDGET_NOT_FOUND');
+
+    const { data: membership, error: memberError } = await sb
+        .from('shared_budget_members')
+        .select('*')
+        .eq('budget_id', budgetId)
+        .eq('user_id', userId)
+        .maybeSingle();
+    if (memberError) throw new Error(memberError.message);
+
+    const ownerMembership = budget.owner_user_id === userId
+        ? { role: 'OWNER', user_id: userId, budget_id: budgetId }
+        : null;
+
+    const effectiveMembership = membership || ownerMembership;
+    if (!effectiveMembership) throw new Error('SHARED_BUDGET_ACCESS_DENIED');
+    return { budget, membership: effectiveMembership };
+};
+
+const canManageSharedBudget = (role: string) => ['OWNER', 'MANAGER'].includes(role.toUpperCase());
+const canSpendFromSharedBudget = (role: string) => ['OWNER', 'MANAGER', 'SPENDER'].includes(role.toUpperCase());
+
+const resolveUserBySharedBudgetIdentifier = async (sb: any, identifier: string) => {
+    return resolveUserBySharedPotIdentifier(sb, identifier);
+};
+
+const expireSharedBudgetInvitationIfNeeded = async (sb: any, invite: any) => {
+    if (!invite?.expires_at) return invite;
+    if (String(invite.status || '').toUpperCase() !== 'PENDING') return invite;
+    if (new Date(invite.expires_at).getTime() > Date.now()) return invite;
+
+    const { data, error } = await sb
+        .from('shared_budget_invitations')
+        .update({
+            status: 'EXPIRED',
+            updated_at: new Date().toISOString(),
+        })
+        .eq('id', invite.id)
+        .select('*')
+        .single();
+    if (error) throw new Error(error.message);
+    return data || invite;
+};
+
 v1.get('/wealth/summary', authenticate as any, async (req, res) => {
     const session = (req as any).session;
     try {
@@ -4111,22 +4546,44 @@ v1.post('/wealth/bill-reserves', authenticate as any, async (req, res) => {
         const payload = BillReserveCreateSchema.parse(req.body);
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const currency = payload.currency?.toUpperCase() || 'TZS';
+        const isFixedReserve = (payload.reserve_mode || 'FIXED') === 'FIXED';
+        const lockedBalance = isFixedReserve ? payload.reserve_amount : 0;
+
+        let sourceRecord: any = null;
+        let sourceTable: 'platform_vaults' | 'wallets' = 'platform_vaults';
+        let sourceBalanceAfter: number | null = null;
+
+        if (lockedBalance > 0) {
+            const resolved = await resolveWealthSourceWallet(
+                sb,
+                session.sub,
+                payload.source_wallet_id,
+            );
+            sourceRecord = resolved.sourceRecord;
+            sourceTable = resolved.sourceTable;
+            const currentBalance = wealthNumber(sourceRecord.balance);
+            if (currentBalance < lockedBalance) {
+                return res.status(400).json({ success: false, error: 'INSUFFICIENT_FUNDS' });
+            }
+            sourceBalanceAfter = currentBalance - lockedBalance;
+        }
+
         const insertPayload = {
             user_id: session.sub,
             provider_name: payload.provider_name,
             bill_type: payload.bill_type,
-            source_wallet_id: payload.source_wallet_id,
-            currency: payload.currency?.toUpperCase() || 'TZS',
+            source_wallet_id: sourceRecord?.id || payload.source_wallet_id,
+            currency,
             due_pattern: payload.due_pattern || 'MONTHLY',
             due_day: payload.due_day,
             reserve_mode: payload.reserve_mode || 'FIXED',
             reserve_amount: payload.reserve_amount,
-            locked_balance: payload.reserve_mode === 'FIXED' || !payload.reserve_mode
-                ? payload.reserve_amount
-                : 0,
+            locked_balance: lockedBalance,
             is_active: true,
             metadata: {
                 created_from: 'mobile_app',
+                source_table: sourceRecord ? sourceTable : null,
             },
         };
         const { data, error } = await sb
@@ -4135,7 +4592,50 @@ v1.post('/wealth/bill-reserves', authenticate as any, async (req, res) => {
             .select('*')
             .single();
         if (error) return res.status(400).json({ success: false, error: error.message });
-        res.json({ success: true, data });
+
+        let transaction: any = null;
+        if (lockedBalance > 0 && sourceRecord && sourceBalanceAfter != null) {
+            transaction = await createWealthTransaction(
+                sb,
+                session.sub,
+                sourceRecord,
+                lockedBalance,
+                currency,
+                `Bill reserve funding: ${payload.provider_name}`,
+                'PLANNED',
+                {
+                    bill_reserve_id: data.id,
+                    source_table: sourceTable,
+                    source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
+                    allocation_source: 'BILL_RESERVE_CREATE',
+                },
+            );
+            await updateWealthSourceBalance(
+                sb,
+                sourceTable,
+                sourceRecord,
+                session.sub,
+                sourceBalanceAfter,
+            );
+            await insertBillReserveLedger(sb, {
+                transactionId: transaction.id,
+                userId: session.sub,
+                sourceRecord,
+                reserveId: data.id,
+                amount: lockedBalance,
+                sourceBalanceAfter,
+                reserveBalanceAfter: lockedBalance,
+                action: 'LOCK',
+            });
+        }
+        res.json({
+            success: true,
+            data: {
+                ...data,
+                source_balance: sourceBalanceAfter,
+                transaction,
+            },
+        });
     } catch (e: any) {
         res.status(400).json({ success: false, error: e.message });
     }
@@ -4147,6 +4647,29 @@ v1.patch('/wealth/bill-reserves/:id', authenticate as any, async (req, res) => {
         const payload = BillReserveUpdateSchema.parse(req.body);
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data: existingReserve, error: reserveError } = await sb
+            .from('bill_reserves')
+            .select('*')
+            .eq('id', req.params.id)
+            .eq('user_id', session.sub)
+            .single();
+        if (reserveError || !existingReserve) {
+            return res.status(404).json({ success: false, error: 'BILL_RESERVE_NOT_FOUND' });
+        }
+
+        const nextReserveMode = payload.reserve_mode ?? existingReserve.reserve_mode ?? 'FIXED';
+        const nextReserveAmount = payload.reserve_amount ?? wealthNumber(existingReserve.reserve_amount);
+        const nextStatus = payload.status ?? String(existingReserve.status || 'ACTIVE').toUpperCase();
+        const nextIsActive = payload.is_active ?? (existingReserve.is_active !== false);
+        const shouldLockFunds =
+            nextIsActive &&
+            String(nextStatus).toUpperCase() == 'ACTIVE' &&
+            String(nextReserveMode).toUpperCase() == 'FIXED';
+
+        const currentLockedBalance = wealthNumber(existingReserve.locked_balance || 0);
+        const desiredLockedBalance = shouldLockFunds ? wealthNumber(nextReserveAmount) : 0;
+        const delta = desiredLockedBalance - currentLockedBalance;
+
         const updatePayload: any = {
             updated_at: new Date().toISOString(),
         };
@@ -4160,9 +4683,35 @@ v1.patch('/wealth/bill-reserves/:id', authenticate as any, async (req, res) => {
         if (payload.reserve_amount !== undefined) updatePayload.reserve_amount = payload.reserve_amount;
         if (payload.is_active !== undefined) updatePayload.is_active = payload.is_active;
         if (payload.status !== undefined) updatePayload.status = payload.status;
-        if (payload.reserve_amount !== undefined && (payload.reserve_mode === 'FIXED' || payload.reserve_mode === undefined)) {
-            updatePayload.locked_balance = payload.reserve_amount;
+        updatePayload.locked_balance = desiredLockedBalance;
+
+        let sourceRecord: any = null;
+        let sourceTable: 'platform_vaults' | 'wallets' = 'platform_vaults';
+        let sourceBalanceAfter: number | null = null;
+        let adjustmentAction: 'LOCK' | 'RELEASE' | null = null;
+
+        if (delta !== 0) {
+            const resolved = await resolveWealthSourceWallet(
+                sb,
+                session.sub,
+                (payload.source_wallet_id ?? existingReserve.source_wallet_id ?? '').toString() || undefined,
+            );
+            sourceRecord = resolved.sourceRecord;
+            sourceTable = resolved.sourceTable;
+            const currentBalance = wealthNumber(sourceRecord.balance);
+            if (delta > 0) {
+                if (currentBalance < delta) {
+                    return res.status(400).json({ success: false, error: 'INSUFFICIENT_FUNDS' });
+                }
+                sourceBalanceAfter = currentBalance - delta;
+                adjustmentAction = 'LOCK';
+            } else {
+                sourceBalanceAfter = currentBalance + Math.abs(delta);
+                adjustmentAction = 'RELEASE';
+            }
+            updatePayload.source_wallet_id = sourceRecord.id;
         }
+
         const { data, error } = await sb
             .from('bill_reserves')
             .update(updatePayload)
@@ -4171,7 +4720,145 @@ v1.patch('/wealth/bill-reserves/:id', authenticate as any, async (req, res) => {
             .select('*')
             .single();
         if (error) return res.status(400).json({ success: false, error: error.message });
-        res.json({ success: true, data });
+
+        let transaction: any = null;
+        if (delta !== 0 && sourceRecord && sourceBalanceAfter != null && adjustmentAction) {
+            const adjustmentAmount = Math.abs(delta);
+            transaction = await createWealthTransaction(
+                sb,
+                session.sub,
+                sourceRecord,
+                adjustmentAmount,
+                String(data.currency || sourceRecord.currency || 'TZS').toUpperCase(),
+                adjustmentAction == 'LOCK'
+                    ? `Bill reserve top-up: ${data.provider_name}`
+                    : `Bill reserve release: ${data.provider_name}`,
+                'PLANNED',
+                {
+                    bill_reserve_id: data.id,
+                    source_table: sourceTable,
+                    source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
+                    allocation_source: adjustmentAction == 'LOCK'
+                        ? 'BILL_RESERVE_TOP_UP'
+                        : 'BILL_RESERVE_RELEASE',
+                },
+            );
+            await updateWealthSourceBalance(
+                sb,
+                sourceTable,
+                sourceRecord,
+                session.sub,
+                sourceBalanceAfter,
+            );
+            await insertBillReserveLedger(sb, {
+                transactionId: transaction.id,
+                userId: session.sub,
+                sourceRecord,
+                reserveId: data.id,
+                amount: adjustmentAmount,
+                sourceBalanceAfter,
+                reserveBalanceAfter: desiredLockedBalance,
+                action: adjustmentAction,
+            });
+        }
+        res.json({
+            success: true,
+            data: {
+                ...data,
+                source_balance: sourceBalanceAfter,
+                transaction,
+            },
+        });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.delete('/wealth/bill-reserves/:id', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+
+        const { data: reserve, error: reserveError } = await sb
+            .from('bill_reserves')
+            .select('*')
+            .eq('id', req.params.id)
+            .eq('user_id', session.sub)
+            .single();
+        if (reserveError || !reserve) {
+            return res.status(404).json({ success: false, error: 'BILL_RESERVE_NOT_FOUND' });
+        }
+
+        const lockedBalance = wealthNumber(reserve.locked_balance || 0);
+        let sourceBalanceAfter: number | null = null;
+        let transaction: any = null;
+
+        if (lockedBalance > 0) {
+            const resolved = await resolveWealthSourceWallet(
+                sb,
+                session.sub,
+                String(reserve.source_wallet_id || '').trim() || undefined,
+            );
+            const sourceRecord = resolved.sourceRecord;
+            const sourceTable = resolved.sourceTable;
+            const currentBalance = wealthNumber(sourceRecord.balance);
+            sourceBalanceAfter = currentBalance + lockedBalance;
+
+            transaction = await createWealthTransaction(
+                sb,
+                session.sub,
+                sourceRecord,
+                lockedBalance,
+                String(reserve.currency || sourceRecord.currency || 'TZS').toUpperCase(),
+                `Bill reserve delete release: ${reserve.provider_name || reserve.bill_type || 'Reserve'}`,
+                'PLANNED',
+                {
+                    bill_reserve_id: reserve.id,
+                    source_table: sourceTable,
+                    source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
+                    allocation_source: 'BILL_RESERVE_DELETE_RELEASE',
+                },
+            );
+
+            await updateWealthSourceBalance(
+                sb,
+                sourceTable,
+                sourceRecord,
+                session.sub,
+                sourceBalanceAfter,
+            );
+
+            await insertBillReserveLedger(sb, {
+                transactionId: transaction.id,
+                userId: session.sub,
+                sourceRecord,
+                reserveId: reserve.id,
+                amount: lockedBalance,
+                sourceBalanceAfter,
+                reserveBalanceAfter: 0,
+                action: 'RELEASE',
+            });
+        }
+
+        const { error: deleteError } = await sb
+            .from('bill_reserves')
+            .delete()
+            .eq('id', reserve.id)
+            .eq('user_id', session.sub);
+        if (deleteError) {
+            return res.status(400).json({ success: false, error: deleteError.message });
+        }
+
+        res.json({
+            success: true,
+            data: {
+                deleted: true,
+                released_amount: lockedBalance,
+                source_balance: sourceBalanceAfter,
+                transaction,
+            },
+        });
     } catch (e: any) {
         res.status(400).json({ success: false, error: e.message });
     }
@@ -4182,13 +4869,39 @@ v1.get('/wealth/shared-pots', authenticate as any, async (req, res) => {
     try {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
-        const { data, error } = await sb
+        const { data: memberships, error: memberError } = await sb
+            .from('shared_pot_members')
+            .select('pot_id, role')
+            .eq('user_id', session.sub);
+        if (memberError) return res.status(400).json({ success: false, error: memberError.message });
+
+        const memberPotIds = Array.from(new Set((memberships || []).map((item: any) => String(item.pot_id || '')).filter(Boolean)));
+        let query = sb
             .from('shared_pots')
             .select('*')
-            .eq('owner_user_id', session.sub)
-            .order('created_at', { ascending: false });
+            .eq('owner_user_id', session.sub);
+        if (memberPotIds.length > 0) {
+            query = sb
+                .from('shared_pots')
+                .select('*')
+                .or([
+                    `owner_user_id.eq.${session.sub}`,
+                    `id.in.(${memberPotIds.join(',')})`,
+                ].join(','));
+        }
+        const { data, error } = await query.order('created_at', { ascending: false });
         if (error) return res.status(400).json({ success: false, error: error.message });
-        res.json({ success: true, data: { pots: data || [] } });
+        const membershipByPot = new Map(
+            (memberships || []).map((item: any) => [String(item.pot_id), String(item.role || 'CONTRIBUTOR').toUpperCase()]),
+        );
+        const items = (data || []).map((pot: any) => ({
+            ...pot,
+            my_role: pot.owner_user_id === session.sub
+                ? 'OWNER'
+                : (membershipByPot.get(String(pot.id)) || 'CONTRIBUTOR'),
+            is_owner: pot.owner_user_id === session.sub,
+        }));
+        res.json({ success: true, data: { pots: items } });
     } catch (e: any) {
         res.status(500).json({ success: false, error: e.message });
     }
@@ -4220,6 +4933,7 @@ v1.post('/wealth/shared-pots', authenticate as any, async (req, res) => {
             pot_id: data.id,
             user_id: session.sub,
             role: 'OWNER',
+            contributed_amount: 0,
         });
         res.json({ success: true, data });
     } catch (e: any) {
@@ -4233,6 +4947,10 @@ v1.patch('/wealth/shared-pots/:id', authenticate as any, async (req, res) => {
         const payload = SharedPotUpdateSchema.parse(req.body);
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { membership } = await resolveSharedPotMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedPot(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_POT_ACCESS_DENIED' });
+        }
         const updatePayload: any = {
             updated_at: new Date().toISOString(),
         };
@@ -4252,7 +4970,256 @@ v1.patch('/wealth/shared-pots/:id', authenticate as any, async (req, res) => {
         if (error) return res.status(400).json({ success: false, error: error.message });
         res.json({ success: true, data });
     } catch (e: any) {
+        res.status(e.message === 'SHARED_POT_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-pots/:id/members', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { pot } = await resolveSharedPotMembership(sb, req.params.id, session.sub);
+        const { data, error } = await sb
+            .from('shared_pot_members')
+            .select('id,pot_id,user_id,role,contribution_target,contributed_amount,metadata,created_at, users!shared_pot_members_user_id_fkey(id, full_name, email, phone)')
+            .eq('pot_id', pot.id)
+            .order('created_at', { ascending: true });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data: { members: data || [] } });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_POT_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-pots/:id/invitations', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { pot, membership } = await resolveSharedPotMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedPot(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_POT_ACCESS_DENIED' });
+        }
+        const { data, error } = await sb
+            .from('shared_pot_invitations')
+            .select('id,pot_id,inviter_user_id,invitee_user_id,invitee_identifier,role,status,message,responded_at,expires_at,metadata,created_at, users!shared_pot_invitations_invitee_user_id_fkey(id, full_name, email, phone)')
+            .eq('pot_id', pot.id)
+            .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data: { invitations: data || [] } });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_POT_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-pot-invitations', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb
+            .from('shared_pot_invitations')
+            .select('id,pot_id,inviter_user_id,invitee_user_id,invitee_identifier,role,status,message,responded_at,expires_at,metadata,created_at, shared_pots!shared_pot_invitations_pot_id_fkey(id, name, purpose, currency, target_amount, current_amount, status), users!shared_pot_invitations_inviter_user_id_fkey(id, full_name, email, phone)')
+            .eq('invitee_user_id', session.sub)
+            .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+
+        const invitations = [];
+        for (const invite of data || []) {
+            invitations.push(await expireSharedPotInvitationIfNeeded(sb, invite));
+        }
+        res.json({ success: true, data: { invitations } });
+    } catch (e: any) {
         res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-pots/:id/invitations', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedPotMemberAddSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { pot, membership } = await resolveSharedPotMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedPot(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_POT_ACCESS_DENIED' });
+        }
+        const memberUser = await resolveUserBySharedPotIdentifier(sb, payload.identifier);
+        if (!memberUser?.id) {
+            return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+        }
+        if (String(memberUser.id) === String(pot.owner_user_id)) {
+            return res.status(400).json({ success: false, error: 'OWNER_ALREADY_MEMBER' });
+        }
+        const { data: existingMember, error: existingMemberError } = await sb
+            .from('shared_pot_members')
+            .select('id')
+            .eq('pot_id', pot.id)
+            .eq('user_id', memberUser.id)
+            .maybeSingle();
+        if (existingMemberError) {
+            return res.status(400).json({ success: false, error: existingMemberError.message });
+        }
+        if (existingMember) {
+            return res.status(400).json({ success: false, error: 'SHARED_POT_MEMBER_ALREADY_EXISTS' });
+        }
+
+        const { data: pendingInvite, error: pendingInviteError } = await sb
+            .from('shared_pot_invitations')
+            .select('*')
+            .eq('pot_id', pot.id)
+            .eq('invitee_user_id', memberUser.id)
+            .eq('status', 'PENDING')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+        if (pendingInviteError && pendingInviteError.code !== 'PGRST116') {
+            return res.status(400).json({ success: false, error: pendingInviteError.message });
+        }
+        if (pendingInvite) {
+            return res.status(400).json({ success: false, error: 'SHARED_POT_INVITE_ALREADY_PENDING' });
+        }
+
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { data, error } = await sb
+            .from('shared_pot_invitations')
+            .insert({
+                pot_id: pot.id,
+                inviter_user_id: session.sub,
+                invitee_user_id: memberUser.id,
+                invitee_identifier: payload.identifier,
+                role: payload.role || 'CONTRIBUTOR',
+                message: payload.message || null,
+                expires_at: expiresAt,
+                metadata: {
+                    invited_by: session.sub,
+                    invite_source: 'shared_pot_member_sheet',
+                    identifier: payload.identifier,
+                },
+            })
+            .select('id,pot_id,inviter_user_id,invitee_user_id,invitee_identifier,role,status,message,responded_at,expires_at,metadata,created_at')
+            .single();
+        if (error) return res.status(400).json({ success: false, error: error.message });
+
+        await Messaging.dispatch(
+            String(memberUser.id),
+            'info',
+            'Shared pot invitation',
+            `${session.user?.user_metadata?.full_name || 'A member'} invited you to join "${pot.name}" as ${String(payload.role || 'CONTRIBUTOR').toLowerCase()}.`,
+            {
+                push: true,
+                sms: false,
+                email: true,
+                eventCode: 'SHARED_POT_INVITATION',
+                variables: {
+                    pot_name: pot.name,
+                    role: payload.role || 'CONTRIBUTOR',
+                    invite_id: data.id,
+                },
+            },
+        );
+
+        res.json({
+            success: true,
+            data: {
+                invitation: {
+                    ...data,
+                    invitee: {
+                        id: memberUser.id,
+                        full_name: memberUser.full_name,
+                        email: memberUser.email,
+                        phone: memberUser.phone,
+                    },
+                },
+            },
+        });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_POT_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-pot-invitations/:id/respond', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedPotInviteResponseSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+
+        const { data: inviteRaw, error: inviteError } = await sb
+            .from('shared_pot_invitations')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+        if (inviteError) return res.status(400).json({ success: false, error: inviteError.message });
+        if (!inviteRaw) return res.status(404).json({ success: false, error: 'SHARED_POT_INVITE_NOT_FOUND' });
+        const invite = await expireSharedPotInvitationIfNeeded(sb, inviteRaw);
+
+        if (String(invite.invitee_user_id || '') !== String(session.sub)) {
+            return res.status(403).json({ success: false, error: 'SHARED_POT_INVITE_ACCESS_DENIED' });
+        }
+        if (String(invite.status || '').toUpperCase() !== 'PENDING') {
+            return res.status(400).json({ success: false, error: 'SHARED_POT_INVITE_NOT_PENDING' });
+        }
+
+        if (payload.action === 'REJECT') {
+            const { data, error } = await sb
+                .from('shared_pot_invitations')
+                .update({
+                    status: 'REJECTED',
+                    responded_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', invite.id)
+                .select('*')
+                .single();
+            if (error) return res.status(400).json({ success: false, error: error.message });
+            return res.json({ success: true, data: { invitation: data } });
+        }
+
+        const { data: existingMember, error: existingMemberError } = await sb
+            .from('shared_pot_members')
+            .select('id')
+            .eq('pot_id', invite.pot_id)
+            .eq('user_id', session.sub)
+            .maybeSingle();
+        if (existingMemberError) return res.status(400).json({ success: false, error: existingMemberError.message });
+        if (existingMember) {
+            return res.status(400).json({ success: false, error: 'SHARED_POT_MEMBER_ALREADY_EXISTS' });
+        }
+
+        const { data: member, error: memberError } = await sb
+            .from('shared_pot_members')
+            .insert({
+                pot_id: invite.pot_id,
+                user_id: session.sub,
+                role: invite.role || 'CONTRIBUTOR',
+                contributed_amount: 0,
+                metadata: {
+                    joined_via_invitation: invite.id,
+                    invited_by: invite.inviter_user_id,
+                },
+            })
+            .select('*')
+            .single();
+        if (memberError) return res.status(400).json({ success: false, error: memberError.message });
+
+        const { data: updatedInvite, error: updateInviteError } = await sb
+            .from('shared_pot_invitations')
+            .update({
+                status: 'ACCEPTED',
+                responded_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', invite.id)
+            .select('*')
+            .single();
+        if (updateInviteError) return res.status(400).json({ success: false, error: updateInviteError.message });
+
+        res.json({ success: true, data: { invitation: updatedInvite, member } });
+    } catch (e: any) {
+        const status = e.message === 'SHARED_POT_INVITE_ACCESS_DENIED' ? 403 : 400;
+        res.status(status).json({ success: false, error: e.message });
     }
 });
 
@@ -4262,82 +5229,23 @@ v1.post('/wealth/shared-pots/:id/contribute', authenticate as any, async (req, r
         const payload = SharedPotContributionSchema.parse(req.body);
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
-        const asNumber = (value: any) => {
-            if (typeof value === 'number') return value;
-            if (typeof value === 'string') return Number(value.replace(/,/g, '')) || 0;
-            return 0;
-        };
-
-        const { data: pot, error: potError } = await sb
-            .from('shared_pots')
-            .select('*')
-            .eq('id', req.params.id)
-            .eq('owner_user_id', session.sub)
-            .single();
-        if (potError || !pot) {
-            return res.status(404).json({ success: false, error: 'SHARED_POT_NOT_FOUND' });
+        const { pot, membership } = await resolveSharedPotMembership(sb, req.params.id, session.sub);
+        if (!canContributeToSharedPot(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_POT_CONTRIBUTION_DENIED' });
         }
 
-        let sourceRecord: any = null;
-        let sourceTable: 'platform_vaults' | 'wallets' = 'platform_vaults';
-        if (payload.source_wallet_id) {
-            const { data: vaultMatch } = await sb
-                .from('platform_vaults')
-                .select('*')
-                .eq('id', payload.source_wallet_id)
-                .eq('user_id', session.sub)
-                .maybeSingle();
-            if (vaultMatch) {
-                sourceRecord = vaultMatch;
-                sourceTable = 'platform_vaults';
-            } else {
-                const { data: walletMatch } = await sb
-                    .from('wallets')
-                    .select('*')
-                    .eq('id', payload.source_wallet_id)
-                    .eq('user_id', session.sub)
-                    .maybeSingle();
-                if (walletMatch) {
-                    sourceRecord = walletMatch;
-                    sourceTable = 'wallets';
-                }
-            }
-        }
-
-        if (!sourceRecord) {
-            const { data: operatingVault } = await sb
-                .from('platform_vaults')
-                .select('*')
-                .eq('user_id', session.sub)
-                .eq('vault_role', 'OPERATING')
-                .maybeSingle();
-            if (operatingVault) {
-                sourceRecord = operatingVault;
-                sourceTable = 'platform_vaults';
-            } else {
-                const { data: fallbackWallet } = await sb
-                    .from('wallets')
-                    .select('*')
-                    .eq('user_id', session.sub)
-                    .order('created_at', { ascending: true })
-                    .limit(1)
-                    .maybeSingle();
-                sourceRecord = fallbackWallet;
-                sourceTable = 'wallets';
-            }
-        }
-
-        if (!sourceRecord) {
-            return res.status(400).json({ success: false, error: 'NO_OPERATING_WALLET' });
-        }
-
-        const currentBalance = asNumber(sourceRecord.balance);
+        const { sourceRecord, sourceTable } = await resolveWealthSourceWallet(
+            sb,
+            session.sub,
+            payload.source_wallet_id,
+        );
+        const currentBalance = wealthNumber(sourceRecord.balance);
         if (currentBalance < payload.amount) {
             return res.status(400).json({ success: false, error: 'INSUFFICIENT_FUNDS' });
         }
 
         const newSourceBalance = currentBalance - payload.amount;
-        const newPotBalance = asNumber(pot.current_amount) + payload.amount;
+        const newPotBalance = wealthNumber(pot.current_amount) + payload.amount;
         const reference = `pot_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 
         const { data: tx, error: txError } = await sb
@@ -4356,6 +5264,7 @@ v1.post('/wealth/shared-pots/:id/contribute', authenticate as any, async (req, r
                 allocation_source: 'SHARED_POT_CONTRIBUTION',
                 metadata: {
                     shared_pot_id: pot.id,
+                    member_role: membership.role,
                     source_table: sourceTable,
                     source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
                 },
@@ -4384,8 +5293,7 @@ v1.post('/wealth/shared-pots/:id/contribute', authenticate as any, async (req, r
                 current_amount: newPotBalance,
                 updated_at: new Date().toISOString(),
             })
-            .eq('id', pot.id)
-            .eq('owner_user_id', session.sub);
+            .eq('id', pot.id);
         if (potUpdateError) {
             return res.status(400).json({ success: false, error: potUpdateError.message });
         }
@@ -4430,7 +5338,726 @@ v1.post('/wealth/shared-pots/:id/contribute', authenticate as any, async (req, r
             },
         });
     } catch (e: any) {
+        res.status(
+            ['SHARED_POT_ACCESS_DENIED', 'SHARED_POT_CONTRIBUTION_DENIED'].includes(e.message) ? 403 : 400,
+        ).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-pots/:id/withdraw', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedPotWithdrawSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { pot, membership } = await resolveSharedPotMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedPot(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_POT_WITHDRAW_DENIED' });
+        }
+        const currentPotBalance = wealthNumber(pot.current_amount);
+        if (currentPotBalance < payload.amount) {
+            return res.status(400).json({ success: false, error: 'INSUFFICIENT_POT_FUNDS' });
+        }
+
+        const { sourceRecord: targetRecord, sourceTable: targetTable } = await resolveWealthSourceWallet(
+            sb,
+            session.sub,
+            payload.target_wallet_id,
+        );
+        const targetBalance = wealthNumber(targetRecord.balance);
+        const newTargetBalance = targetBalance + payload.amount;
+        const newPotBalance = currentPotBalance - payload.amount;
+        const reference = `pot_w_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+
+        const { data: tx, error: txError } = await sb
+            .from('transactions')
+            .insert({
+                reference_id: reference,
+                user_id: session.sub,
+                wallet_id: targetRecord.id,
+                amount: String(payload.amount),
+                currency: String(pot.currency || targetRecord.currency || 'TZS').toUpperCase(),
+                description: `Shared pot withdrawal: ${pot.name}`,
+                type: 'internal_transfer',
+                status: 'completed',
+                wealth_impact_type: 'GROWING',
+                protection_state: 'OPEN',
+                allocation_source: 'SHARED_POT_WITHDRAWAL',
+                metadata: {
+                    shared_pot_id: pot.id,
+                    actor_role: membership.role,
+                    target_table: targetTable,
+                    target_wallet_role: targetRecord.vault_role || targetRecord.type || null,
+                },
+            })
+            .select('*')
+            .single();
+        if (txError || !tx) {
+            return res.status(400).json({ success: false, error: txError?.message || 'TX_CREATE_FAILED' });
+        }
+
+        const { error: walletUpdateError } = await sb
+            .from(targetTable)
+            .update({
+                balance: newTargetBalance,
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', targetRecord.id)
+            .eq('user_id', session.sub);
+        if (walletUpdateError) {
+            return res.status(400).json({ success: false, error: walletUpdateError.message });
+        }
+
+        const { error: potUpdateError } = await sb
+            .from('shared_pots')
+            .update({
+                current_amount: newPotBalance,
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', pot.id);
+        if (potUpdateError) {
+            return res.status(400).json({ success: false, error: potUpdateError.message });
+        }
+
+        const existingMemberContribution = wealthNumber(
+            membership.contributed_amount || 0,
+        );
+        const { error: memberUpdateError } = await sb
+            .from('shared_pot_members')
+            .upsert({
+                pot_id: pot.id,
+                user_id: session.sub,
+                role: membership.role || 'CONTRIBUTOR',
+                contributed_amount: existingMemberContribution + payload.amount,
+                metadata: membership.metadata || {},
+            }, {
+                onConflict: 'pot_id,user_id',
+            });
+        if (memberUpdateError) {
+            return res.status(400).json({ success: false, error: memberUpdateError.message });
+        }
+
+        const ledgerRows = [
+            {
+                transaction_id: tx.id,
+                user_id: session.sub,
+                wallet_id: targetRecord.id,
+                shared_pot_id: pot.id,
+                bucket_type: 'GROWING',
+                entry_side: 'DEBIT',
+                entry_type: 'DEBIT',
+                amount: String(payload.amount),
+                balance_after: String(newPotBalance),
+                description: `Shared pot withdrawal debit: ${pot.name}`,
+            },
+            {
+                transaction_id: tx.id,
+                user_id: session.sub,
+                wallet_id: targetRecord.id,
+                shared_pot_id: pot.id,
+                bucket_type: 'OPERATING',
+                entry_side: 'CREDIT',
+                entry_type: 'CREDIT',
+                amount: String(payload.amount),
+                balance_after: String(newTargetBalance),
+                description: `Shared pot withdrawal credit: ${pot.name}`,
+            },
+        ];
+        const { error: ledgerError } = await sb.from('financial_ledger').insert(ledgerRows);
+        if (ledgerError) {
+            return res.status(400).json({ success: false, error: ledgerError.message });
+        }
+
+        res.json({
+            success: true,
+            data: {
+                transaction: tx,
+                shared_pot: { ...pot, current_amount: newPotBalance },
+                target_balance: newTargetBalance,
+            },
+        });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_POT_WITHDRAW_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-budgets', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data: memberships, error: memberError } = await sb
+            .from('shared_budget_members')
+            .select('budget_id, role')
+            .eq('user_id', session.sub);
+        if (memberError) return res.status(400).json({ success: false, error: memberError.message });
+
+        const memberBudgetIds = Array.from(new Set((memberships || []).map((item: any) => String(item.budget_id || '')).filter(Boolean)));
+        let query = sb
+            .from('shared_budgets')
+            .select('*')
+            .eq('owner_user_id', session.sub);
+        if (memberBudgetIds.length > 0) {
+            query = sb
+                .from('shared_budgets')
+                .select('*')
+                .or([
+                    `owner_user_id.eq.${session.sub}`,
+                    `id.in.(${memberBudgetIds.join(',')})`,
+                ].join(','));
+        }
+        const { data, error } = await query.order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        const membershipByBudget = new Map(
+            (memberships || []).map((item: any) => [String(item.budget_id), String(item.role || 'SPENDER').toUpperCase()]),
+        );
+        const items = (data || []).map((budget: any) => ({
+            ...budget,
+            my_role: budget.owner_user_id === session.sub
+                ? 'OWNER'
+                : (membershipByBudget.get(String(budget.id)) || 'SPENDER'),
+            is_owner: budget.owner_user_id === session.sub,
+            remaining_amount: Math.max(0, wealthNumber(budget.budget_limit) - wealthNumber(budget.spent_amount)),
+        }));
+        res.json({ success: true, data: { budgets: items } });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-budgets', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetCreateSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb
+            .from('shared_budgets')
+            .insert({
+                owner_user_id: session.sub,
+                name: payload.name,
+                purpose: payload.purpose,
+                currency: payload.currency?.toUpperCase() || 'TZS',
+                budget_limit: payload.budget_limit,
+                spent_amount: 0,
+                period_type: payload.period_type || 'MONTHLY',
+                approval_mode: payload.approval_mode || 'AUTO',
+                status: 'ACTIVE',
+                metadata: { created_from: 'mobile_app' },
+            })
+            .select('*')
+            .single();
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        await sb.from('shared_budget_members').insert({
+            budget_id: data.id,
+            user_id: session.sub,
+            role: 'OWNER',
+            spent_amount: 0,
+        });
+        res.json({ success: true, data });
+    } catch (e: any) {
         res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.patch('/wealth/shared-budgets/:id', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetUpdateSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { membership } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedBudget(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_ACCESS_DENIED' });
+        }
+        const updatePayload: any = { updated_at: new Date().toISOString() };
+        if (payload.name !== undefined) updatePayload.name = payload.name;
+        if (payload.purpose !== undefined) updatePayload.purpose = payload.purpose;
+        if (payload.currency !== undefined) updatePayload.currency = payload.currency.toUpperCase();
+        if (payload.budget_limit !== undefined) updatePayload.budget_limit = payload.budget_limit;
+        if (payload.period_type !== undefined) updatePayload.period_type = payload.period_type;
+        if (payload.approval_mode !== undefined) updatePayload.approval_mode = payload.approval_mode;
+        if (payload.status !== undefined) updatePayload.status = payload.status;
+        const { data, error } = await sb
+            .from('shared_budgets')
+            .update(updatePayload)
+            .eq('id', req.params.id)
+            .select('*')
+            .single();
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-budgets/:id/members', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        const { data, error } = await sb
+            .from('shared_budget_members')
+            .select('id,budget_id,user_id,role,status,member_limit,spent_amount,metadata,created_at, users!shared_budget_members_user_id_fkey(id, full_name, email, phone)')
+            .eq('budget_id', budget.id)
+            .order('created_at', { ascending: true });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data: { members: data || [] } });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-budgets/:id/transactions', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        const { data, error } = await sb
+            .from('shared_budget_transactions')
+            .select('*, users!shared_budget_transactions_member_user_id_fkey(id, full_name, email, phone)')
+            .eq('shared_budget_id', budget.id)
+            .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data: { transactions: data || [] } });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-budgets/:id/invitations', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget, membership } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedBudget(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_ACCESS_DENIED' });
+        }
+        const { data, error } = await sb
+            .from('shared_budget_invitations')
+            .select('id,budget_id,inviter_user_id,invitee_user_id,invitee_identifier,role,member_limit,status,message,responded_at,expires_at,metadata,created_at, users!shared_budget_invitations_invitee_user_id_fkey(id, full_name, email, phone)')
+            .eq('budget_id', budget.id)
+            .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data: { invitations: data || [] } });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/wealth/shared-budget-invitations', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb
+            .from('shared_budget_invitations')
+            .select('id,budget_id,inviter_user_id,invitee_user_id,invitee_identifier,role,member_limit,status,message,responded_at,expires_at,metadata,created_at, shared_budgets!shared_budget_invitations_budget_id_fkey(id, name, purpose, currency, budget_limit, spent_amount, period_type, approval_mode, status), users!shared_budget_invitations_inviter_user_id_fkey(id, full_name, email, phone)')
+            .eq('invitee_user_id', session.sub)
+            .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        const invitations = [];
+        for (const invite of data || []) {
+            invitations.push(await expireSharedBudgetInvitationIfNeeded(sb, invite));
+        }
+        res.json({ success: true, data: { invitations } });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-budgets/:id/invitations', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetMemberAddSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget, membership } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        if (!canManageSharedBudget(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_ACCESS_DENIED' });
+        }
+        const memberUser = await resolveUserBySharedBudgetIdentifier(sb, payload.identifier);
+        if (!memberUser?.id) {
+            return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+        }
+        if (String(memberUser.id) === String(budget.owner_user_id)) {
+            return res.status(400).json({ success: false, error: 'OWNER_ALREADY_MEMBER' });
+        }
+        const { data: existingMember, error: existingMemberError } = await sb
+            .from('shared_budget_members')
+            .select('id')
+            .eq('budget_id', budget.id)
+            .eq('user_id', memberUser.id)
+            .maybeSingle();
+        if (existingMemberError) return res.status(400).json({ success: false, error: existingMemberError.message });
+        if (existingMember) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_MEMBER_ALREADY_EXISTS' });
+        }
+        const { data: pendingInvite, error: pendingInviteError } = await sb
+            .from('shared_budget_invitations')
+            .select('*')
+            .eq('budget_id', budget.id)
+            .eq('invitee_user_id', memberUser.id)
+            .eq('status', 'PENDING')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+        if (pendingInviteError && pendingInviteError.code !== 'PGRST116') {
+            return res.status(400).json({ success: false, error: pendingInviteError.message });
+        }
+        if (pendingInvite) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_INVITE_ALREADY_PENDING' });
+        }
+
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { data, error } = await sb
+            .from('shared_budget_invitations')
+            .insert({
+                budget_id: budget.id,
+                inviter_user_id: session.sub,
+                invitee_user_id: memberUser.id,
+                invitee_identifier: payload.identifier,
+                role: payload.role || 'SPENDER',
+                member_limit: payload.member_limit || null,
+                message: payload.message || null,
+                expires_at: expiresAt,
+                metadata: {
+                    invited_by: session.sub,
+                    invite_source: 'shared_budget_member_sheet',
+                    identifier: payload.identifier,
+                },
+            })
+            .select('id,budget_id,inviter_user_id,invitee_user_id,invitee_identifier,role,member_limit,status,message,responded_at,expires_at,metadata,created_at')
+            .single();
+        if (error) return res.status(400).json({ success: false, error: error.message });
+
+        await Messaging.dispatch(
+            String(memberUser.id),
+            'info',
+            'Shared budget invitation',
+            `${session.user?.user_metadata?.full_name || 'A member'} invited you to join "${budget.name}" as ${String(payload.role || 'SPENDER').toLowerCase()}.`,
+            {
+                push: true,
+                sms: false,
+                email: true,
+                eventCode: 'SHARED_BUDGET_INVITATION',
+                variables: {
+                    budget_name: budget.name,
+                    role: payload.role || 'SPENDER',
+                    invite_id: data.id,
+                },
+            },
+        );
+
+        res.json({ success: true, data: { invitation: data } });
+    } catch (e: any) {
+        res.status(e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-budget-invitations/:id/respond', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetInviteResponseSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+
+        const { data: inviteRaw, error: inviteError } = await sb
+            .from('shared_budget_invitations')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+        if (inviteError) return res.status(400).json({ success: false, error: inviteError.message });
+        if (!inviteRaw) return res.status(404).json({ success: false, error: 'SHARED_BUDGET_INVITE_NOT_FOUND' });
+        const invite = await expireSharedBudgetInvitationIfNeeded(sb, inviteRaw);
+
+        if (String(invite.invitee_user_id || '') !== String(session.sub)) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_INVITE_ACCESS_DENIED' });
+        }
+        if (String(invite.status || '').toUpperCase() !== 'PENDING') {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_INVITE_NOT_PENDING' });
+        }
+
+        if (payload.action === 'REJECT') {
+            const { data, error } = await sb
+                .from('shared_budget_invitations')
+                .update({
+                    status: 'REJECTED',
+                    responded_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', invite.id)
+                .select('*')
+                .single();
+            if (error) return res.status(400).json({ success: false, error: error.message });
+            return res.json({ success: true, data: { invitation: data } });
+        }
+
+        const { data: existingMember, error: existingMemberError } = await sb
+            .from('shared_budget_members')
+            .select('id')
+            .eq('budget_id', invite.budget_id)
+            .eq('user_id', session.sub)
+            .maybeSingle();
+        if (existingMemberError) return res.status(400).json({ success: false, error: existingMemberError.message });
+        if (existingMember) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_MEMBER_ALREADY_EXISTS' });
+        }
+
+        const { data: member, error: memberError } = await sb
+            .from('shared_budget_members')
+            .insert({
+                budget_id: invite.budget_id,
+                user_id: session.sub,
+                role: invite.role || 'SPENDER',
+                status: 'ACTIVE',
+                member_limit: invite.member_limit || null,
+                spent_amount: 0,
+                metadata: {
+                    joined_via_invitation: invite.id,
+                    invited_by: invite.inviter_user_id,
+                },
+            })
+            .select('*')
+            .single();
+        if (memberError) return res.status(400).json({ success: false, error: memberError.message });
+
+        const { data: updatedInvite, error: updateInviteError } = await sb
+            .from('shared_budget_invitations')
+            .update({
+                status: 'ACCEPTED',
+                responded_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', invite.id)
+            .select('*')
+            .single();
+        if (updateInviteError) return res.status(400).json({ success: false, error: updateInviteError.message });
+
+        res.json({ success: true, data: { invitation: updatedInvite, member } });
+    } catch (e: any) {
+        const status = e.message === 'SHARED_BUDGET_INVITE_ACCESS_DENIED' ? 403 : 400;
+        res.status(status).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-budgets/:id/spend/preview', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetSpendSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget, membership } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        if (!canSpendFromSharedBudget(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_SPEND_DENIED' });
+        }
+        const currentSpent = wealthNumber(budget.spent_amount);
+        const budgetLimit = wealthNumber(budget.budget_limit);
+        if (currentSpent + payload.amount > budgetLimit) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_LIMIT_EXCEEDED' });
+        }
+        const memberSpent = wealthNumber(membership.spent_amount || 0);
+        const memberLimit = payload.amount + memberSpent;
+        if (membership.member_limit && memberLimit > wealthNumber(membership.member_limit)) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_MEMBER_LIMIT_EXCEEDED' });
+        }
+
+        const result = await LogicCore.getTransactionPreview(session.sub, {
+            sourceWalletId: payload.source_wallet_id,
+            recipientId: payload.provider,
+            amount: payload.amount,
+            currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
+            description: payload.description || `${budget.name} spend`,
+            type: payload.type || 'EXTERNAL_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                shared_budget_id: budget.id,
+                shared_budget_name: budget.name,
+                shared_budget_role: membership.role || 'SPENDER',
+                bill_provider: payload.provider || null,
+                bill_category: payload.bill_category || null,
+                bill_reference: payload.reference || null,
+                shared_budget_preview: true,
+            },
+            dryRun: true,
+        });
+        if (!result.success) return res.status(400).json(result);
+        res.json({
+            success: true,
+            data: {
+                preview: result,
+                budget: {
+                    ...budget,
+                    remaining_amount: Math.max(0, budgetLimit - currentSpent - payload.amount),
+                },
+                member: {
+                    ...membership,
+                    remaining_member_limit: membership.member_limit
+                        ? Math.max(0, wealthNumber(membership.member_limit) - memberSpent - payload.amount)
+                        : null,
+                },
+            },
+        });
+    } catch (e: any) {
+        const status = e.message === 'SHARED_BUDGET_SPEND_DENIED' ? 403 : 400;
+        res.status(status).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-budgets/:id/spend/settle', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetSpendSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget, membership } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        if (!canSpendFromSharedBudget(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_SPEND_DENIED' });
+        }
+        const currentSpent = wealthNumber(budget.spent_amount);
+        const budgetLimit = wealthNumber(budget.budget_limit);
+        if (currentSpent + payload.amount > budgetLimit) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_LIMIT_EXCEEDED' });
+        }
+        const memberSpent = wealthNumber(membership.spent_amount || 0);
+        if (membership.member_limit && memberSpent + payload.amount > wealthNumber(membership.member_limit)) {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_MEMBER_LIMIT_EXCEEDED' });
+        }
+        if (String(budget.approval_mode || 'AUTO').toUpperCase() === 'REVIEW') {
+            const { data, error } = await sb
+                .from('shared_budget_approvals')
+                .insert({
+                    shared_budget_id: budget.id,
+                    requester_user_id: session.sub,
+                    amount: payload.amount,
+                    currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
+                    provider: payload.provider || null,
+                    bill_category: payload.bill_category || null,
+                    reference: payload.reference || null,
+                    note: payload.description || null,
+                    status: 'PENDING',
+                    metadata: payload.metadata || {},
+                })
+                .select('*')
+                .single();
+            if (error) return res.status(400).json({ success: false, error: error.message });
+            return res.json({ success: true, data: { approval: data, requires_approval: true } });
+        }
+
+        const result = await LogicCore.processSecurePayment({
+            sourceWalletId: payload.source_wallet_id,
+            recipientId: payload.provider,
+            amount: payload.amount,
+            currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
+            description: payload.description || `${budget.name} spend`,
+            type: payload.type || 'EXTERNAL_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                shared_budget_id: budget.id,
+                shared_budget_name: budget.name,
+                shared_budget_role: membership.role || 'SPENDER',
+                bill_provider: payload.provider || null,
+                bill_category: payload.bill_category || null,
+                bill_reference: payload.reference || null,
+                spend_origin: 'SHARED_BUDGET',
+            },
+        }, session.user);
+        if (!result.success) return res.status(400).json(result);
+
+        const tx = result.transaction || {};
+        const transactionId = tx.internalId || tx.id || null;
+        const newBudgetSpent = currentSpent + payload.amount;
+        const newMemberSpent = memberSpent + payload.amount;
+        const nowIso = new Date().toISOString();
+
+        if (transactionId) {
+            const { error: txLinkError } = await sb
+                .from('transactions')
+                .update({
+                    shared_budget_id: budget.id,
+                    updated_at: nowIso,
+                })
+                .eq('id', transactionId);
+            if (txLinkError) return res.status(400).json({ success: false, error: txLinkError.message });
+
+            const { error: ledgerLinkError } = await sb
+                .from('financial_ledger')
+                .update({ shared_budget_id: budget.id })
+                .eq('transaction_id', transactionId);
+            if (ledgerLinkError) return res.status(400).json({ success: false, error: ledgerLinkError.message });
+        }
+
+        const { error: budgetUpdateError } = await sb
+            .from('shared_budgets')
+            .update({
+                spent_amount: newBudgetSpent,
+                updated_at: nowIso,
+            })
+            .eq('id', budget.id);
+        if (budgetUpdateError) return res.status(400).json({ success: false, error: budgetUpdateError.message });
+
+        const { error: memberUpdateError } = await sb
+            .from('shared_budget_members')
+            .upsert({
+                budget_id: budget.id,
+                user_id: session.sub,
+                role: membership.role || 'SPENDER',
+                status: membership.status || 'ACTIVE',
+                member_limit: membership.member_limit || null,
+                spent_amount: newMemberSpent,
+                metadata: membership.metadata || {},
+            }, {
+                onConflict: 'budget_id,user_id',
+            });
+        if (memberUpdateError) return res.status(400).json({ success: false, error: memberUpdateError.message });
+
+        const { data: budgetTx, error: budgetTxError } = await sb
+            .from('shared_budget_transactions')
+            .insert({
+                shared_budget_id: budget.id,
+                member_user_id: session.sub,
+                source_wallet_id: payload.source_wallet_id || tx.fromWalletId || null,
+                transaction_id: tx.internalId || tx.id || null,
+                merchant_name: payload.provider || tx.toUserId || null,
+                provider: payload.provider || null,
+                category: payload.bill_category || payload.type || 'SPEND',
+                amount: payload.amount,
+                currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
+                status: 'COMPLETED',
+                note: payload.description || null,
+                metadata: {
+                    ...(payload.metadata || {}),
+                    shared_budget_name: budget.name,
+                    shared_budget_role: membership.role || 'SPENDER',
+                    reference: payload.reference || null,
+                },
+            })
+            .select('*')
+            .single();
+        if (budgetTxError) return res.status(400).json({ success: false, error: budgetTxError.message });
+
+        res.json({
+            success: true,
+            data: {
+                transaction: result.transaction,
+                budget_transaction: budgetTx,
+                shared_budget: {
+                    ...budget,
+                    spent_amount: newBudgetSpent,
+                    remaining_amount: Math.max(0, budgetLimit - newBudgetSpent),
+                },
+                member: {
+                    ...membership,
+                    spent_amount: newMemberSpent,
+                },
+            },
+        });
+    } catch (e: any) {
+        const status = e.message === 'SHARED_BUDGET_SPEND_DENIED' ? 403 : 400;
+        res.status(status).json({ success: false, error: e.message });
     }
 });
 
@@ -4599,6 +6226,22 @@ v1.post('/goals/:id/withdraw', authenticate as any, async (req, res) => {
         res.json({ success: true, data: result });
     } catch (e: any) {
         res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/goals/auto-allocate/replay', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    const authToken = (req as any).authToken as string | null;
+    const sourceTransactionId = String(req.body?.sourceTransactionId || '').trim();
+    if (!sourceTransactionId) {
+        return res.status(400).json({ success: false, error: 'SOURCE_TRANSACTION_REQUIRED' });
+    }
+
+    try {
+        const result = await LogicCore.replayGoalAutoAllocations(session.sub, sourceTransactionId, authToken || undefined);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
     }
 });
 

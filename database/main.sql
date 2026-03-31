@@ -380,6 +380,30 @@ BEGIN
     END IF;
 END $$;
 
+CREATE TABLE IF NOT EXISTS public.goal_auto_allocation_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    goal_id UUID REFERENCES public.goals(id) ON DELETE CASCADE,
+    source_transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    source_reference_id TEXT,
+    source_wallet_id UUID,
+    source_amount NUMERIC DEFAULT 0,
+    allocated_amount NUMERIC DEFAULT 0,
+    trigger_type TEXT NOT NULL CHECK (trigger_type IN ('DEPOSIT', 'SALARY', 'REMITTANCE', 'CARD_DEPOSIT', 'EXTERNAL_DEPOSIT', 'AGENT_CASH_DEPOSIT', 'MANUAL_REPLAY')),
+    status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (status IN ('PROCESSING', 'COMPLETED', 'SKIPPED', 'FAILED')),
+    reason TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_auto_allocation_goal_tx
+    ON public.goal_auto_allocation_events(goal_id, source_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_goal_auto_allocation_user_created
+    ON public.goal_auto_allocation_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_goal_auto_allocation_goal_created
+    ON public.goal_auto_allocation_events(goal_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS public.categories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
     user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
@@ -447,9 +471,110 @@ CREATE TABLE IF NOT EXISTS public.shared_pot_members (
     user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
     role TEXT DEFAULT 'CONTRIBUTOR' CHECK (role IN ('OWNER', 'MANAGER', 'CONTRIBUTOR', 'VIEWER')),
     contribution_target NUMERIC,
+    contributed_amount NUMERIC DEFAULT 0,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE (pot_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.shared_pot_invitations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pot_id UUID REFERENCES public.shared_pots(id) ON DELETE CASCADE,
+    inviter_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    invitee_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    invitee_identifier TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'CONTRIBUTOR' CHECK (role IN ('MANAGER', 'CONTRIBUTOR', 'VIEWER')),
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'CANCELLED', 'EXPIRED')),
+    message TEXT,
+    responded_at TIMESTAMP WITH TIME ZONE,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+
+CREATE TABLE IF NOT EXISTS public.shared_budgets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    purpose TEXT,
+    currency TEXT DEFAULT 'TZS',
+    budget_limit NUMERIC NOT NULL,
+    spent_amount NUMERIC DEFAULT 0,
+    period_type TEXT DEFAULT 'MONTHLY' CHECK (period_type IN ('WEEKLY', 'MONTHLY', 'CUSTOM')),
+    approval_mode TEXT DEFAULT 'AUTO' CHECK (approval_mode IN ('AUTO', 'REVIEW')),
+    status TEXT DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'PAUSED', 'ARCHIVED')),
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.shared_budget_members (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    budget_id UUID REFERENCES public.shared_budgets(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    role TEXT DEFAULT 'SPENDER' CHECK (role IN ('OWNER', 'MANAGER', 'SPENDER', 'VIEWER')),
+    status TEXT DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'PAUSED', 'REMOVED')),
+    member_limit NUMERIC,
+    spent_amount NUMERIC DEFAULT 0,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (budget_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.shared_budget_invitations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    budget_id UUID REFERENCES public.shared_budgets(id) ON DELETE CASCADE,
+    inviter_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    invitee_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    invitee_identifier TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'SPENDER' CHECK (role IN ('MANAGER', 'SPENDER', 'VIEWER')),
+    member_limit NUMERIC,
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'CANCELLED', 'EXPIRED')),
+    message TEXT,
+    responded_at TIMESTAMP WITH TIME ZONE,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.shared_budget_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    shared_budget_id UUID REFERENCES public.shared_budgets(id) ON DELETE CASCADE,
+    member_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    source_wallet_id UUID,
+    transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    merchant_name TEXT,
+    provider TEXT,
+    category TEXT,
+    amount NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'COMPLETED' CHECK (status IN ('PENDING', 'COMPLETED', 'FAILED', 'REVERSED')),
+    note TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.shared_budget_approvals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    shared_budget_id UUID REFERENCES public.shared_budgets(id) ON DELETE CASCADE,
+    requester_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    reviewer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    amount NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'TZS',
+    provider TEXT,
+    bill_category TEXT,
+    reference TEXT,
+    note TEXT,
+    status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')),
+    metadata JSONB DEFAULT '{}'::jsonb,
+    responded_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS public.bill_reserves (
@@ -533,6 +658,30 @@ BEGIN
     ) THEN
         ALTER TABLE public.bill_reserves ADD COLUMN status TEXT DEFAULT 'ACTIVE';
     END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='shared_pot_members' AND column_name='contributed_amount'
+    ) THEN
+        ALTER TABLE public.shared_pot_members ADD COLUMN contributed_amount NUMERIC DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='shared_pot_invitations' AND column_name='message'
+    ) THEN
+        ALTER TABLE public.shared_pot_invitations ADD COLUMN message TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='financial_ledger' AND column_name='shared_budget_id'
+    ) THEN
+        ALTER TABLE public.financial_ledger ADD COLUMN shared_budget_id UUID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='transactions' AND column_name='shared_budget_id'
+    ) THEN
+        ALTER TABLE public.transactions ADD COLUMN shared_budget_id UUID;
+    END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_wealth_buckets_user_type
@@ -543,6 +692,26 @@ CREATE INDEX IF NOT EXISTS idx_bill_reserves_user_active
     ON public.bill_reserves (user_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_shared_pots_owner
     ON public.shared_pots (owner_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_shared_pot_invites_pot
+    ON public.shared_pot_invitations (pot_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_pot_invites_invitee
+    ON public.shared_pot_invitations (invitee_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budgets_owner
+    ON public.shared_budgets (owner_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_members_budget
+    ON public.shared_budget_members (budget_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_members_user
+    ON public.shared_budget_members (user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_invites_budget
+    ON public.shared_budget_invitations (budget_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_invites_invitee
+    ON public.shared_budget_invitations (invitee_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_transactions_budget
+    ON public.shared_budget_transactions (shared_budget_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_transactions_member
+    ON public.shared_budget_transactions (member_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shared_budget_approvals_budget
+    ON public.shared_budget_approvals (shared_budget_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_wealth_snapshots_user_date
     ON public.wealth_snapshots (user_id, snapshot_date DESC);
 CREATE INDEX IF NOT EXISTS idx_wealth_insights_user_status

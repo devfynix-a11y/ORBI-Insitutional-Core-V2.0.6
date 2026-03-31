@@ -12,6 +12,7 @@ import {
 } from '../../types.js';
 import { providerRoutingService } from './ProviderRoutingService.js';
 import { platformFeeService } from './PlatformFeeService.js';
+import { GoalService } from '../../strategy/goalService.js';
 
 type InstitutionalAccountLookup = {
     id?: string;
@@ -30,6 +31,12 @@ type ExternalFundMovementPayload = {
     operation?: MoneyOperation;
     preferredProviderCode?: string;
     description?: string;
+    transactionType?: string;
+    transaction_type?: string;
+    providerInput?: string;
+    provider_input?: string;
+    counterpartyType?: string;
+    counterparty_type?: string;
     sourceWalletId?: string;
     targetWalletId?: string;
     sourceInstitutionalAccountId?: string;
@@ -55,6 +62,9 @@ type NormalizedMovement = {
     countryCode?: string;
     operation?: MoneyOperation;
     preferredProviderCode?: string;
+    transactionType?: string;
+    providerInput?: string;
+    counterpartyType?: string;
     description: string;
     sourceWalletId?: string;
     targetWalletId?: string;
@@ -70,6 +80,7 @@ type MovementContext = Awaited<ReturnType<InstitutionalFundsService['buildMoveme
 
 export class InstitutionalFundsService {
     private readonly ledger = new TransactionService();
+    private readonly goals = new GoalService();
 
     async listInstitutionalAccounts(filters?: {
         role?: string;
@@ -737,12 +748,36 @@ export class InstitutionalFundsService {
             currency: preview.currency,
         });
 
-        return {
+        const settled = {
             movement,
             transactionId: txId,
             referenceId,
             ledgerPosted: true,
         };
+
+        const triggerType = preview.direction === 'EXTERNAL_TO_INTERNAL' ? 'EXTERNAL_DEPOSIT' : null;
+        if (triggerType && preview.targetWalletId) {
+            try {
+                await this.goals.runAutoAllocationsForCredit({
+                    userId,
+                    sourceTransactionId: txId,
+                    sourceReferenceId: referenceId,
+                    sourceWalletId: preview.targetWalletId,
+                    sourceAmount: preview.netAmount,
+                    currency: preview.currency,
+                    triggerType,
+                    metadata: {
+                        source: 'institutional_funds',
+                        movement_id: movementId,
+                        provider_id: preview.providerId || null,
+                    },
+                });
+            } catch (autoAllocationError: any) {
+                console.error('[GoalAutoAllocation] Institutional settlement trigger failed:', autoAllocationError?.message || autoAllocationError);
+            }
+        }
+
+        return settled;
     }
 
     private async buildMovementContext(userId: string, payload: ExternalFundMovementPayload) {
@@ -847,6 +882,10 @@ export class InstitutionalFundsService {
         const feeOverrideProvided = payload.feeAmount !== undefined && payload.feeAmount !== null;
         const taxOverrideProvided = payload.taxAmount !== undefined && payload.taxAmount !== null;
 
+        const normalizedTransactionType = String(payload.transactionType ?? payload.transaction_type ?? '').trim().toUpperCase() || undefined;
+        const normalizedProviderInput = String(payload.providerInput ?? payload.provider_input ?? '').trim() || undefined;
+        const normalizedCounterpartyType = String(payload.counterpartyType ?? payload.counterparty_type ?? '').trim().toUpperCase() || undefined;
+
         const resolvedFee = await platformFeeService.resolveFee({
             flowCode: direction,
             amount,
@@ -856,6 +895,7 @@ export class InstitutionalFundsService {
             rail: payload.rail,
             direction,
             operationType: payload.operation,
+            transactionType: normalizedTransactionType,
             metadata,
         });
 
@@ -890,6 +930,9 @@ export class InstitutionalFundsService {
             countryCode: payload.countryCode,
             operation: payload.operation,
             preferredProviderCode: payload.preferredProviderCode,
+            transactionType: normalizedTransactionType,
+            providerInput: normalizedProviderInput,
+            counterpartyType: normalizedCounterpartyType,
             description,
             sourceWalletId: payload.sourceWalletId,
             targetWalletId: payload.targetWalletId,
@@ -902,6 +945,9 @@ export class InstitutionalFundsService {
                 ...metadata,
                 fee_config_id: resolvedFee.configId || null,
                 fee_flow_code: resolvedFee.flowCode,
+                transaction_type: normalizedTransactionType || metadata.transaction_type || null,
+                provider_input: normalizedProviderInput || metadata.provider_input || null,
+                counterparty_type: normalizedCounterpartyType || metadata.counterparty_type || null,
             },
         };
     }

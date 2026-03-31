@@ -42,10 +42,24 @@ export const PaymentIntentSchema = z.object({
     amount: z.number().positive(),
     currency: z.string().length(3),
     description: z.string().max(255),
-    type: z.enum(['INTERNAL_TRANSFER', 'EXTERNAL_PAYMENT', 'BILL_PAYMENT', 'PEER_TRANSFER', 'DEPOSIT', 'WITHDRAWAL']),
+    type: z.enum([
+        'INTERNAL_TRANSFER',
+        'EXTERNAL_PAYMENT',
+        'BILL_PAYMENT',
+        'PEER_TRANSFER',
+        'DEPOSIT',
+        'WITHDRAWAL',
+        'MERCHANT_PAYMENT',
+    ]),
     metadata: z.record(z.string(), z.any()).optional(),
     categoryId: z.union([z.string(), z.number()]).optional(),
-    dryRun: z.boolean().optional()
+    dryRun: z.boolean().optional(),
+    merchantPayNumber: z.string().optional(),
+    merchantId: z.string().optional(),
+    merchantName: z.string().optional(),
+    channel: z.string().optional(),
+    reference: z.string().optional(),
+    preview: z.record(z.string(), z.any()).optional(),
 });
 
 export const WalletCreateSchema = z.object({
