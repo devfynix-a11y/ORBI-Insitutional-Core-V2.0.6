@@ -1,8 +1,8 @@
 # ORBI Sovereign Backend: Master Integration Manual (v31.0 Titanium)
 
 **Classification**: INSTITUTIONAL / INTERNAL USE ONLY  
-**Version**: 31.0.0 (Titanium Hardened)  
-**Last Updated**: 2026-03-24
+**Version**: 31.1.0 (Titanium Hardened)  
+**Last Updated**: 2026-03-31
 
 ---
 
@@ -145,6 +145,38 @@ The IAM system enforces **Zero-Trust Identity Quarantine (DIQ)**. New nodes star
 | `POST` | `/v1/auth/passkey/register/finish` | Protected | Complete Passkey registration. |
 | `POST` | `/v1/auth/passkey/login/start` | Public | Start Passkey login (lookup by `userId` or `identifier`). |
 | `POST` | `/v1/auth/passkey/login/finish` | Public | Complete Passkey login & get session. |
+
+### 3.2.1 Device-Bound PIN Authentication
+
+PIN authentication is now a first-class mobile lock and login rail, but it is intentionally subordinate to biometric trust.
+
+Core rules:
+- biometric / passkey trust is the parent identity proof
+- PIN is a child credential bound to the same trusted device fingerprint
+- PIN cannot be enrolled or rotated without a recent biometric parent verification
+- PIN login issues a normal ORBI session on success
+- after repeated failures the backend can require biometric re-verification again
+
+| Method | Endpoint | Access | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/v1/auth/pin/enroll` | Protected | Enroll the first device-bound PIN after recent biometric verification on the same trusted device. |
+| `POST` | `/v1/auth/pin/update` | Protected | Rotate or replace the current device-bound PIN after fresh biometric verification. |
+| `POST` | `/v1/auth/pin-login` | Public | Authenticate using identifier + PIN on the same trusted biometric-bound device and issue a real session. |
+
+Expected validation outcomes include:
+- `PIN_NOT_ENROLLED`
+- `PIN_INVALID`
+- `PIN_LOCKED_USE_BIOMETRIC`
+- `DEVICE_NOT_TRUSTED`
+- `DEVICE_BINDING_REQUIRED`
+- `IDENTITY_MISMATCH`
+- `BIOMETRIC_PARENT_REQUIRED`
+
+Implementation notes:
+- device identity is resolved from the same fingerprint pipeline used by passkey registration/login
+- the credential is persisted in `user_pin_credentials`
+- recent biometric parent verification is tracked and checked before PIN enrollment/update
+- mobile clients should send the same normalized device payload for biometric and PIN operations
 
 **Device Change Flow (Challenge)**:
 1. Call `/register/start`.
@@ -537,6 +569,27 @@ The **Atomic Ledger** is the heart of ORBI. It ensures double-entry consistency 
 | `POST` | `/v1/agent/cash/deposit/settle` | Agent/Admin | Execute an agent cash-in operation. |
 | `POST` | `/v1/agent/cash/withdraw/preview` | Agent/Admin | Preview an agent cash-out operation. |
 | `POST` | `/v1/agent/cash/withdraw/settle` | Agent/Admin | Execute an agent cash-out operation. |
+| `POST` | `/v1/payments/orbi-pay/preview` | Protected | Preview a consumer-safe ORBI Pay merchant payment using merchant pay number, merchant scan data, or merchant metadata. |
+| `POST` | `/v1/payments/orbi-pay/settle` | Protected | Execute a consumer-safe ORBI Pay merchant payment. |
+| `GET` | `/v1/payments/bills/providers` | Protected | Fetch the current backend-served bill category/provider catalog used by the consumer Pay UI. |
+| `POST` | `/v1/payments/bills/preview` | Protected | Preview a bill payment with provider/category/reference metadata. |
+| `POST` | `/v1/payments/bills/settle` | Protected | Execute a bill payment with provider/category/reference metadata. |
+| `GET` | `/v1/wealth/shared-pots/:id/invitations` | Protected | List invitations for a shared pot. |
+| `GET` | `/v1/wealth/shared-pot-invitations` | Protected | List pending/active shared pot invitations addressed to the authenticated user. |
+| `POST` | `/v1/wealth/shared-pots/:id/invitations` | Protected | Create a shared pot invitation by phone/email for an existing ORBI user. |
+| `POST` | `/v1/wealth/shared-pot-invitations/:id/respond` | Protected | Accept or reject a shared pot invitation. |
+| `GET` | `/v1/wealth/shared-budgets` | Protected | List budgets the authenticated user owns or belongs to. |
+| `POST` | `/v1/wealth/shared-budgets` | Protected | Create a shared budget. |
+| `PATCH` | `/v1/wealth/shared-budgets/:id` | Protected | Update shared budget metadata, limits, and approval mode. |
+| `GET` | `/v1/wealth/shared-budgets/:id/members` | Protected | List shared budget members and their tracked spend totals. |
+| `GET` | `/v1/wealth/shared-budgets/:id/transactions` | Protected | List shared budget spending activity. |
+| `GET` | `/v1/wealth/shared-budgets/:id/invitations` | Protected | List invitations for a shared budget. |
+| `GET` | `/v1/wealth/shared-budget-invitations` | Protected | List pending/active shared budget invitations for the authenticated user. |
+| `POST` | `/v1/wealth/shared-budgets/:id/invitations` | Protected | Create a shared budget invitation by phone/email. |
+| `POST` | `/v1/wealth/shared-budget-invitations/:id/respond` | Protected | Accept or reject a shared budget invitation. |
+| `POST` | `/v1/wealth/shared-budgets/:id/spend/preview` | Protected | Preview a shared budget spend operation before submission or approval. |
+| `POST` | `/v1/wealth/shared-budgets/:id/spend/settle` | Protected | Execute a shared budget spend or create a review/approval record when required. |
+| `POST` | `/v1/goals/auto-allocate/replay` | Protected | Replay automatic goal-allocation logic for a specific settled inbound credit event. |
 | `GET` | `/v1/admin/service-links` | Admin | Inspect merchant/agent-sponsored customer links. |
 | `GET` | `/v1/admin/service-commissions` | Admin | Inspect merchant/agent commission records. |
 | `GET` | `/v1/notifications` | Protected | Fetch paginated user notifications. |
@@ -784,6 +837,133 @@ Agent cash transaction:
   - Treated as service-operator cash activity rather than normal retail wallet usage
   - Supports agent-level visibility for deposit, withdrawal, float, and field activity
   - Enables commission payout and sponsored-customer tracking
+
+#### Consumer ORBI Pay
+- Intended role: authenticated retail consumer or public user with a normal wallet session
+- Primary routes:
+  - `POST /v1/payments/orbi-pay/preview`
+  - `POST /v1/payments/orbi-pay/settle`
+- Purpose:
+  - lets the consumer app pay merchants directly by pay number or merchant scan result
+  - uses the same ledger and fee engine without requiring merchant-actor credentials in the client
+- Accepted metadata:
+  - `merchantPayNumber`
+  - `merchantId`
+  - `merchantName`
+  - `channel`
+  - `reference`
+  - `preview`
+- Business interpretation:
+  - merchant payment remains a normal canonical transaction in `transactions` / `financial_ledger`
+  - merchant context is preserved in the payment metadata so downstream reporting and routing remain correct
+
+#### Consumer Bill Payments
+- Intended role: authenticated retail consumer or public user with a normal wallet session
+- Primary routes:
+  - `GET /v1/payments/bills/providers`
+  - `POST /v1/payments/bills/preview`
+  - `POST /v1/payments/bills/settle`
+- Purpose:
+  - powers the consumer bill hub with category-aware provider discovery plus dedicated preview/settle flows
+- Accepted metadata:
+  - `provider`
+  - `billCategory`
+  - `reference`
+  - `merchantName`
+  - `amount`
+  - `currency`
+- Current backend behavior:
+  - provider catalog is served by backend and can be expanded independently of mobile releases
+  - provider-specific validation can be layered on top of the same preview/settle contract
+
+### 4.7 External Fund Movement Typing
+
+External movements now preserve stronger semantic context all the way into fee resolution, transaction metadata, and reporting.
+
+Accepted request fields:
+- `transactionType` or `transaction_type`
+- `providerInput` or `provider_input`
+- `counterpartyType` or `counterparty_type`
+
+Current uses:
+- distinguish bank vs mobile-money vs external-agent rails
+- preserve provider identity selected by the client
+- pass normalized transaction type into `PlatformFeeService`
+- make movement metadata easier to report and reconcile later
+
+Example:
+```json
+{
+  "direction": "INTERNAL_TO_EXTERNAL",
+  "transactionType": "WITHDRAWAL",
+  "providerInput": "NMB Bank",
+  "counterpartyType": "BANK",
+  "amount": 50000,
+  "currency": "TZS"
+}
+```
+
+### 4.8 Shared Pot Invitation Flow
+
+Shared pots no longer rely only on direct member insertion. The current production model supports invitation lifecycle management.
+
+States:
+- `PENDING`
+- `ACCEPTED`
+- `REJECTED`
+- `CANCELLED`
+- `EXPIRED`
+
+Rules:
+- only owner/manager can invite
+- invitations target an existing ORBI user by phone or email
+- member is created only after acceptance
+- invitation expiry is enforced by backend
+- member contribution totals are tracked separately from invitation state
+
+### 4.9 Shared Budgets
+
+Shared budgets are a separate product from shared pots:
+- shared pot = contribute/save together
+- shared budget = spend together with visibility and control
+
+Authoritative backend tables:
+- `shared_budgets`
+- `shared_budget_members`
+- `shared_budget_invitations`
+- `shared_budget_transactions`
+- `shared_budget_approvals`
+
+Roles:
+- `OWNER`
+- `MANAGER`
+- `SPENDER`
+- `VIEWER`
+
+Key behaviors:
+- each member has a tracked `spent_amount`
+- the budget itself tracks total `spent_amount`
+- every executed spend is persisted in `shared_budget_transactions`
+- canonical `transactions` and `financial_ledger` entries are tagged with `shared_budget_id`
+- approval mode can convert a settle attempt into a review record instead of immediate settlement
+
+### 4.10 Goal Auto-Allocation Infrastructure
+
+Goal auto-allocation is now a backend-driven infrastructure feature rather than only stored frontend preference.
+
+Supported behavior:
+- trigger on inbound credit events such as deposits, salary-like credits, card deposits, and external settlements
+- idempotent event tracking via `goal_auto_allocation_events`
+- strategy-aware execution:
+  - percentage allocation via `linked_income_percentage`
+  - fixed monthly progress via `monthly_target`
+- replay support through:
+  - `POST /v1/goals/auto-allocate/replay`
+
+Operational guarantees:
+- duplicate source events are ignored safely
+- failure in auto-allocation does not corrupt or cancel the source deposit
+- event state is auditable for replays and support review
 
 #### Sponsored Customer and Commission Model
 - `service_actor_customer_links` records which merchant or agent onboarded a consumer.

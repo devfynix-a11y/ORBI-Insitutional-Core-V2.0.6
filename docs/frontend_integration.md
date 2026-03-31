@@ -82,6 +82,55 @@ export const useNexusStream = (token: string | undefined) => {
 ### Delete Notification
 `DELETE /api/v1/notifications/:id`
 
+## Device-Bound PIN Authentication
+
+The mobile lock/login experience now supports a biometric-backed PIN flow.
+
+### Core Rules
+- biometric / passkey verification is the parent trust
+- PIN is device-bound and tied to the same fingerprint used for biometric trust
+- PIN enrollment and PIN update require a recent biometric parent verification
+- successful PIN login returns a normal session payload
+
+### Endpoints
+- `POST /v1/auth/pin/enroll`
+- `POST /v1/auth/pin/update`
+- `POST /v1/auth/pin-login`
+
+### Recommended Mobile Error Handling
+- `PIN_NOT_ENROLLED`: prompt user to finish PIN setup after biometric
+- `PIN_LOCKED_USE_BIOMETRIC`: send user to biometric re-verification
+- `DEVICE_NOT_TRUSTED` / `DEVICE_BINDING_REQUIRED`: re-establish trust on the same device through biometric
+- `IDENTITY_MISMATCH`: require the same phone/email linked to the biometric-backed identity
+
+### Enrollment Example
+```json
+{
+  "pin": "1234",
+  "device": {
+    "platform": "android",
+    "model": "Pixel 8",
+    "deviceName": "Daniel Phone"
+  },
+  "metadata": {
+    "app_origin": "ORBI_MOBILE_V2026"
+  }
+}
+```
+
+### Login Example
+```json
+{
+  "identifier": "+255712345678",
+  "pin": "1234",
+  "device": {
+    "platform": "android",
+    "model": "Pixel 8",
+    "deviceName": "Daniel Phone"
+  }
+}
+```
+
 ## Transaction Status Visibility
 Clients should monitor the `status` field of transactions to provide real-time feedback to users.
 
@@ -218,6 +267,107 @@ export const sendTransaction = async (data: PaymentRequest, token: string) => {
 
 ### Insufficient Funds (400 Bad Request)
 When calling `POST /v1/transactions/settle`, the server may return a `400` error with the code `INSUFFICIENT_FUNDS`.
+
+## Consumer Payment Extensions
+
+The consumer app now uses dedicated payment flows beyond generic `transactions/preview` and `transactions/settle`.
+
+### ORBI Pay (Merchant Payments)
+
+Endpoints:
+- `POST /v1/payments/orbi-pay/preview`
+- `POST /v1/payments/orbi-pay/settle`
+
+Expected payload fields may include:
+- `merchantPayNumber`
+- `merchantId`
+- `merchantName`
+- `channel`
+- `reference`
+- `amount`
+- `currency`
+- `sourceWalletId`
+
+These endpoints are designed for the normal consumer/mobile app. They do not require merchant-actor routes.
+
+### Bill Payments
+
+Endpoints:
+- `GET /v1/payments/bills/providers`
+- `POST /v1/payments/bills/preview`
+- `POST /v1/payments/bills/settle`
+
+Expected payload fields may include:
+- `provider`
+- `billCategory`
+- `reference`
+- `amount`
+- `currency`
+- `sourceWalletId`
+
+Use the provider catalog to build the bill picker UI and pass the selected category/provider/reference into preview first.
+
+## Shared Pot Invitation Flow
+
+Shared pots now support invitation lifecycle management instead of only direct member insertion.
+
+Endpoints:
+- `GET /v1/wealth/shared-pot-invitations`
+- `GET /v1/wealth/shared-pots/:id/invitations`
+- `POST /v1/wealth/shared-pots/:id/invitations`
+- `POST /v1/wealth/shared-pot-invitations/:id/respond`
+
+Invitation states:
+- `PENDING`
+- `ACCEPTED`
+- `REJECTED`
+- `CANCELLED`
+- `EXPIRED`
+
+## Shared Budgets
+
+Shared budgets are a separate collaborative spending product.
+
+### Endpoints
+- `GET /v1/wealth/shared-budgets`
+- `POST /v1/wealth/shared-budgets`
+- `PATCH /v1/wealth/shared-budgets/:id`
+- `GET /v1/wealth/shared-budgets/:id/members`
+- `GET /v1/wealth/shared-budgets/:id/transactions`
+- `GET /v1/wealth/shared-budgets/:id/invitations`
+- `GET /v1/wealth/shared-budget-invitations`
+- `POST /v1/wealth/shared-budgets/:id/invitations`
+- `POST /v1/wealth/shared-budget-invitations/:id/respond`
+- `POST /v1/wealth/shared-budgets/:id/spend/preview`
+- `POST /v1/wealth/shared-budgets/:id/spend/settle`
+
+### UI Guidance
+- show per-member spend totals from the members endpoint
+- show recent activity from the transactions endpoint
+- when approval mode is enabled, a settle attempt may return a review/pending result rather than immediate completion
+
+## External Transfer / Withdraw Typing
+
+When sending external transfer, withdraw, or agent-cash metadata, the client can now send richer context fields and the backend will preserve them:
+- `transactionType` / `transaction_type`
+- `providerInput` / `provider_input`
+- `counterpartyType` / `counterparty_type`
+
+Use these fields to distinguish:
+- bank transfer
+- mobile money movement
+- external agent cash withdrawal
+
+## Goal Auto-Allocation Replay
+
+Goal auto-allocation is now backend-driven and replayable.
+
+Endpoint:
+- `POST /v1/goals/auto-allocate/replay`
+
+Recommended use:
+- admin/support recovery for missed credit events
+- operational replay after delayed settlement reconciliation
 
 **Recommended UI Behavior**:
 1.  **Preventive**: Use the `available_balance` returned from `POST /v1/transactions/preview` to disable the "Confirm" button if `total > available_balance`.
