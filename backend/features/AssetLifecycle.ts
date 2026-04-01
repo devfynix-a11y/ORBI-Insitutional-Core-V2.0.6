@@ -1,5 +1,5 @@
 
-import { getSupabase } from '../../services/supabaseClient.js';
+import { getAdminSupabase, getSupabase } from '../../services/supabaseClient.js';
 import { EnvUtils } from '../../services/utils.js';
 import { Audit } from '../security/audit.js';
 
@@ -21,7 +21,7 @@ export class AssetLifecycleManager {
     public async decommission(url: string | undefined, actorId: string = 'system'): Promise<boolean> {
         if (!url || !url.includes(this.bucketName)) return true;
 
-        const sb = getSupabase();
+        const sb = getAdminSupabase() || getSupabase();
         if (!sb) return false;
 
         try {
@@ -53,7 +53,7 @@ export class AssetLifecycleManager {
      * Synchronizes institutional assets with the cloud storage cluster.
      */
     public async commit(userId: string, file: any, contentType?: string): Promise<string | null> {
-        const sb = getSupabase();
+        const sb = getAdminSupabase() || getSupabase();
         if (!sb) throw new Error("CLOUD_NODE_OFFLINE");
 
         const ext = contentType === 'image/jpeg' ? 'jpg' : contentType === 'image/webp' ? 'webp' : 'png';
