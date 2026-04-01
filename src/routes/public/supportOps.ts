@@ -26,18 +26,20 @@ const parseMaybeJson = (value: any) => {
 };
 
 const parseUploadedBinary = (req: any) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  const firstFile = req.file || files[0];
   let file: Buffer | undefined;
   let contentType = String(req.headers['content-type'] || 'application/octet-stream');
-  let fileName = String(req.headers['x-file-name'] || req.body?.file_name || 'document');
+  let fileName = String(req.headers['x-file-name'] || req.body?.file_name || firstFile?.originalname || 'document');
 
-  if (req.file) {
-    file = req.file.buffer;
-    contentType = req.file.mimetype || contentType;
-    fileName = req.file.originalname || fileName;
+  if (firstFile?.buffer) {
+    file = firstFile.buffer;
+    contentType = firstFile.mimetype || contentType;
+    fileName = firstFile.originalname || fileName;
   } else if (req.body instanceof Buffer) {
     file = req.body;
-  } else if (typeof req.body === 'object' && ((req.body as any).image || (req.body as any).file)) {
-    const rawData = (req.body as any).image || (req.body as any).file;
+  } else if (typeof req.body === 'object' && ((req.body as any).image || (req.body as any).file || (req.body as any).document)) {
+    const rawData = (req.body as any).image || (req.body as any).file || (req.body as any).document;
     if (typeof rawData === 'string' && rawData.includes('base64,')) {
       const base64Data = rawData.split('base64,')[1];
       file = Buffer.from(base64Data, 'base64');
@@ -161,7 +163,7 @@ export const registerSupportOpsRoutes = (v1: Router, deps: Deps) => {
   v1.post(
     '/user/documents',
     authenticate,
-    upload.single('file'),
+    upload.any(),
     express.raw({
       type: [
         'image/png',

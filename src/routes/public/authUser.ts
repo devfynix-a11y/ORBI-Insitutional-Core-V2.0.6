@@ -22,6 +22,30 @@ function isInstitutionalNodeRequest(req: Request) {
   return isInstitutionalAppIdentity(appId, appOrigin);
 }
 
+function getUploadedBuffer(req: any) {
+  const files = Array.isArray(req.files) ? req.files : [];
+  const firstFile = req.file || files[0];
+  let file: Buffer | undefined;
+  let contentType = String(req.headers['content-type'] || 'application/octet-stream');
+  let fileName = String(req.headers['x-file-name'] || firstFile?.originalname || 'upload');
+
+  if (firstFile?.buffer) {
+    file = firstFile.buffer;
+    contentType = firstFile.mimetype || contentType;
+    fileName = firstFile.originalname || fileName;
+  } else if (req.body instanceof Buffer) {
+    file = req.body;
+  } else if (typeof req.body === 'object' && ((req.body as any).image || (req.body as any).file || (req.body as any).document || (req.body as any).avatar)) {
+    const rawData = (req.body as any).image || (req.body as any).file || (req.body as any).document || (req.body as any).avatar;
+    if (typeof rawData === 'string' && rawData.includes('base64,')) {
+      const base64Data = rawData.split('base64,')[1];
+      file = Buffer.from(base64Data, 'base64');
+    }
+  }
+
+  return { file, contentType, fileName };
+}
+
 async function ensurePublicUserRow(userId: string, sessionUser: any, fallbackMetadata?: Record<string, any>) {
   const sb = getAdminSupabase() || getSupabase();
   if (!sb) throw new Error('DB_OFFLINE');
@@ -596,23 +620,9 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
     }
   });
 
-  v1.post('/user/avatar', authenticate, upload.single('file'), express.raw({ type: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif', 'application/octet-stream'], limit: '20mb' }), async (req, res) => {
+  v1.post('/user/avatar', authenticate, upload.any(), express.raw({ type: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif', 'application/octet-stream'], limit: '20mb' }), async (req, res) => {
     const session = (req as any).session;
-    let file: Buffer | undefined;
-    let contentType = req.headers['content-type'] || 'image/png';
-
-    if (req.file) {
-      file = req.file.buffer;
-      contentType = req.file.mimetype;
-    } else if (req.body instanceof Buffer) {
-      file = req.body;
-    } else if (typeof req.body === 'object' && ((req.body as any).image || (req.body as any).file)) {
-      const rawData = (req.body as any).image || (req.body as any).file;
-      if (typeof rawData === 'string' && rawData.includes('base64,')) {
-        const base64Data = rawData.split('base64,')[1];
-        file = Buffer.from(base64Data, 'base64');
-      }
-    }
+    const { file, contentType } = getUploadedBuffer(req);
 
     if (!file || !(file instanceof Buffer)) {
       return res.status(400).json({ success: false, error: 'INVALID_FILE_FORMAT', message: 'Please upload a valid image file (PNG, JPEG, WEBP, HEIC) as raw binary, multipart/form-data, or base64.' });
@@ -653,22 +663,8 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
     }
   });
 
-  v1.post('/user/kyc/scan', authenticate, upload.single('file'), express.raw({ type: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif', 'application/octet-stream'], limit: '20mb' }), async (req, res) => {
-    let file: Buffer | undefined;
-    let contentType = req.headers['content-type'] || 'image/png';
-
-    if (req.file) {
-      file = req.file.buffer;
-      contentType = req.file.mimetype;
-    } else if (req.body instanceof Buffer) {
-      file = req.body;
-    } else if (typeof req.body === 'object' && ((req.body as any).image || (req.body as any).file)) {
-      const rawData = (req.body as any).image || (req.body as any).file;
-      if (typeof rawData === 'string' && rawData.includes('base64,')) {
-        const base64Data = rawData.split('base64,')[1];
-        file = Buffer.from(base64Data, 'base64');
-      }
-    }
+  v1.post('/user/kyc/scan', authenticate, upload.any(), express.raw({ type: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif', 'application/octet-stream'], limit: '20mb' }), async (req, res) => {
+    const { file, contentType } = getUploadedBuffer(req);
 
     if (!file || !(file instanceof Buffer)) {
       return res.status(400).json({ success: false, error: 'INVALID_FILE_FORMAT', message: 'Please upload a valid document image as raw binary, multipart/form-data, or base64.' });
@@ -682,24 +678,9 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
     }
   });
 
-  v1.post('/user/kyc/upload', authenticate, upload.single('file'), express.raw({ type: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif', 'application/pdf', 'application/octet-stream'], limit: '20mb' }), async (req, res) => {
+  v1.post('/user/kyc/upload', authenticate, upload.any(), express.raw({ type: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif', 'application/pdf', 'application/octet-stream'], limit: '20mb' }), async (req, res) => {
     const session = (req as any).session;
-    let file: Buffer | undefined;
-    let contentType = req.headers['content-type'] || 'image/png';
-    const fileName = req.headers['x-file-name'] as string || 'kyc_document';
-
-    if (req.file) {
-      file = req.file.buffer;
-      contentType = req.file.mimetype;
-    } else if (req.body instanceof Buffer) {
-      file = req.body;
-    } else if (typeof req.body === 'object' && ((req.body as any).image || (req.body as any).file)) {
-      const rawData = (req.body as any).image || (req.body as any).file;
-      if (typeof rawData === 'string' && rawData.includes('base64,')) {
-        const base64Data = rawData.split('base64,')[1];
-        file = Buffer.from(base64Data, 'base64');
-      }
-    }
+    const { file, contentType, fileName } = getUploadedBuffer(req);
 
     if (!file || !(file instanceof Buffer)) {
       return res.status(400).json({ success: false, error: 'INVALID_FILE_FORMAT', message: 'Please upload a valid document as raw binary, multipart/form-data, or base64.' });

@@ -1108,7 +1108,10 @@ class OrbiServer {
 
     // --- DATA & MESSAGING ---
     async updateUserProfile(userId: string, updates: any, currentMetadata: any) {
-        const isVerified = currentMetadata?.kyc_status === 'verified';
+        const safeUpdates = updates && typeof updates === 'object' ? updates : {};
+        const safeCurrentMetadata =
+            currentMetadata && typeof currentMetadata === 'object' ? currentMetadata : {};
+        const isVerified = safeCurrentMetadata?.kyc_status === 'verified';
         
         // Define allowed fields based on status
         // Verified: Only avatar and settings (identity is locked)
@@ -1122,7 +1125,7 @@ class OrbiServer {
             ? ['avatar_url', 'avatar', ...settingsFields] 
             : ['full_name', 'phone', 'address', 'nationality', 'avatar_url', 'metadata', 'currency', ...settingsFields];
 
-        const attemptedFields = Object.keys(updates);
+        const attemptedFields = Object.keys(safeUpdates);
         const forbiddenFields = attemptedFields.filter(f => !allowedFields.includes(f));
         
         if (forbiddenFields.length > 0) {
@@ -1141,21 +1144,23 @@ class OrbiServer {
         try {
             // 1. Update Auth Metadata (for fields that live there)
             // We must merge with current metadata to avoid losing fields like role, registry_type, etc.
-            const metadataUpdates: any = { ...currentMetadata };
-            if (updates.full_name) metadataUpdates.full_name = updates.full_name;
-            if (updates.phone) metadataUpdates.phone = updates.phone;
-            if (updates.nationality) metadataUpdates.nationality = updates.nationality;
-            if (updates.address) metadataUpdates.address = updates.address;
-            if (updates.avatar_url) metadataUpdates.avatar_url = updates.avatar_url;
-            if (updates.currency) metadataUpdates.currency = updates.currency;
-            if (updates.language) metadataUpdates.language = updates.language;
+            const metadataUpdates: any = { ...safeCurrentMetadata };
+            if (safeUpdates.full_name) metadataUpdates.full_name = safeUpdates.full_name;
+            if (safeUpdates.phone) metadataUpdates.phone = safeUpdates.phone;
+            if (safeUpdates.nationality) metadataUpdates.nationality = safeUpdates.nationality;
+            if (safeUpdates.address) metadataUpdates.address = safeUpdates.address;
+            if (safeUpdates.avatar_url) metadataUpdates.avatar_url = safeUpdates.avatar_url;
+            if (safeUpdates.currency) metadataUpdates.currency = safeUpdates.currency;
+            if (safeUpdates.language) metadataUpdates.language = safeUpdates.language;
             
             // Sync settings to metadata for immediate access in auth-based logic
             settingsFields.forEach(field => {
-                if (updates[field] !== undefined) metadataUpdates[field] = updates[field];
+                if (safeUpdates[field] !== undefined) metadataUpdates[field] = safeUpdates[field];
             });
 
-            if (updates.metadata) Object.assign(metadataUpdates, updates.metadata);
+            if (safeUpdates.metadata && typeof safeUpdates.metadata === 'object') {
+                Object.assign(metadataUpdates, safeUpdates.metadata);
+            }
 
             if (Object.keys(metadataUpdates).length > 0) {
                 const { error } = await adminSb.auth.admin.updateUserById(userId, { user_metadata: metadataUpdates });
@@ -1163,7 +1168,7 @@ class OrbiServer {
             }
             
             // 2. Update Public Tables (users/staff)
-            const tableUpdates = { ...updates };
+            const tableUpdates = { ...safeUpdates };
             delete tableUpdates.metadata; 
             delete tableUpdates.avatar; 
 
@@ -1173,7 +1178,7 @@ class OrbiServer {
                 if (userError) console.warn(`[UserProfile] User table update warning: ${userError.message}`);
                 
                 // Try updating 'staff' table (if user is staff)
-                if (currentMetadata?.registry_type === 'STAFF') {
+                if (safeCurrentMetadata?.registry_type === 'STAFF') {
                     const { error: staffError } = await adminSb.from('staff').update(tableUpdates).eq('id', userId);
                     if (staffError) console.warn(`[UserProfile] Staff table update warning: ${staffError.message}`);
                 }
