@@ -15,16 +15,12 @@ import { registerProviderRoutes, mountProviderRoutes } from '../routes/providers
 import { validate } from '../middleware/validation/validate.js';
 import { authenticate, adminOnly, resolveSessionRole, requireRole, resolveSessionRegistryType, mapServiceRoleToRegistryType, requireSessionPermission } from '../middleware/auth/sessionAuth.js';
 import { ALLOWED_ORIGINS, configureCoreSecurityMiddleware, createGlobalIpLimiter } from '../middleware/security/setup.js';
-import express, { Request, Response, NextFunction } from 'express';
-import crypto from 'crypto';
+import express from 'express';
 import { createServer } from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
 import { Server as LogicCore } from '../../backend/server.js';
 import { Sentinel } from '../../backend/security/sentinel.js';
 import { WAF } from '../../backend/security/waf.js';
 import { getSupabase, getAdminSupabase } from '../../backend/supabaseClient.js';
-import { BankingEngineService } from '../../backend/ledger/transactionEngine.js';
-import { Audit } from '../../backend/security/audit.js';
 import { ResilienceEngine } from '../../backend/infrastructure/ResilienceEngine.js';
 import { Webhooks } from '../../backend/payments/webhookHandler.js';
 import { PolicyEngine } from '../../backend/ledger/PolicyEngine.js';
@@ -205,76 +201,6 @@ const syncUserIdentityClassification = async (
 
 // Continuous Session Monitoring Middleware
 app.use('/api/v1', continuousSessionMonitor);
-
-// 3. HEALTH & TELEMETRY NODE
-app.get('/', (req, res) => {
-    res.json({
-        status: 'ONLINE',
-        service: 'ORBI SOVEREIGN NODE',
-        version: '28.0.0',
-        docs: '/v1/docs' // Placeholder for docs
-    });
-});
-
-app.get(['/health', '/heath'], async (req, res) => {
-    const breakerStates = ResilienceEngine.getCircuitStates();
-    const ledgerIntegrity = await LogicCore.getAuditTrail().then(logs => logs.length > 0).catch(() => false);
-    
-    res.json({
-        status: 'NOMINAL',
-        node: process.env.RENDER_INSTANCE_ID || 'DPS-PRIMARY-RELAY',
-        version: '28.0.0',
-        uptime: (process as any).uptime(),
-        circuits: breakerStates,
-        ledger: ledgerIntegrity ? 'VERIFIED' : 'PENDING_SYNC',
-        ts: Date.now()
-    });
-});
-
-// 3.5 BROKER MONITORING
-let lastBrokerHeartbeat: any = null;
-
-app.post('/api/broker/heartbeat', (req, res) => {
-    const providedSecret = req.get('x-worker-secret') || req.get('x-orbi-worker-secret');
-    if (!providedSecret || providedSecret !== process.env.WORKER_SECRET) {
-        return res.status(403).json({ success: false, error: 'UNAUTHORIZED_WORKER' });
-    }
-    lastBrokerHeartbeat = {
-        ...req.body,
-        receivedAt: new Date().toISOString()
-    };
-    res.json({ success: true });
-});
-
-app.get('/api/broker/health', (req, res) => {
-    if (!lastBrokerHeartbeat) {
-        return res.status(503).json({ 
-            status: 'OFFLINE', 
-            error: 'No heartbeat received from broker' 
-        });
-    }
-
-    const lastSeen = new Date(lastBrokerHeartbeat.receivedAt).getTime();
-    const now = Date.now();
-    const diff = (now - lastSeen) / 1000;
-
-    if (diff > 120) { // 2 minutes timeout
-        return res.status(503).json({ 
-            status: 'STALE', 
-            lastSeen: lastBrokerHeartbeat.receivedAt,
-            error: `Broker heartbeat is ${Math.round(diff)}s old`
-        });
-    }
-
-    res.json({
-        status: 'ONLINE',
-        nodeId: lastBrokerHeartbeat.nodeId,
-        isInitialized: lastBrokerHeartbeat.isInitialized,
-        lastPollingCycle: lastBrokerHeartbeat.lastPollingCycle,
-        lastSeen: lastBrokerHeartbeat.receivedAt,
-        latency: Math.round(diff * 1000) + 'ms'
-    });
-});
 
 // 4. RESTFUL API ROUTES (V1)
 // --- Internal Worker Routes ---
