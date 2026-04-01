@@ -6,6 +6,7 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 DROP FUNCTION IF EXISTS public.handle_new_user() CASCADE;
 DROP FUNCTION IF EXISTS public.post_transaction_v2(UUID, UUID, UUID, UUID, TEXT, TEXT, TEXT, TEXT, DATE, JSONB, UUID, JSONB, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.append_ledger_entries_v1(UUID, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS public.settle_bill_payment_from_reserve_v1(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.update_wallet_balance(UUID, NUMERIC, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.delete_old_activity() CASCADE;
 DROP FUNCTION IF EXISTS public.get_auth_role() CASCADE;
@@ -2204,6 +2205,231 @@ BEGIN
             encrypted_balance = leg->>'balance_after_encrypted' 
         WHERE id = (leg->>'wallet_id')::UUID;
     END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.settle_bill_payment_from_reserve_v1(
+    p_user_id UUID,
+    p_reserve_id UUID,
+    p_amount NUMERIC,
+    p_currency TEXT DEFAULT 'TZS',
+    p_provider TEXT DEFAULT NULL,
+    p_bill_category TEXT DEFAULT NULL,
+    p_reference TEXT DEFAULT NULL,
+    p_description TEXT DEFAULT NULL
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_reserve public.bill_reserves%ROWTYPE;
+    v_transaction public.transactions%ROWTYPE;
+    v_source_wallet_id UUID;
+    v_source_wallet_role TEXT;
+    v_source_metadata JSONB := '{}'::jsonb;
+    v_source_kind TEXT;
+    v_locked_balance NUMERIC;
+    v_reserve_balance_after NUMERIC;
+    v_reference_id TEXT := 'billreserve_' || extract(epoch from now())::bigint || '_' || substr(md5(random()::text), 1, 8);
+    v_provider_key TEXT;
+    v_reserve_provider_key TEXT;
+    v_category_key TEXT;
+    v_reserve_category_key TEXT;
+    v_reference_key TEXT;
+    v_reserve_reference_key TEXT;
+    v_updated_reserve JSONB;
+BEGIN
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        RAISE EXCEPTION 'INVALID_AMOUNT';
+    END IF;
+
+    SELECT *
+      INTO v_reserve
+      FROM public.bill_reserves
+     WHERE id = p_reserve_id
+       AND user_id = p_user_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'BILL_RESERVE_NOT_FOUND';
+    END IF;
+
+    IF COALESCE(v_reserve.is_active, TRUE) = FALSE
+       OR upper(COALESCE(v_reserve.status, 'ACTIVE')) <> 'ACTIVE' THEN
+        RAISE EXCEPTION 'BILL_RESERVE_INACTIVE';
+    END IF;
+
+    v_provider_key := regexp_replace(replace(lower(trim(COALESCE(p_provider, ''))), '&', 'and'), '[^a-z0-9]+', ' ', 'g');
+    v_reserve_provider_key := regexp_replace(replace(lower(trim(COALESCE(v_reserve.provider_name, ''))), '&', 'and'), '[^a-z0-9]+', ' ', 'g');
+    IF v_provider_key <> '' AND v_reserve_provider_key <> ''
+       AND v_provider_key <> v_reserve_provider_key
+       AND strpos(v_provider_key, v_reserve_provider_key) = 0
+       AND strpos(v_reserve_provider_key, v_provider_key) = 0 THEN
+        RAISE EXCEPTION 'BILL_RESERVE_PROVIDER_MISMATCH';
+    END IF;
+
+    v_category_key := regexp_replace(replace(lower(trim(COALESCE(p_bill_category, ''))), '&', 'and'), '[^a-z0-9]+', ' ', 'g');
+    v_reserve_category_key := regexp_replace(replace(lower(trim(COALESCE(v_reserve.bill_type, ''))), '&', 'and'), '[^a-z0-9]+', ' ', 'g');
+    IF v_category_key <> '' AND v_reserve_category_key <> ''
+       AND v_category_key <> v_reserve_category_key
+       AND strpos(v_category_key, v_reserve_category_key) = 0
+       AND strpos(v_reserve_category_key, v_category_key) = 0 THEN
+        RAISE EXCEPTION 'BILL_RESERVE_CATEGORY_MISMATCH';
+    END IF;
+
+    v_reference_key := regexp_replace(replace(lower(trim(COALESCE(p_reference, ''))), '&', 'and'), '[^a-z0-9]+', ' ', 'g');
+    v_reserve_reference_key := regexp_replace(
+        replace(
+            lower(
+                trim(
+                    COALESCE(
+                        v_reserve.metadata->>'reference',
+                        v_reserve.metadata->>'bill_reference',
+                        v_reserve.metadata->>'account_number',
+                        v_reserve.metadata->>'meter_number',
+                        v_reserve.metadata->>'customer_number',
+                        ''
+                    )
+                )
+            ),
+            '&',
+            'and'
+        ),
+        '[^a-z0-9]+',
+        ' ',
+        'g'
+    );
+    IF v_reference_key <> '' AND v_reserve_reference_key <> ''
+       AND v_reference_key <> v_reserve_reference_key
+       AND strpos(v_reference_key, v_reserve_reference_key) = 0
+       AND strpos(v_reserve_reference_key, v_reference_key) = 0 THEN
+        RAISE EXCEPTION 'BILL_RESERVE_REFERENCE_MISMATCH';
+    END IF;
+
+    v_locked_balance := COALESCE(v_reserve.locked_balance, v_reserve.reserve_amount, 0);
+    IF v_locked_balance < p_amount THEN
+        RAISE EXCEPTION 'BILL_RESERVE_INSUFFICIENT_BALANCE';
+    END IF;
+
+    v_source_wallet_id := v_reserve.source_wallet_id;
+
+    IF v_source_wallet_id IS NOT NULL THEN
+        SELECT id, vault_role, COALESCE(metadata, '{}'::jsonb)
+          INTO v_source_wallet_id, v_source_wallet_role, v_source_metadata
+          FROM public.platform_vaults
+         WHERE id = v_reserve.source_wallet_id
+           AND user_id = p_user_id
+         LIMIT 1;
+
+        IF v_source_wallet_id IS NULL THEN
+            SELECT id, type, COALESCE(metadata, '{}'::jsonb)
+              INTO v_source_wallet_id, v_source_wallet_role, v_source_metadata
+              FROM public.wallets
+             WHERE id = v_reserve.source_wallet_id
+               AND user_id = p_user_id
+             LIMIT 1;
+        END IF;
+    END IF;
+
+    v_source_kind := lower(
+        COALESCE(
+            v_source_metadata->>'source_kind',
+            v_source_metadata->>'sourceKind',
+            v_source_metadata->>'wallet_kind',
+            v_source_wallet_role,
+            ''
+        )
+    );
+    IF strpos(v_source_kind, 'goal') > 0
+       OR v_source_metadata ? 'goal_id'
+       OR v_source_metadata ? 'goalId' THEN
+        RAISE EXCEPTION 'GOAL_FUNDS_BILL_PAYMENT_NOT_ALLOWED';
+    END IF;
+
+    v_reserve_balance_after := v_locked_balance - p_amount;
+
+    INSERT INTO public.transactions (
+        id,
+        reference_id,
+        user_id,
+        wallet_id,
+        amount,
+        currency,
+        description,
+        type,
+        status,
+        date,
+        metadata,
+        wealth_impact_type,
+        protection_state,
+        allocation_source
+    ) VALUES (
+        gen_random_uuid(),
+        v_reference_id,
+        p_user_id,
+        v_source_wallet_id,
+        p_amount::text,
+        upper(COALESCE(NULLIF(trim(p_currency), ''), v_reserve.currency, 'TZS')),
+        COALESCE(NULLIF(trim(p_description), ''), 'Bill payment from reserve: ' || COALESCE(p_provider, v_reserve.provider_name, 'Provider')),
+        'bill_payment',
+        'completed',
+        CURRENT_DATE,
+        jsonb_strip_nulls(jsonb_build_object(
+            'bill_reserve_id', v_reserve.id,
+            'service_context', 'BILL_PAYMENT',
+            'funding_mode', 'RESERVE',
+            'bill_provider', COALESCE(p_provider, v_reserve.provider_name),
+            'bill_category', COALESCE(p_bill_category, v_reserve.bill_type),
+            'bill_reference', COALESCE(NULLIF(trim(p_reference), ''), NULLIF(trim(v_reserve.metadata->>'reference'), ''), NULLIF(trim(v_reserve.metadata->>'bill_reference'), '')),
+            'source_wallet_role', v_source_wallet_role,
+            'source_kind', NULLIF(v_source_kind, ''),
+            'reserve_balance_before', v_locked_balance,
+            'reserve_balance_after', v_reserve_balance_after
+        )),
+        'PLANNED',
+        'PROTECTED',
+        'BILL_RESERVE_PAYMENT'
+    )
+    RETURNING * INTO v_transaction;
+
+    UPDATE public.bill_reserves
+       SET locked_balance = v_reserve_balance_after,
+           updated_at = NOW()
+     WHERE id = v_reserve.id
+       AND user_id = p_user_id
+    RETURNING to_jsonb(bill_reserves.*) INTO v_updated_reserve;
+
+    INSERT INTO public.financial_ledger (
+        id,
+        transaction_id,
+        user_id,
+        wallet_id,
+        bill_reserve_id,
+        bucket_type,
+        entry_side,
+        entry_type,
+        amount,
+        balance_after,
+        description
+    ) VALUES (
+        gen_random_uuid(),
+        v_transaction.id,
+        p_user_id,
+        v_source_wallet_id,
+        v_reserve.id,
+        'PLANNED',
+        'DEBIT',
+        'DEBIT',
+        p_amount::text,
+        v_reserve_balance_after::text,
+        'Bill reserve payment debit: ' || COALESCE(p_provider, v_reserve.provider_name, 'Provider')
+    );
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'transaction', to_jsonb(v_transaction),
+        'reserve', v_updated_reserve,
+        'funding_mode', 'RESERVE',
+        'reserve_balance', v_reserve_balance_after
+    );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 

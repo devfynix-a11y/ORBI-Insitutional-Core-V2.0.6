@@ -1512,6 +1512,20 @@ const BillReserveUpdateSchema = BillReserveCreateSchema.partial().extend({
     status: z.enum(['ACTIVE', 'PAUSED', 'ARCHIVED']).optional(),
 });
 
+const BillReservePaymentSchema = z.object({
+    bill_reserve_id: z.string().uuid().optional(),
+    reserve_id: z.string().uuid().optional(),
+    amount: z.coerce.number().positive(),
+    currency: z.string().min(3).max(8).optional(),
+    provider: z.string().min(2),
+    billCategory: z.string().optional(),
+    reference: z.string().optional(),
+    description: z.string().max(255).optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
+}).refine((data) => !!(data.bill_reserve_id || data.reserve_id), {
+    message: 'bill_reserve_id is required',
+});
+
 const SharedPotUpdateSchema = SharedPotCreateSchema.partial().extend({
     status: z.enum(['ACTIVE', 'PAUSED', 'COMPLETED', 'ARCHIVED']).optional(),
 });
@@ -1558,6 +1572,11 @@ const SharedBudgetMemberAddSchema = z.object({
 
 const SharedBudgetInviteResponseSchema = z.object({
     action: z.enum(['ACCEPT', 'REJECT']),
+});
+
+const SharedBudgetApprovalResponseSchema = z.object({
+    action: z.enum(['APPROVE', 'REJECT']),
+    note: z.string().max(255).optional(),
 });
 
 const SharedBudgetSpendSchema = z.object({
@@ -3172,11 +3191,20 @@ v1.post('/payments/bills/preview', authenticate as any, validate(PaymentIntentSc
     }
 
     try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const sourceWalletId = String(req.body?.sourceWalletId || req.body?.source_wallet_id || '').trim();
+        const { sourceRecord } = await resolveWealthSourceWallet(
+            sb,
+            session.sub,
+            sourceWalletId || undefined,
+        );
+        assertBillPaymentSourceAllowed(sourceRecord);
         const result = await LogicCore.previewBillPayment(session.sub, req.body);
         if (!result.success) return res.status(400).json(result);
         res.json({ success: true, data: result });
     } catch (e: any) {
-        res.status(500).json({ success: false, error: e.message });
+        res.status(e.message === 'GOAL_FUNDS_BILL_PAYMENT_NOT_ALLOWED' ? 400 : 500).json({ success: false, error: e.message });
     }
 });
 
@@ -3187,13 +3215,129 @@ v1.post('/payments/bills/settle', authenticate as any, validate(PaymentIntentSch
     }
 
     try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const sourceWalletId = String(req.body?.sourceWalletId || req.body?.source_wallet_id || '').trim();
+        const { sourceRecord } = await resolveWealthSourceWallet(
+            sb,
+            session.sub,
+            sourceWalletId || undefined,
+        );
+        assertBillPaymentSourceAllowed(sourceRecord);
         const result = await LogicCore.processBillPayment(req.body, session.user);
         if (!result.success) {
             return res.status(400).json(result);
         }
         res.json({ success: true, data: result });
     } catch (e: any) {
-        res.status(500).json({ success: false, error: e.message });
+        res.status(e.message === 'GOAL_FUNDS_BILL_PAYMENT_NOT_ALLOWED' ? 400 : 500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/payments/bills/preview-from-reserve', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['CONSUMER', 'USER', 'MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const payload = BillReservePaymentSchema.parse(req.body);
+        const reserveId = String(payload.bill_reserve_id || payload.reserve_id || '').trim();
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+
+        const { data: reserve, error: reserveError } = await sb
+            .from('bill_reserves')
+            .select('*')
+            .eq('id', reserveId)
+            .eq('user_id', session.sub)
+            .single();
+        if (reserveError || !reserve) {
+            return res.status(404).json({ success: false, error: 'BILL_RESERVE_NOT_FOUND' });
+        }
+
+        if (String(reserve.status || 'ACTIVE').toUpperCase() !== 'ACTIVE' || reserve.is_active === false) {
+            return res.status(400).json({ success: false, error: 'BILL_RESERVE_INACTIVE' });
+        }
+
+        const { sourceRecord } = await resolveWealthSourceWallet(
+            sb,
+            session.sub,
+            String(reserve.source_wallet_id || '').trim() || undefined,
+        );
+        assertBillPaymentSourceAllowed(sourceRecord);
+
+        if (!billReserveValuesMatch(payload.provider, reserve.provider_name || reserve.provider)) {
+            return res.status(400).json({ success: false, error: 'BILL_RESERVE_PROVIDER_MISMATCH' });
+        }
+        if (payload.billCategory && reserve.bill_type && !billReserveValuesMatch(payload.billCategory, reserve.bill_type)) {
+            return res.status(400).json({ success: false, error: 'BILL_RESERVE_CATEGORY_MISMATCH' });
+        }
+        const reserveReference = resolveBillReserveReference(reserve);
+        if (payload.reference && reserveReference && !billReserveValuesMatch(payload.reference, reserveReference)) {
+            return res.status(400).json({ success: false, error: 'BILL_RESERVE_REFERENCE_MISMATCH' });
+        }
+
+        const lockedBalance = wealthNumber(reserve.locked_balance || reserve.reserve_amount || 0);
+        if (lockedBalance < payload.amount) {
+            return res.status(400).json({ success: false, error: 'BILL_RESERVE_INSUFFICIENT_BALANCE' });
+        }
+
+        res.json({
+            success: true,
+            data: {
+                success: true,
+                funding_mode: 'RESERVE',
+                reserve_id: reserve.id,
+                amount: payload.amount,
+                totalAmount: payload.amount,
+                netAmount: payload.amount,
+                currency: String(payload.currency || reserve.currency || sourceRecord.currency || 'TZS').toUpperCase(),
+                provider: payload.provider,
+                billCategory: payload.billCategory || reserve.bill_type,
+                reference: payload.reference || reserveReference,
+                description: payload.description || `Bill payment from reserve: ${payload.provider}`,
+                reserveBalanceBefore: lockedBalance,
+                reserveBalanceAfter: lockedBalance - payload.amount,
+                sourceWalletId: sourceRecord.id,
+            },
+        });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/payments/bills/settle-from-reserve', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['CONSUMER', 'USER', 'MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const payload = BillReservePaymentSchema.parse(req.body);
+        const reserveId = String(payload.bill_reserve_id || payload.reserve_id || '').trim();
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { data, error } = await sb.rpc('settle_bill_payment_from_reserve_v1', {
+            p_user_id: session.sub,
+            p_reserve_id: reserveId,
+            p_amount: payload.amount,
+            p_currency: String(payload.currency || 'TZS').toUpperCase(),
+            p_provider: payload.provider,
+            p_bill_category: payload.billCategory || null,
+            p_reference: payload.reference || null,
+            p_description: payload.description || null,
+        });
+        if (error) {
+            return res.status(400).json({ success: false, error: error.message });
+        }
+
+        res.json({
+            success: true,
+            data,
+        });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
     }
 });
 
@@ -4174,6 +4318,10 @@ const createWealthTransaction = async (
     description: string,
     wealthImpactType: string,
     metadata: Record<string, any>,
+    options?: {
+        transactionType?: string;
+        transactionStatus?: string;
+    },
 ) => {
     const reference = `wealth_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
     const { data, error } = await sb
@@ -4185,8 +4333,8 @@ const createWealthTransaction = async (
             amount: String(amount),
             currency,
             description,
-            type: 'internal_transfer',
-            status: 'completed',
+            type: options?.transactionType || 'internal_transfer',
+            status: options?.transactionStatus || 'completed',
             wealth_impact_type: wealthImpactType,
             protection_state: 'OPEN',
             allocation_source: metadata.allocation_source || null,
@@ -4254,6 +4402,59 @@ const insertBillReserveLedger = async (
     const { error } = await sb.from('financial_ledger').insert(rows);
     if (error) throw new Error(error.message);
 };
+
+const wealthSourceMetadata = (sourceRecord: any): Record<string, any> => {
+    const metadata = sourceRecord?.metadata;
+    if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+        return metadata as Record<string, any>;
+    }
+    return {};
+};
+
+const isGoalBackedWealthSourceWallet = (sourceRecord: any) => {
+    const metadata = wealthSourceMetadata(sourceRecord);
+    const sourceKind = String(
+        metadata.source_kind ??
+        metadata.sourceKind ??
+        sourceRecord?.vault_role ??
+        sourceRecord?.type ??
+        '',
+    ).trim().toLowerCase();
+    const linkedGoalId = metadata.goal_id ?? metadata.goalId ?? sourceRecord?.goal_id;
+    return sourceKind.includes('goal') || Boolean(linkedGoalId);
+};
+
+const assertBillPaymentSourceAllowed = (sourceRecord: any) => {
+    if (isGoalBackedWealthSourceWallet(sourceRecord)) {
+        throw new Error('GOAL_FUNDS_BILL_PAYMENT_NOT_ALLOWED');
+    }
+};
+
+const normalizeBillReserveValue = (value: string) =>
+    value
+        .trim()
+        .toLowerCase()
+        .replace(/&/g, 'and')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+const billReserveValuesMatch = (left?: string | null, right?: string | null) => {
+    const leftKey = normalizeBillReserveValue(String(left || ''));
+    const rightKey = normalizeBillReserveValue(String(right || ''));
+    if (!leftKey || !rightKey) return false;
+    return leftKey === rightKey || leftKey.includes(rightKey) || rightKey.includes(leftKey);
+};
+
+const resolveBillReserveReference = (reserve: any) =>
+    String(
+        reserve?.reference ??
+        reserve?.bill_reference ??
+        reserve?.account_number ??
+        reserve?.meter_number ??
+        reserve?.customer_number ??
+        '',
+    ).trim();
 
 const normalizeWealthIdentifier = (value: string) => value.trim().toLowerCase();
 
@@ -4364,6 +4565,7 @@ const resolveSharedBudgetMembership = async (sb: any, budgetId: string, userId: 
 
 const canManageSharedBudget = (role: string) => ['OWNER', 'MANAGER'].includes(role.toUpperCase());
 const canSpendFromSharedBudget = (role: string) => ['OWNER', 'MANAGER', 'SPENDER'].includes(role.toUpperCase());
+const canReviewSharedBudgetSpend = (role: string) => ['OWNER', 'MANAGER'].includes(role.toUpperCase());
 
 const resolveUserBySharedBudgetIdentifier = async (sb: any, identifier: string) => {
     return resolveUserBySharedPotIdentifier(sb, identifier);
@@ -4385,6 +4587,149 @@ const expireSharedBudgetInvitationIfNeeded = async (sb: any, invite: any) => {
         .single();
     if (error) throw new Error(error.message);
     return data || invite;
+};
+
+const executeSharedBudgetSpend = async (
+    sb: any,
+    {
+        budget,
+        membership,
+        actorUserId,
+        actorUser,
+        payload,
+        approvalId,
+    }: {
+        budget: any;
+        membership: any;
+        actorUserId: string;
+        actorUser: any;
+        payload: any;
+        approvalId?: string | null;
+    },
+) => {
+    const currentSpent = wealthNumber(budget.spent_amount);
+    const budgetLimit = wealthNumber(budget.budget_limit);
+    if (currentSpent + payload.amount > budgetLimit) {
+        throw new Error('SHARED_BUDGET_LIMIT_EXCEEDED');
+    }
+
+    const memberSpent = wealthNumber(membership.spent_amount || 0);
+    if (membership.member_limit && memberSpent + payload.amount > wealthNumber(membership.member_limit)) {
+        throw new Error('SHARED_BUDGET_MEMBER_LIMIT_EXCEEDED');
+    }
+
+    const enrichedMetadata = {
+        ...(payload.metadata || {}),
+        shared_budget_id: budget.id,
+        shared_budget_name: budget.name,
+        shared_budget_role: membership.role || 'SPENDER',
+        bill_provider: payload.provider || null,
+        bill_category: payload.bill_category || null,
+        bill_reference: payload.reference || null,
+        spend_origin: 'SHARED_BUDGET',
+        spend_type: payload.type || 'EXTERNAL_PAYMENT',
+        approval_id: approvalId || null,
+        approval_mode: budget.approval_mode || 'AUTO',
+        actor_user_id: actorUserId,
+        member_user_id: actorUserId,
+    };
+
+    const result = await LogicCore.processSecurePayment({
+        sourceWalletId: payload.source_wallet_id,
+        recipientId: payload.provider,
+        amount: payload.amount,
+        currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
+        description: payload.description || `${budget.name} spend`,
+        type: payload.type || 'EXTERNAL_PAYMENT',
+        metadata: enrichedMetadata,
+    }, actorUser);
+    if (!result.success) throw new Error(result.error || 'SHARED_BUDGET_SPEND_FAILED');
+
+    const tx = result.transaction || {};
+    const transactionId = tx.internalId || tx.id || null;
+    const newBudgetSpent = currentSpent + payload.amount;
+    const newMemberSpent = memberSpent + payload.amount;
+    const nowIso = new Date().toISOString();
+
+    if (transactionId) {
+        const { error: txLinkError } = await sb
+            .from('transactions')
+            .update({
+                shared_budget_id: budget.id,
+                updated_at: nowIso,
+                metadata: enrichedMetadata,
+            })
+            .eq('id', transactionId);
+        if (txLinkError) throw new Error(txLinkError.message);
+
+        const { error: ledgerLinkError } = await sb
+            .from('financial_ledger')
+            .update({ shared_budget_id: budget.id })
+            .eq('transaction_id', transactionId);
+        if (ledgerLinkError) throw new Error(ledgerLinkError.message);
+    }
+
+    const { error: budgetUpdateError } = await sb
+        .from('shared_budgets')
+        .update({
+            spent_amount: newBudgetSpent,
+            updated_at: nowIso,
+        })
+        .eq('id', budget.id);
+    if (budgetUpdateError) throw new Error(budgetUpdateError.message);
+
+    const { error: memberUpdateError } = await sb
+        .from('shared_budget_members')
+        .upsert({
+            budget_id: budget.id,
+            user_id: actorUserId,
+            role: membership.role || 'SPENDER',
+            status: membership.status || 'ACTIVE',
+            member_limit: membership.member_limit || null,
+            spent_amount: newMemberSpent,
+            metadata: membership.metadata || {},
+        }, {
+            onConflict: 'budget_id,user_id',
+        });
+    if (memberUpdateError) throw new Error(memberUpdateError.message);
+
+    const { data: budgetTx, error: budgetTxError } = await sb
+        .from('shared_budget_transactions')
+        .insert({
+            shared_budget_id: budget.id,
+            member_user_id: actorUserId,
+            source_wallet_id: payload.source_wallet_id || tx.fromWalletId || null,
+            transaction_id: transactionId,
+            merchant_name: payload.provider || tx.toUserId || null,
+            provider: payload.provider || null,
+            category: payload.bill_category || payload.type || 'SPEND',
+            amount: payload.amount,
+            currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
+            status: 'COMPLETED',
+            note: payload.description || null,
+            metadata: {
+                ...enrichedMetadata,
+                reference: payload.reference || null,
+                approved_from_review: approvalId != null,
+            },
+        })
+        .select('*')
+        .single();
+    if (budgetTxError) throw new Error(budgetTxError.message);
+
+    return {
+        transaction: result.transaction,
+        budget_transaction: budgetTx,
+        shared_budget: {
+            ...budget,
+            spent_amount: newBudgetSpent,
+            remaining_amount: Math.max(0, budgetLimit - newBudgetSpent),
+        },
+        member: {
+            ...membership,
+            spent_amount: newMemberSpent,
+        },
+    };
 };
 
 v1.get('/wealth/summary', authenticate as any, async (req, res) => {
@@ -4562,6 +4907,7 @@ v1.post('/wealth/bill-reserves', authenticate as any, async (req, res) => {
             );
             sourceRecord = resolved.sourceRecord;
             sourceTable = resolved.sourceTable;
+            assertBillPaymentSourceAllowed(sourceRecord);
             const currentBalance = wealthNumber(sourceRecord.balance);
             if (currentBalance < lockedBalance) {
                 return res.status(400).json({ success: false, error: 'INSUFFICIENT_FUNDS' });
@@ -4698,6 +5044,7 @@ v1.patch('/wealth/bill-reserves/:id', authenticate as any, async (req, res) => {
             );
             sourceRecord = resolved.sourceRecord;
             sourceTable = resolved.sourceTable;
+            assertBillPaymentSourceAllowed(sourceRecord);
             const currentBalance = wealthNumber(sourceRecord.balance);
             if (delta > 0) {
                 if (currentBalance < delta) {
@@ -5844,6 +6191,133 @@ v1.post('/wealth/shared-budget-invitations/:id/respond', authenticate as any, as
     }
 });
 
+v1.get('/wealth/shared-budgets/:id/approvals', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        const { budget, membership } = await resolveSharedBudgetMembership(sb, req.params.id, session.sub);
+        if (!canReviewSharedBudgetSpend(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_ACCESS_DENIED' });
+        }
+        const { data, error } = await sb
+            .from('shared_budget_approvals')
+            .select('*, users!shared_budget_approvals_requester_user_id_fkey(id, full_name, email, phone), reviewer:users!shared_budget_approvals_reviewer_user_id_fkey(id, full_name, email, phone)')
+            .eq('shared_budget_id', budget.id)
+            .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ success: false, error: error.message });
+        res.json({ success: true, data: { approvals: data || [] } });
+    } catch (e: any) {
+        const status = e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400;
+        res.status(status).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/wealth/shared-budget-approvals/:id/respond', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    try {
+        const payload = SharedBudgetApprovalResponseSchema.parse(req.body);
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+
+        const { data: approval, error: approvalError } = await sb
+            .from('shared_budget_approvals')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+        if (approvalError) return res.status(400).json({ success: false, error: approvalError.message });
+        if (!approval) return res.status(404).json({ success: false, error: 'SHARED_BUDGET_APPROVAL_NOT_FOUND' });
+        if (String(approval.status || '').toUpperCase() !== 'PENDING') {
+            return res.status(400).json({ success: false, error: 'SHARED_BUDGET_APPROVAL_NOT_PENDING' });
+        }
+
+        const { budget, membership } = await resolveSharedBudgetMembership(sb, approval.shared_budget_id, session.sub);
+        if (!canReviewSharedBudgetSpend(String(membership.role || ''))) {
+            return res.status(403).json({ success: false, error: 'SHARED_BUDGET_ACCESS_DENIED' });
+        }
+
+        if (payload.action === 'REJECT') {
+            const { data, error } = await sb
+                .from('shared_budget_approvals')
+                .update({
+                    status: 'REJECTED',
+                    reviewer_user_id: session.sub,
+                    responded_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                    note: payload.note ?? approval.note ?? null,
+                })
+                .eq('id', approval.id)
+                .select('*')
+                .single();
+            if (error) return res.status(400).json({ success: false, error: error.message });
+            return res.json({ success: true, data: { approval: data } });
+        }
+
+        const requesterMembershipResult = await resolveSharedBudgetMembership(
+            sb,
+            approval.shared_budget_id,
+            String(approval.requester_user_id),
+        );
+
+        const approvalMetadata = approval.metadata && typeof approval.metadata === 'object'
+            ? approval.metadata
+            : {};
+
+        const spendPayload = {
+            source_wallet_id: approvalMetadata.source_wallet_id || null,
+            amount: wealthNumber(approval.amount),
+            currency: approval.currency || budget.currency || 'TZS',
+            provider: approval.provider || null,
+            bill_category: approval.bill_category || null,
+            reference: approval.reference || null,
+            description: approval.note || null,
+            type: approvalMetadata.type || 'EXTERNAL_PAYMENT',
+            metadata: {
+                ...approvalMetadata,
+                approval_reviewer_user_id: session.sub,
+                approval_reviewer_role: membership.role || 'MANAGER',
+                approval_response_note: payload.note || null,
+            },
+        };
+
+        const spendData = await executeSharedBudgetSpend(sb, {
+            budget,
+            membership: requesterMembershipResult.membership,
+            actorUserId: String(approval.requester_user_id),
+            actorUser: {
+                ...(session.user || {}),
+                id: String(approval.requester_user_id),
+            },
+            payload: spendPayload,
+            approvalId: approval.id,
+        });
+
+        const transactionId = (spendData as any)?.transaction?.internalId || (spendData as any)?.transaction?.id || null;
+        const { data: updatedApproval, error: approvalUpdateError } = await sb
+            .from('shared_budget_approvals')
+            .update({
+                status: 'APPROVED',
+                reviewer_user_id: session.sub,
+                responded_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+                metadata: {
+                    ...approvalMetadata,
+                    approved_transaction_id: transactionId,
+                    approval_response_note: payload.note || null,
+                },
+            })
+            .eq('id', approval.id)
+            .select('*')
+            .single();
+        if (approvalUpdateError) return res.status(400).json({ success: false, error: approvalUpdateError.message });
+
+        res.json({ success: true, data: { approval: updatedApproval, ...spendData } });
+    } catch (e: any) {
+        const status = e.message === 'SHARED_BUDGET_ACCESS_DENIED' ? 403 : 400;
+        res.status(status).json({ success: false, error: e.message });
+    }
+});
+
 v1.post('/wealth/shared-budgets/:id/spend/preview', authenticate as any, async (req, res) => {
     const session = (req as any).session;
     try {
@@ -5881,6 +6355,8 @@ v1.post('/wealth/shared-budgets/:id/spend/preview', authenticate as any, async (
                 bill_category: payload.bill_category || null,
                 bill_reference: payload.reference || null,
                 shared_budget_preview: true,
+                spend_origin: 'SHARED_BUDGET',
+                spend_type: payload.type || 'EXTERNAL_PAYMENT',
             },
             dryRun: true,
         });
@@ -5939,7 +6415,18 @@ v1.post('/wealth/shared-budgets/:id/spend/settle', authenticate as any, async (r
                     reference: payload.reference || null,
                     note: payload.description || null,
                     status: 'PENDING',
-                    metadata: payload.metadata || {},
+                    metadata: {
+                        ...(payload.metadata || {}),
+                        source_wallet_id: payload.source_wallet_id || null,
+                        type: payload.type || 'EXTERNAL_PAYMENT',
+                        shared_budget_name: budget.name,
+                        requester_role: membership.role || 'SPENDER',
+                        spend_origin: 'SHARED_BUDGET',
+                        bill_provider: payload.provider || null,
+                        bill_category: payload.bill_category || null,
+                        bill_reference: payload.reference || null,
+                        preview_required: true,
+                    },
                 })
                 .select('*')
                 .single();
@@ -5947,114 +6434,14 @@ v1.post('/wealth/shared-budgets/:id/spend/settle', authenticate as any, async (r
             return res.json({ success: true, data: { approval: data, requires_approval: true } });
         }
 
-        const result = await LogicCore.processSecurePayment({
-            sourceWalletId: payload.source_wallet_id,
-            recipientId: payload.provider,
-            amount: payload.amount,
-            currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
-            description: payload.description || `${budget.name} spend`,
-            type: payload.type || 'EXTERNAL_PAYMENT',
-            metadata: {
-                ...(payload.metadata || {}),
-                shared_budget_id: budget.id,
-                shared_budget_name: budget.name,
-                shared_budget_role: membership.role || 'SPENDER',
-                bill_provider: payload.provider || null,
-                bill_category: payload.bill_category || null,
-                bill_reference: payload.reference || null,
-                spend_origin: 'SHARED_BUDGET',
-            },
-        }, session.user);
-        if (!result.success) return res.status(400).json(result);
-
-        const tx = result.transaction || {};
-        const transactionId = tx.internalId || tx.id || null;
-        const newBudgetSpent = currentSpent + payload.amount;
-        const newMemberSpent = memberSpent + payload.amount;
-        const nowIso = new Date().toISOString();
-
-        if (transactionId) {
-            const { error: txLinkError } = await sb
-                .from('transactions')
-                .update({
-                    shared_budget_id: budget.id,
-                    updated_at: nowIso,
-                })
-                .eq('id', transactionId);
-            if (txLinkError) return res.status(400).json({ success: false, error: txLinkError.message });
-
-            const { error: ledgerLinkError } = await sb
-                .from('financial_ledger')
-                .update({ shared_budget_id: budget.id })
-                .eq('transaction_id', transactionId);
-            if (ledgerLinkError) return res.status(400).json({ success: false, error: ledgerLinkError.message });
-        }
-
-        const { error: budgetUpdateError } = await sb
-            .from('shared_budgets')
-            .update({
-                spent_amount: newBudgetSpent,
-                updated_at: nowIso,
-            })
-            .eq('id', budget.id);
-        if (budgetUpdateError) return res.status(400).json({ success: false, error: budgetUpdateError.message });
-
-        const { error: memberUpdateError } = await sb
-            .from('shared_budget_members')
-            .upsert({
-                budget_id: budget.id,
-                user_id: session.sub,
-                role: membership.role || 'SPENDER',
-                status: membership.status || 'ACTIVE',
-                member_limit: membership.member_limit || null,
-                spent_amount: newMemberSpent,
-                metadata: membership.metadata || {},
-            }, {
-                onConflict: 'budget_id,user_id',
-            });
-        if (memberUpdateError) return res.status(400).json({ success: false, error: memberUpdateError.message });
-
-        const { data: budgetTx, error: budgetTxError } = await sb
-            .from('shared_budget_transactions')
-            .insert({
-                shared_budget_id: budget.id,
-                member_user_id: session.sub,
-                source_wallet_id: payload.source_wallet_id || tx.fromWalletId || null,
-                transaction_id: tx.internalId || tx.id || null,
-                merchant_name: payload.provider || tx.toUserId || null,
-                provider: payload.provider || null,
-                category: payload.bill_category || payload.type || 'SPEND',
-                amount: payload.amount,
-                currency: (payload.currency || budget.currency || 'TZS').toUpperCase(),
-                status: 'COMPLETED',
-                note: payload.description || null,
-                metadata: {
-                    ...(payload.metadata || {}),
-                    shared_budget_name: budget.name,
-                    shared_budget_role: membership.role || 'SPENDER',
-                    reference: payload.reference || null,
-                },
-            })
-            .select('*')
-            .single();
-        if (budgetTxError) return res.status(400).json({ success: false, error: budgetTxError.message });
-
-        res.json({
-            success: true,
-            data: {
-                transaction: result.transaction,
-                budget_transaction: budgetTx,
-                shared_budget: {
-                    ...budget,
-                    spent_amount: newBudgetSpent,
-                    remaining_amount: Math.max(0, budgetLimit - newBudgetSpent),
-                },
-                member: {
-                    ...membership,
-                    spent_amount: newMemberSpent,
-                },
-            },
+        const data = await executeSharedBudgetSpend(sb, {
+            budget,
+            membership,
+            actorUserId: session.sub,
+            actorUser: session.user,
+            payload,
         });
+        res.json({ success: true, data });
     } catch (e: any) {
         const status = e.message === 'SHARED_BUDGET_SPEND_DENIED' ? 403 : 400;
         res.status(status).json({ success: false, error: e.message });
