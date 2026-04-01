@@ -1217,7 +1217,47 @@ class OrbiServer {
 
     async uploadAvatar(userId: string, file: any, contentType?: string, oldUrl?: string) {
         if (oldUrl) await AssetLifecycle.decommission(oldUrl, userId);
-        return AssetLifecycle.commit(userId, file, contentType);
+        const avatarUrl = await AssetLifecycle.commit(userId, file, contentType);
+        if (!avatarUrl) return avatarUrl;
+
+        const adminSb = getAdminSupabase();
+        if (!adminSb) {
+            throw new Error('DB_OFFLINE');
+        }
+
+        const { data: authUserResult, error: authUserError } = await adminSb.auth.admin.getUserById(userId);
+        if (authUserError) {
+            throw new Error(authUserError.message);
+        }
+
+        const currentMetadata = authUserResult?.user?.user_metadata || {};
+        const metadataUpdates = {
+            ...currentMetadata,
+            avatar_url: avatarUrl,
+        };
+
+        const { error: authUpdateError } = await adminSb.auth.admin.updateUserById(userId, {
+            user_metadata: metadataUpdates,
+        });
+        if (authUpdateError) {
+            throw new Error(authUpdateError.message);
+        }
+
+        const profileUpdate = { avatar_url: avatarUrl };
+        const { error: userUpdateError } = await adminSb.from('users').update(profileUpdate).eq('id', userId);
+        if (userUpdateError) {
+            console.warn(`[Avatar] users update warning: ${userUpdateError.message}`);
+        }
+
+        const registryType = String(currentMetadata?.registry_type || '').toUpperCase();
+        if (registryType === 'STAFF') {
+            const { error: staffUpdateError } = await adminSb.from('staff').update(profileUpdate).eq('id', userId);
+            if (staffUpdateError) {
+                console.warn(`[Avatar] staff update warning: ${staffUpdateError.message}`);
+            }
+        }
+
+        return avatarUrl;
     }
     async getUserMessages(userId: string, limit: number = 50, offset: number = 0): Promise<UserMessage[]> {
         return Messaging.getMessages(userId, limit, offset);

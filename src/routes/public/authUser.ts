@@ -3,7 +3,7 @@ import express, { type Request, type RequestHandler, type Router } from 'express
 import { Sessions } from '../../../backend/src/modules/session/session.service.js';
 import { Audit } from '../../../backend/security/audit.js';
 import { getAdminSupabase, getSupabase } from '../../../backend/supabaseClient.js';
-import { TRUSTED_INSTITUTIONAL_APP_IDS, TRUSTED_INSTITUTIONAL_APP_ORIGINS } from '../../../backend/config/appIdentity.js';
+import { isInstitutionalAppIdentity } from '../../../backend/config/appIdentity.js';
 
 function getDeviceNameFromUA(userAgent?: string): string {
   if (!userAgent) return 'Unknown Device';
@@ -19,10 +19,45 @@ function getDeviceNameFromUA(userAgent?: string): string {
 function isInstitutionalNodeRequest(req: Request) {
   const appId = String(req.headers['x-orbi-app-id'] || '');
   const appOrigin = String(req.headers['x-orbi-app-origin'] || '');
-  return (
-    TRUSTED_INSTITUTIONAL_APP_IDS.includes(appId) &&
-    TRUSTED_INSTITUTIONAL_APP_ORIGINS.includes(appOrigin)
-  );
+  return isInstitutionalAppIdentity(appId, appOrigin);
+}
+
+async function ensurePublicUserRow(userId: string, sessionUser: any, fallbackMetadata?: Record<string, any>) {
+  const sb = getAdminSupabase() || getSupabase();
+  if (!sb) throw new Error('DB_OFFLINE');
+
+  const { data: existing, error: existingError } = await sb.from('users').select('id').eq('id', userId).maybeSingle();
+  if (existingError) throw new Error(existingError.message);
+  if (existing) return;
+
+  const adminSb = getAdminSupabase();
+  const authUserResult = adminSb ? await adminSb.auth.admin.getUserById(userId) : null;
+  const authUser = authUserResult?.data?.user;
+  const metadata = {
+    ...(authUser?.user_metadata || {}),
+    ...(sessionUser?.user_metadata || {}),
+    ...(fallbackMetadata || {}),
+  };
+
+  const profilePayload = {
+    id: userId,
+    full_name: metadata.full_name || sessionUser?.full_name || 'User',
+    email: authUser?.email || sessionUser?.email || null,
+    phone: authUser?.phone || sessionUser?.phone || metadata.phone || null,
+    nationality: metadata.nationality || null,
+    address: metadata.address || null,
+    avatar_url: metadata.avatar_url || null,
+    customer_id: metadata.customer_id || null,
+    currency: metadata.currency || 'TZS',
+    language: metadata.language || 'en',
+    account_status: metadata.account_status || 'active',
+    role: String(metadata.role || 'USER').toUpperCase(),
+    registry_type: String(metadata.registry_type || 'CONSUMER').toUpperCase(),
+    app_origin: metadata.app_origin || null,
+  };
+
+  const { error: upsertError } = await sb.from('users').upsert(profilePayload, { onConflict: 'id' });
+  if (upsertError) throw new Error(upsertError.message);
 }
 
 type Deps = {
@@ -431,6 +466,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
   v1.get('/service-access/requests/my', authenticate, async (req, res) => {
     try {
       const session = (req as any).session;
+      await ensurePublicUserRow(session.sub, session.user);
       const sb = getAdminSupabase() || getSupabase();
       if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
 
@@ -454,6 +490,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
   v1.post('/service-access/requests', authenticate, validate(ServiceAccessRequestCreateSchema), async (req, res) => {
     try {
       const session = (req as any).session;
+      await ensurePublicUserRow(session.sub, session.user);
       const sb = getAdminSupabase() || getSupabase();
       if (!sb) return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
 
