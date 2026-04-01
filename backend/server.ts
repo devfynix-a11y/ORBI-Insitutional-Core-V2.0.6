@@ -925,6 +925,7 @@ class OrbiServer {
     }
     async getMerchantWallets(userId: string) { return ServiceActorOps.getMerchantWallets(userId); }
     async getAgentWallets(userId: string) { return ServiceActorOps.getAgentWallets(userId); }
+    async lookupAgentByCode(query: string) { return ServiceActorOps.lookupAgentByCode(query); }
     async registerCustomerByServiceActor(actor: any, actorRole: 'MERCHANT' | 'AGENT', payload: any) {
         return ServiceActorOps.registerCustomerByActor(actor, actorRole, payload, this.auth);
     }

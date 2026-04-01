@@ -3370,6 +3370,20 @@ v1.get('/agent/wallets', authenticate as any, async (req, res) => {
     }
 });
 
+v1.get('/agent/lookup', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['USER', 'AGENT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const query = String(req.query.q || '').trim();
+        const result = await LogicCore.lookupAgentByCode(query);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
 v1.post('/agent/customers/register', authenticate as any, validate(ServiceCustomerRegistrationSchema), async (req, res) => {
     const session = (req as any).session;
     if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN'])) {

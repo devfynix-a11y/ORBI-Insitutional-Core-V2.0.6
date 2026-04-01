@@ -554,6 +554,69 @@ class ServiceActorOperations {
         return this.syncAgentWallets(userId);
     }
 
+    public async lookupAgentByCode(query: string) {
+        const sb = this.getDb();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const normalized = String(query || '').replace(/\D/g, '').trim();
+        if (normalized.length < 4) {
+            throw new Error('AGENT_LOOKUP_MIN_4_DIGITS');
+        }
+
+        const { data: agents, error } = await sb
+            .from('agents')
+            .select('id,user_id,display_name,status,service_pay_number,cash_withdraw_till,metadata')
+            .eq('status', 'active')
+            .or(`cash_withdraw_till.like.%${normalized}%,service_pay_number.like.%${normalized}%`)
+            .limit(12);
+        if (error) throw new Error(error.message);
+
+        const items = agents || [];
+        if (items.length == 0) throw new Error('AGENT_NOT_FOUND');
+
+        let bestMatch: any = null;
+        let bestScore = -1;
+        for (const agent of items) {
+            const till = String(agent.cash_withdraw_till || '');
+            const serviceNo = String(agent.service_pay_number || '');
+            let score = 0;
+            if (till === normalized) score += 500;
+            if (serviceNo === normalized) score += 450;
+            if (till.startsWith(normalized)) score += 320;
+            if (serviceNo.startsWith(normalized)) score += 300;
+            if (till.endsWith(normalized)) score += 240;
+            if (serviceNo.endsWith(normalized)) score += 220;
+            if (till.includes(normalized)) score += 160;
+            if (serviceNo.includes(normalized)) score += 150;
+            if (score > bestScore) {
+                bestMatch = agent;
+                bestScore = score;
+            }
+        }
+
+        if (!bestMatch) throw new Error('AGENT_NOT_FOUND');
+
+        const { data: user } = await sb
+            .from('users')
+            .select('full_name,customer_id')
+            .eq('id', bestMatch.user_id)
+            .maybeSingle();
+
+        return {
+            agent_id: bestMatch.id,
+            display_name:
+                bestMatch.display_name ||
+                user?.full_name ||
+                user?.customer_id ||
+                'ORBI Agent',
+            status: bestMatch.status || 'active',
+            service_pay_number: bestMatch.service_pay_number || '',
+            cash_withdraw_till: bestMatch.cash_withdraw_till || '',
+            branch: bestMatch?.metadata?.branch || '',
+            matched_query: normalized,
+        };
+    }
+
     public async provisionApprovedActorAccess(userId: string, actorRole: ServiceActorRole) {
         if (actorRole === 'MERCHANT') {
             await this.ensureMerchantProfile({ id: userId });
