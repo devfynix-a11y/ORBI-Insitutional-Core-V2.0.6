@@ -4,6 +4,21 @@ const isMissingRpc = (error: any, functionName: string): boolean => {
   return code === 'PGRST202' || code === '42883' || message.includes(functionName);
 };
 
+const logBillReserveFallback = (
+  userId: string,
+  reserveId: string,
+  action: 'LOCK' | 'RELEASE',
+  error: any,
+) => {
+  console.warn('[Wealth][BillReserve] Atomic RPC fallback engaged', {
+    userId,
+    reserveId,
+    action,
+    code: String(error?.code || ''),
+    message: String(error?.message || ''),
+  });
+};
+
 const updateWealthSourceBalance = async (
   sb: any,
   sourceTable: 'platform_vaults' | 'wallets',
@@ -196,6 +211,8 @@ export const applyBillReserveAdjustment = async (input: ApplyBillReserveAdjustme
   if (!isMissingRpc(error, 'bill_reserve_adjust_v1')) {
     throw new Error(error.message);
   }
+
+  logBillReserveFallback(userId, reserveId, action, error);
 
   const transaction = await createWealthTransaction(
     sb,

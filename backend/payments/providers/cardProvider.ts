@@ -576,6 +576,20 @@ export class CardProvider implements IPaymentProvider {
           if (!this.isMissingRpc(error, 'card_settle_v1')) {
             throw new Error(error.message);
           }
+          console.warn('[CardProvider] Atomic settlement RPC fallback engaged', {
+            cardTransactionId: transactionId,
+            targetWalletId,
+            feeWalletId,
+            code: String(error?.code || ''),
+            message: String(error?.message || ''),
+          });
+          await Audit.log('INFRASTRUCTURE', String(targetWallet.user_id), 'CARD_SETTLEMENT_RPC_FALLBACK', {
+            card_transaction_id: transactionId,
+            target_wallet_id: targetWalletId,
+            fee_wallet_id: feeWalletId,
+            code: String(error?.code || ''),
+            message: String(error?.message || ''),
+          });
           const legacyResult = await this.settleCardPaymentLegacy(sb, cardTx, targetWallet, feeWalletId);
           settlementId = legacyResult.settlementId;
         } else {

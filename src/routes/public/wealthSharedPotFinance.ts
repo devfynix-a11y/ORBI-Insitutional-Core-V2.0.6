@@ -24,6 +24,21 @@ const isMissingRpc = (error: any, fnName: string) => {
   return code === 'PGRST202' || code === '42883' || message.includes(fnName);
 };
 
+const logSharedPotFallback = (
+  flow: 'contribute' | 'withdraw',
+  sessionUserId: string,
+  potId: string,
+  error: any,
+) => {
+  console.warn('[Wealth][SharedPot] Atomic RPC fallback engaged', {
+    flow,
+    userId: sessionUserId,
+    potId,
+    code: String(error?.code || ''),
+    message: String(error?.message || ''),
+  });
+};
+
 const contributeViaLegacyPath = async ({
   sb,
   sessionUserId,
@@ -300,6 +315,7 @@ export const contributeToSharedPot = async (input: ContributeInput) => {
     if (!isMissingRpc(error, 'shared_pot_contribute_v1')) {
       throw new Error(error.message);
     }
+    logSharedPotFallback('contribute', sessionUserId, String(pot.id), error);
     return contributeViaLegacyPath(input);
   }
 
@@ -359,6 +375,7 @@ export const withdrawFromSharedPot = async (input: WithdrawInput) => {
     if (!isMissingRpc(error, 'shared_pot_withdraw_v1')) {
       throw new Error(error.message);
     }
+    logSharedPotFallback('withdraw', sessionUserId, String(pot.id), error);
     return withdrawViaLegacyPath(input);
   }
 
