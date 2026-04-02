@@ -57,8 +57,9 @@ class ProviderWebhookEventLedger {
         if (this.shouldUseLocalStore(sb)) {
             return this.recordLocalReceipt(baseRecord);
         }
+        const client = sb!;
 
-        const { data, error } = await sb
+        const { data, error } = await client
             .from('provider_webhook_events')
             .insert(baseRecord)
             .select('*')
@@ -68,7 +69,7 @@ class ProviderWebhookEventLedger {
             return { record: data as ProviderWebhookEventRecord, duplicate: false };
         }
 
-        const { data: existing } = await sb
+        const { data: existing } = await client
             .from('provider_webhook_events')
             .select('*')
             .eq('partner_id', input.partner_id)
@@ -122,8 +123,9 @@ class ProviderWebhookEventLedger {
             this.localStore.set(this.localKey(record.partner_id, record.dedupe_key), record);
             return true;
         }
+        const client = sb!;
 
-        const { data } = await sb
+        const { data } = await client
             .from('provider_webhook_events')
             .update({
                 application_status: 'processing',
@@ -163,8 +165,9 @@ class ProviderWebhookEventLedger {
             this.localStore.set(this.localKey(next.partner_id, next.dedupe_key), next);
             return;
         }
+        const client = sb!;
 
-        await sb.from('provider_webhook_events').update(patch).eq('id', id);
+        await client.from('provider_webhook_events').update(patch).eq('id', id);
     }
 
     private recordLocalReceipt(record: ProviderWebhookEventRecord) {
