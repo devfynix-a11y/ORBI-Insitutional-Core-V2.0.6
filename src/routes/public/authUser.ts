@@ -8,6 +8,38 @@ import { extractBearerToken } from '../../middleware/auth/authorization.js';
 import { buildRequestLogContext, logger } from '../../../backend/infrastructure/logger.js';
 
 const authRouteLogger = logger.child({ component: 'auth_public_routes' });
+const bootstrapAdminSecretHeader = 'x-orbi-bootstrap-secret';
+
+const secureHeaderEquals = (expected: string, provided: string): boolean => {
+  const left = Buffer.from(expected, 'utf8');
+  const right = Buffer.from(provided, 'utf8');
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+};
+
+const assertBootstrapAdminAuthorized = (req: Request) => {
+  const bootstrapSecret = String(process.env.ORBI_BOOTSTRAP_ADMIN_SECRET || '').trim();
+  const requireBootstrapSecret =
+    process.env.NODE_ENV === 'production' ||
+    process.env.ORBI_REQUIRE_BOOTSTRAP_ADMIN_SECRET === 'true';
+
+  if (!requireBootstrapSecret) {
+    return;
+  }
+
+  if (!bootstrapSecret) {
+    const error: any = new Error('BOOTSTRAP_SECRET_NOT_CONFIGURED');
+    error.status = 503;
+    throw error;
+  }
+
+  const provided = String(req.get(bootstrapAdminSecretHeader) || '').trim();
+  if (!provided || !secureHeaderEquals(bootstrapSecret, provided)) {
+    const error: any = new Error('BOOTSTRAP_SECRET_REQUIRED');
+    error.status = 403;
+    throw error;
+  }
+};
 
 function getDeviceNameFromUA(userAgent?: string): string {
   if (!userAgent) return 'Unknown Device';
@@ -326,11 +358,20 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
     }
   });
 
-  v1.post('/auth/otp/initiate', async (req, res) => {
+  v1.post('/auth/otp/initiate', authenticate, async (req, res) => {
     let { userId, contact, action, type } = req.body;
     if (!userId || !action) return res.status(400).json({ success: false, error: 'MISSING_FIELDS' });
 
     try {
+      const session = (req as any).session;
+      if (session?.sub !== userId) {
+        return res.status(403).json({
+          success: false,
+          error: 'ACCESS_DENIED',
+          message: 'OTP initiation is restricted to the authenticated user.',
+        });
+      }
+
       if (!contact) {
         const sb = getAdminSupabase();
         if (sb) {
@@ -430,6 +471,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
     try {
+      assertBootstrapAdminAuthorized(req);
       const result = await LogicCore.bootstrapAdmin(req.body);
       if (result.error) {
         return res.status(400).json({ success: false, error: result.error });

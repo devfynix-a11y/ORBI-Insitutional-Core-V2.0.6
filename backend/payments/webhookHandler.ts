@@ -228,11 +228,14 @@ class WebhookHandler {
         rawPayload: any,
     ) {
         const { reference, status, message, providerEventId } = callback;
-
-        const { data: tx } = await sb.from('transactions')
-            .select('*')
-            .or(`id.eq.${reference},reference_id.eq.${reference}`)
-            .maybeSingle();
+        const isUuidReference = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reference);
+        const { data: txById } = isUuidReference
+            ? await sb.from('transactions').select('*').eq('id', reference).maybeSingle()
+            : { data: null };
+        const { data: txByReference } = txById
+            ? { data: null }
+            : await sb.from('transactions').select('*').eq('reference_id', reference).maybeSingle();
+        const tx = txById || txByReference;
 
         if (!tx) {
             try {

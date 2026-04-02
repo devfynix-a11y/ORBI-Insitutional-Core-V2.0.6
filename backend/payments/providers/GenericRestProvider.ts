@@ -10,6 +10,7 @@ import {
     ProviderExecutionRequest,
     ProviderExecutionResponse,
 } from './types.js';
+import net from 'net';
 import { providerTokenService } from './ProviderTokenService.js';
 import { providerSecretVault } from './ProviderSecretVault.js';
 import {
@@ -235,7 +236,7 @@ export class GenericRestProvider implements IProviderAdapter {
             context.partner,
             context.serviceRoot,
         );
-        this.assertTrustedProviderUrl(url);
+        await this.assertTrustedProviderUrl(url);
 
         const headers = this.resolveHeaders(config.headers || {}, context);
         headers['Accept'] ??= 'application/json';
@@ -335,7 +336,7 @@ export class GenericRestProvider implements IProviderAdapter {
         return this.getValueByPath(source, path);
     }
 
-    private assertTrustedProviderUrl(url: string): void {
+    private async assertTrustedProviderUrl(url: string): Promise<void> {
         let parsed: URL;
         try {
             parsed = new URL(url);
@@ -347,11 +348,56 @@ export class GenericRestProvider implements IProviderAdapter {
             throw new Error('PROVIDER_URL_INSECURE');
         }
 
+        if ((parsed.username || parsed.password) && !this.allowInsecureProviderUrls) {
+            throw new Error('PROVIDER_URL_EMBEDDED_CREDENTIALS_BLOCKED');
+        }
+
         const hostname = parsed.hostname.toLowerCase();
-        const blockedHosts = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
-        if (blockedHosts.has(hostname) && !this.allowInsecureProviderUrls) {
+        const blockedHosts = new Set([
+            'localhost',
+            '127.0.0.1',
+            '0.0.0.0',
+            'host.docker.internal',
+            'metadata.google.internal',
+        ]);
+        if (
+            (blockedHosts.has(hostname) ||
+                hostname.endsWith('.local') ||
+                hostname.endsWith('.internal') ||
+                this.isBlockedProviderIp(hostname)) &&
+            !this.allowInsecureProviderUrls
+        ) {
             throw new Error('PROVIDER_URL_BLOCKED_HOST');
         }
+    }
+
+    private isBlockedProviderIp(hostname: string): boolean {
+        if (!net.isIP(hostname)) {
+            return false;
+        }
+
+        if (net.isIPv4(hostname)) {
+            const [a, b] = hostname.split('.').map((part) => Number(part));
+            return (
+                a === 0 ||
+                a === 10 ||
+                a === 127 ||
+                (a === 100 && b >= 64 && b <= 127) ||
+                (a === 169 && b === 254) ||
+                (a === 172 && b >= 16 && b <= 31) ||
+                (a === 192 && b === 168) ||
+                (a === 198 && (b === 18 || b === 19))
+            );
+        }
+
+        const normalized = hostname.toLowerCase();
+        return (
+            normalized === '::1' ||
+            normalized === '::' ||
+            normalized.startsWith('fc') ||
+            normalized.startsWith('fd') ||
+            normalized.startsWith('fe80:')
+        );
     }
 
     private resolveTemplate(template: string, context: any): string {

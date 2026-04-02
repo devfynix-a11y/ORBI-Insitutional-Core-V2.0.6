@@ -13,6 +13,7 @@ import { WalletService } from '../wealth/walletService.js';
 import { parsePhoneNumber } from 'libphonenumber-js';
 import { JWTNode } from '../backend/security/jwt.js';
 import { DEFAULT_INSTITUTIONAL_APP_ORIGIN, TRUSTED_INSTITUTIONAL_APP_ORIGINS, TRUSTED_MOBILE_APP_ORIGINS } from '../backend/config/appIdentity.js';
+import { buildPostgrestOrFilter } from '../backend/security/postgrest.js';
 
 /**
  * ORBI AUTHENTICATION PROTOCOL (V24.5 Titanium Hardened)
@@ -445,7 +446,14 @@ export class AuthService {
         
         // Lookup user ID for brute force protection
         let userId = null;
-        const { data: user } = await sb.from('users').select('id').or(`email.eq.${e},phone.eq.${e}`).maybeSingle();
+        const { data: user } = await sb
+            .from('users')
+            .select('id')
+            .or(buildPostgrestOrFilter([
+                { column: 'email', operator: 'eq', value: e },
+                { column: 'phone', operator: 'eq', value: e },
+            ]))
+            .maybeSingle();
         if (user) userId = user.id;
 
         if (userId) {

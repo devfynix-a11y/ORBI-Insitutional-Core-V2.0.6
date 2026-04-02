@@ -11,6 +11,7 @@ import { Messaging } from './MessagingService.js';
 import { createHash } from 'crypto';
 import { DEFAULT_INSTITUTIONAL_APP_ORIGIN, DEFAULT_MOBILE_APP_ORIGIN, TRUSTED_MOBILE_APP_ORIGINS } from '../config/appIdentity.js';
 import { DataProtection } from '../security/DataProtection.js';
+import { buildPostgrestOrFilter } from '../security/postgrest.js';
 
 type ServiceActorRole = 'MERCHANT' | 'AGENT';
 
@@ -568,7 +569,10 @@ class ServiceActorOperations {
             .from('agents')
             .select('id,user_id,display_name,status,service_pay_number,cash_withdraw_till,metadata')
             .eq('status', 'active')
-            .or(`cash_withdraw_till.like.%${normalized}%,service_pay_number.like.%${normalized}%`)
+            .or(buildPostgrestOrFilter([
+                { column: 'cash_withdraw_till', operator: 'ilike', value: normalized },
+                { column: 'service_pay_number', operator: 'ilike', value: normalized },
+            ]))
             .limit(12);
         if (error) throw new Error(error.message);
 

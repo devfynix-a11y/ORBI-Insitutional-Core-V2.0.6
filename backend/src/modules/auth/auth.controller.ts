@@ -17,6 +17,7 @@ import { Audit } from "../../../security/audit.js";
 import { normalizeAndroidOrigin, sameTrustedOrigin } from "../../../security/passkeyUtils.js";
 import { ALLOWED_DOMAINS } from "../../../middleware/appTrust.js";
 import { DEFAULT_MOBILE_APP_ORIGIN, TRUSTED_APP_IDS, TRUSTED_APP_ORIGINS } from "../../../config/appIdentity.js";
+import { buildPostgrestOrFilter } from "../../../security/postgrest.js";
 
 const cleanAndroidHash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
 const EXPECTED_ANDROID_ORIGIN = cleanAndroidHash ? `android:apk-key-hash:${cleanAndroidHash}` : '';
@@ -524,7 +525,10 @@ export class AuthController {
                 const { data: user, error } = await sb
                     .from('users')
                     .select('id')
-                    .or(`email.eq.${identifier},phone.eq.${identifier}`)
+                    .or(buildPostgrestOrFilter([
+                        { column: 'email', operator: 'eq', value: identifier },
+                        { column: 'phone', operator: 'eq', value: identifier },
+                    ]))
                     .maybeSingle();
 
                 if (error) throw error;

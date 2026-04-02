@@ -54,6 +54,7 @@ import { ServiceActorOps } from './features/ServiceActorOps.js';
 import { institutionalFundsService } from './payments/InstitutionalFundsService.js';
 import { platformFeeService } from './payments/PlatformFeeService.js';
 import { offlineGatewayService } from './offline/OfflineGatewayService.js';
+import { buildPostgrestOrFilter } from './security/postgrest.js';
 import bcrypt from 'bcryptjs';
 
 const internalBackgroundJobsEnabled =
@@ -1314,7 +1315,12 @@ class OrbiServer {
         if (filters?.dateTo) query = query.lte('date', filters.dateTo);
         if (filters?.query) {
             const q = String(filters.query).trim();
-            query = query.or(`reference_id.ilike.%${q}%,description.ilike.%${q}%,status.ilike.%${q}%,type.ilike.%${q}%`);
+            query = query.or(buildPostgrestOrFilter([
+                { column: 'reference_id', operator: 'ilike', value: q },
+                { column: 'description', operator: 'ilike', value: q },
+                { column: 'status', operator: 'ilike', value: q },
+                { column: 'type', operator: 'ilike', value: q },
+            ]));
         }
 
         const { data, error, count } = await query;
@@ -1348,7 +1354,12 @@ class OrbiServer {
         if (filters?.dateTo) query = query.lte('date', filters.dateTo);
         if (filters?.query) {
             const q = String(filters.query).trim();
-            query = query.or(`reference_id.ilike.%${q}%,description.ilike.%${q}%,status.ilike.%${q}%,type.ilike.%${q}%`);
+            query = query.or(buildPostgrestOrFilter([
+                { column: 'reference_id', operator: 'ilike', value: q },
+                { column: 'description', operator: 'ilike', value: q },
+                { column: 'status', operator: 'ilike', value: q },
+                { column: 'type', operator: 'ilike', value: q },
+            ]));
         }
 
         const { data, error } = await query;

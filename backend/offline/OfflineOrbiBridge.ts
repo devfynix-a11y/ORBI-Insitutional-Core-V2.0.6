@@ -2,6 +2,7 @@ import { getAdminSupabase } from '../supabaseClient.js';
 import { PolicyEngine } from '../ledger/PolicyEngine.js';
 import { EntProcessor } from '../enterprise/wealth/EnterprisePaymentProcessor.js';
 import { Audit } from '../security/audit.js';
+import { buildPostgrestOrFilter } from '../security/postgrest.js';
 
 export class OfflineOrbiBridge {
     async processConfirmedSession(session: any) {
@@ -115,7 +116,10 @@ export class OfflineOrbiBridge {
                 .from('wallets')
                 .select('id, name, is_primary')
                 .eq('user_id', userId)
-                .or(`id.eq.${clean},name.ilike.${clean}`)
+                .or(buildPostgrestOrFilter([
+                    { column: 'id', operator: 'eq', value: clean },
+                    { column: 'name', operator: 'ilike', value: clean },
+                ]))
                 .maybeSingle();
             if (exactError) throw new Error(exactError.message);
             if (exactWallet?.id) return exactWallet.id;
@@ -124,7 +128,11 @@ export class OfflineOrbiBridge {
                 .from('platform_vaults')
                 .select('id, name, vault_role')
                 .eq('user_id', userId)
-                .or(`id.eq.${clean},name.ilike.${clean},vault_role.ilike.${clean}`)
+                .or(buildPostgrestOrFilter([
+                    { column: 'id', operator: 'eq', value: clean },
+                    { column: 'name', operator: 'ilike', value: clean },
+                    { column: 'vault_role', operator: 'ilike', value: clean },
+                ]))
                 .maybeSingle();
             if (exactVaultError) throw new Error(exactVaultError.message);
             if (exactVault?.id) return exactVault.id;

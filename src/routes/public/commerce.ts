@@ -42,7 +42,18 @@ export const registerCommerceRoutes = (v1: Router, deps: Deps) => {
     try {
       const signatureHeader = req.get('x-signature') || req.get('x-webhook-signature') || req.get('x-orbi-signature') || undefined;
       const eventId = req.get('x-event-id') || req.get('x-webhook-id') || req.get('x-provider-event-id') || undefined;
-      await Webhooks.handleCallback(req.body, partnerId, signatureHeader, (req as any).rawBody, eventId);
+      await Webhooks.handleCallback(req.body, partnerId, {
+        signature: signatureHeader,
+        rawPayload: (req as any).rawBody,
+        explicitEventId: eventId,
+        headers: Object.fromEntries(
+          Object.entries(req.headers).map(([key, value]) => [
+            key,
+            Array.isArray(value) ? value.join(',') : value ? String(value) : undefined,
+          ]),
+        ),
+        sourceIp: req.ip,
+      });
       res.json({ success: true });
     } catch (e: any) {
       console.error(`[Webhook] Error processing webhook for ${partnerId}:`, e);

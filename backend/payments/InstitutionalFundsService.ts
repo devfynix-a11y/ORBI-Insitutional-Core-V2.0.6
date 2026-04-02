@@ -14,6 +14,7 @@ import { providerRoutingService } from './ProviderRoutingService.js';
 import { platformFeeService } from './PlatformFeeService.js';
 import { GoalService } from '../../strategy/goalService.js';
 import { buildLifecycleFailureMetadata } from './providerFailureMetadata.js';
+import { buildPostgrestOrFilter } from '../security/postgrest.js';
 
 type InstitutionalAccountLookup = {
     id?: string;
@@ -396,7 +397,11 @@ export class InstitutionalFundsService {
             .from('external_fund_movements')
             .select('*')
             .eq('provider_id', providerId)
-            .or(`external_reference.eq.${reference},source_external_ref.eq.${reference},target_external_ref.eq.${reference}`)
+            .or(buildPostgrestOrFilter([
+                { column: 'external_reference', operator: 'eq', value: reference },
+                { column: 'source_external_ref', operator: 'eq', value: reference },
+                { column: 'target_external_ref', operator: 'eq', value: reference },
+            ]))
             .order('created_at', { ascending: false })
             .limit(1)
             .maybeSingle();
@@ -539,7 +544,11 @@ export class InstitutionalFundsService {
             .from('external_fund_movements')
             .select('*')
             .eq('provider_id', providerId)
-            .or(`external_reference.eq.${reference},source_external_ref.eq.${reference},target_external_ref.eq.${reference}`)
+            .or(buildPostgrestOrFilter([
+                { column: 'external_reference', operator: 'eq', value: reference },
+                { column: 'source_external_ref', operator: 'eq', value: reference },
+                { column: 'target_external_ref', operator: 'eq', value: reference },
+            ]))
             .eq('direction', 'EXTERNAL_TO_INTERNAL')
             .order('created_at', { ascending: false })
             .limit(1)

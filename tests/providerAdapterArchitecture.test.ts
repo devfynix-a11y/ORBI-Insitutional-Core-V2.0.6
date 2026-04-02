@@ -61,6 +61,58 @@ test('generic rest provider exposes formal adapter capabilities', () => {
   assert.equal(capability.providerCode, 'BANK1');
 });
 
+test('generic rest provider blocks localhost, metadata, and private-network urls', async () => {
+  const provider = new GenericRestProvider();
+
+  await assert.rejects(
+    () => provider.execute({
+      id: 'p-ssrf',
+      name: 'Private Host Provider',
+      type: 'bank',
+      status: 'ACTIVE',
+      mapping_config: {
+        service_root: 'http://127.0.0.1',
+        operations: {
+          BALANCE_INQUIRY: { method: 'GET', url: '/balance' },
+        },
+      },
+      provider_metadata: {
+        operations: ['BALANCE_INQUIRY'],
+        provider_code: 'SSRF1',
+        rail: 'BANK',
+      },
+    } as any, {
+      operation: 'BALANCE_INQUIRY',
+      reference: 'test-balance',
+    } as any),
+    /PROVIDER_URL_INSECURE|PROVIDER_URL_BLOCKED_HOST/,
+  );
+
+  await assert.rejects(
+    () => provider.execute({
+      id: 'p-ssrf-2',
+      name: 'Metadata Provider',
+      type: 'bank',
+      status: 'ACTIVE',
+      mapping_config: {
+        service_root: 'https://169.254.169.254',
+        operations: {
+          BALANCE_INQUIRY: { method: 'GET', url: '/latest/meta-data' },
+        },
+      },
+      provider_metadata: {
+        operations: ['BALANCE_INQUIRY'],
+        provider_code: 'SSRF2',
+        rail: 'BANK',
+      },
+    } as any, {
+      operation: 'BALANCE_INQUIRY',
+      reference: 'test-metadata',
+    } as any),
+    /PROVIDER_URL_BLOCKED_HOST/,
+  );
+});
+
 test('provider selection service wraps routing selection', async () => {
   const original = providerRoutingService.resolveProvider;
   providerRoutingService.resolveProvider = async () => ({

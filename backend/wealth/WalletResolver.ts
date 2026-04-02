@@ -1,6 +1,7 @@
 import { getSupabase, getAdminSupabase } from '../supabaseClient.js';
 import { Identity } from '../../iam/identityService.js';
 import { UserPublicProfile } from '../../types.js';
+import { buildPostgrestOrFilter } from '../security/postgrest.js';
 
 export interface ResolvedWallet {
     userId: string;
@@ -43,7 +44,11 @@ export class WalletResolver {
             } else {
                 // If not UUID, try customer_id, phone, or email
                 // Note: .or() syntax requires explicit column names
-                query = query.or(`customer_id.eq.${identifier},phone.eq.${identifier},email.eq.${identifier}`);
+                query = query.or(buildPostgrestOrFilter([
+                    { column: 'customer_id', operator: 'eq', value: identifier },
+                    { column: 'phone', operator: 'eq', value: identifier },
+                    { column: 'email', operator: 'eq', value: identifier },
+                ]));
             }
 
             const { data: user } = await query.maybeSingle();
