@@ -64,6 +64,19 @@ test('engine settlement flow no longer relies on ledger description string match
     assert.match(settlementBlock, /workerClaimId/i);
 });
 
+test('engine settlement flow moves zero-sum violations into held_for_review before finalization', () => {
+    const settlementBlock = sliceBetween(
+        engineSource,
+        'public async completeSettlement(',
+        'public async sendTransferNotifications(',
+    );
+
+    assert.match(settlementBlock, /verifyZeroSum/i);
+    assert.match(settlementBlock, /ZERO_SUM_VIOLATION/i);
+    assert.match(settlementBlock, /finalizeInternalTransferSettlement\([\s\S]*'HELD_FOR_REVIEW'[\s\S]*false/i);
+    assert.match(settlementBlock, /return false;/i);
+});
+
 test('internal worker route forwards worker identity and maps settlement conflicts to 409', () => {
     assert.match(routesSource, /x-worker-id/i);
     assert.match(routesSource, /completeSettlement\(id, undefined, workerId\)/);
