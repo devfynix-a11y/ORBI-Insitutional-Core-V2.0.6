@@ -720,6 +720,21 @@ export interface ProviderResolutionInput {
     preferredProviderId?: string;
 }
 
+export interface ProviderRoutingDecision {
+    providerId: string;
+    providerCode: string;
+    rail: RailType;
+    operation: MoneyOperation;
+    source: 'routing_rule' | 'registry_fallback';
+    ruleId?: string;
+    priority?: number;
+    countryCode?: string;
+    currency?: string;
+    preferredProviderCode?: string;
+    preferredProviderId?: string;
+    resolvedAt: string;
+}
+
 export type OfflineMessageType =
     | 'APP_OFFLINE_REQUEST'
     | 'APP_OFFLINE_CONFIRM'
@@ -757,6 +772,7 @@ export interface ResolvedProviderConfig {
     requestTemplate?: Record<string, unknown>;
     responseMapping?: Record<string, unknown>;
     extraConfig?: Record<string, unknown>;
+    routingDecision?: ProviderRoutingDecision;
 }
 
 export type ProviderGroup = 'Mobile' | 'Bank' | 'Gateways' | 'Crypto';
@@ -969,6 +985,14 @@ export interface ProviderCallbackConfig {
     status_field?: string;
     message_field?: string;
     event_id_field?: string;
+    replay_key_field?: string;
+    signature_header?: string;
+    signature_prefix?: string;
+    signature_encoding?: 'hex' | 'base64';
+    signature_payload_mode?: 'raw' | 'timestamp.raw';
+    timestamp_header?: string;
+    timestamp_field?: string;
+    max_age_seconds?: number;
     success_values?: Array<string | number>;
     pending_values?: Array<string | number>;
     failed_values?: Array<string | number>;

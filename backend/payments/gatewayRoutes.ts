@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { getSupabase } from '../supabaseClient.js';
 import { Audit } from '../security/audit.js';
 import { UUID } from '../../services/utils.js';
-import { FinancialPartnerMetadata, ProviderGroup } from '../../types.js';
+import { normalizeFinancialPartnerMetadata, resolveProviderGroup } from './financialPartnerMetadata.js';
 import { GatewayService } from './gatewayService.js';
 import { settlementLifecycleManager } from './settlementLifecycleManager.js';
 import { settlementScheduler } from './settlementScheduler.js';
@@ -79,65 +79,6 @@ function getGatewayActor(req: Request): GatewayActor | null {
   };
 }
 
-function resolveProviderGroup(partner: any): ProviderGroup {
-  const metadataGroup = String(
-    partner?.provider_metadata?.group ||
-      partner?.provider_metadata?.provider_group ||
-      partner?.provider_metadata?.category ||
-      '',
-  )
-    .trim()
-    .toLowerCase();
-  const type = String(partner?.type || '')
-    .trim()
-    .toLowerCase();
-
-  if (metadataGroup === 'mobile' || metadataGroup === 'mobile_money') {
-    return 'Mobile';
-  }
-  if (metadataGroup === 'bank' || metadataGroup === 'banking') {
-    return 'Bank';
-  }
-  if (
-    metadataGroup === 'gateway' ||
-    metadataGroup === 'gateways' ||
-    metadataGroup === 'processor' ||
-    metadataGroup === 'payment_gateway'
-  ) {
-    return 'Gateways';
-  }
-  if (metadataGroup === 'crypto') {
-    return 'Crypto';
-  }
-
-  if (type === 'mobile_money') return 'Mobile';
-  if (type === 'bank') return 'Bank';
-  if (type === 'crypto') return 'Crypto';
-
-  return 'Gateways';
-}
-
-function normalizeProviderMetadata(partner: any): FinancialPartnerMetadata {
-  const metadata = (partner?.provider_metadata || {}) as FinancialPartnerMetadata;
-  return {
-    ...metadata,
-    group: resolveProviderGroup(partner),
-    brand_name:
-      metadata.brand_name ||
-      metadata.display_name ||
-      partner?.name ||
-      '',
-    display_icon:
-      metadata.display_icon ||
-      metadata.icon ||
-      partner?.icon ||
-      '',
-    color: metadata.color || partner?.color || '',
-    channels: Array.isArray(metadata.channels) ? metadata.channels : [],
-    checkout_mode: metadata.checkout_mode || 'server_to_server',
-  };
-}
-
 router.get('/gateway/providers', async (_req: Request, res: Response) => {
   try {
     const sb = getSupabase();
@@ -154,33 +95,25 @@ router.get('/gateway/providers', async (_req: Request, res: Response) => {
 
     res.json({
       success: true,
-      providers: (partners || []).map((partner: any) => ({
-        id: partner.id,
-        name: partner.name,
-        brandName:
-          partner.provider_metadata?.brand_name ||
-          partner.provider_metadata?.display_name ||
-          partner.name,
-        type: partner.type || 'card',
-        group: resolveProviderGroup(partner),
-        logicType: partner.logic_type || 'REGISTRY',
-        status: partner.status,
-        supportedCurrencies: partner.supported_currencies || [],
-        icon:
-          partner.provider_metadata?.display_icon ||
-          partner.provider_metadata?.icon ||
-          partner.icon ||
-          null,
-        color: partner.provider_metadata?.color || partner.color || null,
-        checkoutMode:
-          partner.provider_metadata?.checkout_mode || 'server_to_server',
-        channels: Array.isArray(partner.provider_metadata?.channels)
-          ? partner.provider_metadata.channels
-          : [],
-        sortOrder:
-          Number(partner.provider_metadata?.sort_order) || 0,
-        metadata: normalizeProviderMetadata(partner),
-      })),
+      providers: (partners || []).map((partner: any) => {
+        const metadata = normalizeFinancialPartnerMetadata(partner);
+        return {
+          id: partner.id,
+          name: partner.name,
+          brandName: metadata.brand_name || partner.name,
+          type: partner.type || 'card',
+          group: resolveProviderGroup(partner, metadata),
+          logicType: partner.logic_type || 'REGISTRY',
+          status: partner.status,
+          supportedCurrencies: partner.supported_currencies || [],
+          icon: metadata.display_icon || metadata.icon || partner.icon || null,
+          color: metadata.color || partner.color || null,
+          checkoutMode: metadata.checkout_mode || 'server_to_server',
+          channels: metadata.channels || [],
+          sortOrder: Number(metadata.sort_order) || 0,
+          metadata,
+        };
+      }),
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -208,7 +141,7 @@ router.post('/gateway/payment/initiate', async (req: Request, res: Response) => 
     if (partnerError) throw partnerError;
     if (!partner) return res.status(404).json({ error: 'Provider not found or inactive' });
 
-    const authorization = await gatewayService.initiateStkPush(
+    const authorization = await gatewayService.initiateCollection(
       partner,
       paymentMethodId,
       amount,
@@ -628,7 +561,18 @@ router.post('/webhooks/gateway/:providerId', async (req: Request, res: Response)
       undefined;
 
     console.info(`[GatewayWebhook] Received webhook from ${providerId}`);
-    await Webhooks.handleCallback(req.body, providerId, signatureHeader, undefined, eventId);
+    await Webhooks.handleCallback(req.body, providerId, {
+      signature: signatureHeader,
+      rawPayload: (req as any).rawBody,
+      explicitEventId: eventId,
+      headers: Object.fromEntries(
+        Object.entries(req.headers).map(([key, value]) => [
+          key,
+          Array.isArray(value) ? value.join(',') : value ? String(value) : undefined,
+        ]),
+      ),
+      sourceIp: req.ip,
+    });
     res.json({ success: true, provider: providerId });
   } catch (error: any) {
     res.status(400).json({ error: error.message });

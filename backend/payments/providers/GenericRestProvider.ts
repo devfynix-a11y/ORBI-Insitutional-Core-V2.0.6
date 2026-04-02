@@ -1,77 +1,83 @@
-
 import {
     FinancialPartner,
+    MoneyOperation,
     ProviderCallbackConfig,
-    ProviderRegistryConfig,
     RestEndpointConfig,
 } from '../../../types.js';
-import { IPaymentProvider, ProviderCallbackResult, ProviderResponse } from './types.js';
-import { DataVault } from '../../security/encryption.js';
-import { MerchantFabric } from './MerchantFabric.js';
+import {
+    IProviderAdapter,
+    ProviderCallbackResult,
+    ProviderExecutionRequest,
+    ProviderExecutionResponse,
+} from './types.js';
+import { providerTokenService } from './ProviderTokenService.js';
+import { providerSecretVault } from './ProviderSecretVault.js';
+import {
+    assertAuthConfig,
+    assertCallbackConfig,
+    assertOperationConfig,
+    assertProviderRegistry,
+    resolveOperationServiceKey,
+    resolveProviderBaseUrl,
+} from './ProviderRegistryAdapter.js';
+import { providerCapabilityService } from '../ProviderCapabilityService.js';
 
-/**
- * UNIVERSAL REST ADAPTER (V2.0)
- * ----------------------------
- * Handles standard providers via DB-defined JSON mappings.
- * Supports dynamic payload templating and endpoint configuration.
- */
-export class GenericRestProvider implements IPaymentProvider {
+export class GenericRestProvider implements IProviderAdapter {
     private readonly timeoutMs = Number(process.env.ORBI_PROVIDER_TIMEOUT_MS || 15000);
     private readonly allowInsecureProviderUrls =
         process.env.NODE_ENV !== 'production' &&
         process.env.ORBI_ALLOW_INSECURE_PROVIDER_URLS === 'true';
 
     private async resolvePartner(partner: FinancialPartner): Promise<FinancialPartner> {
-        const translated = await DataVault.translate({
+        const resolved: FinancialPartner = {
             ...partner,
-            mapping_config: partner.mapping_config ?? {},
-            provider_metadata: partner.provider_metadata ?? {},
-        });
-        return translated as FinancialPartner;
+            mapping_config: partner.mapping_config ? structuredClone(partner.mapping_config) : {},
+            provider_metadata: partner.provider_metadata ? structuredClone(partner.provider_metadata) : {},
+            client_secret: undefined,
+            connection_secret: undefined,
+            webhook_secret: undefined,
+            token_cache: undefined,
+        };
+        resolved.connection_secret = await providerSecretVault.resolvePartnerSecret(partner, 'connection_secret', 'api_key');
+        resolved.client_secret = await providerSecretVault.resolvePartnerSecret(partner, 'client_secret', 'access_token');
+        resolved.webhook_secret = await providerSecretVault.resolvePartnerSecret(partner, 'webhook_secret');
+        if (partner.token_cache) {
+            resolved.token_cache = await providerSecretVault.unwrapSecret(partner.token_cache);
+        }
+        return resolved;
     }
 
-    private getRegistry(partner: FinancialPartner): ProviderRegistryConfig {
-        return (partner.mapping_config || {}) as ProviderRegistryConfig;
-    }
-
-    private resolveServiceRoot(registry: ProviderRegistryConfig, service?: string): string | undefined {
+    private resolveServiceRoot(registry: ReturnType<typeof assertProviderRegistry>, service?: string): string | undefined {
         if (service && registry.service_roots?.[service]) {
             return registry.service_roots[service];
         }
         return registry.service_root;
     }
 
-    private getOperationConfig(
-        registry: ProviderRegistryConfig,
-        operation: string,
-        fallback?: RestEndpointConfig,
-    ): RestEndpointConfig | undefined {
-        return registry.operations?.[operation as keyof NonNullable<ProviderRegistryConfig['operations']>] || fallback;
+    public getCapabilities(partner: FinancialPartner) {
+        return providerCapabilityService.describe(partner);
     }
 
     public async authenticate(partner: FinancialPartner): Promise<string> {
         const resolvedPartner = await this.resolvePartner(partner);
-        const registry = this.getRegistry(resolvedPartner);
-        const authConfig = registry.auth;
+        const registry = assertProviderRegistry(resolvedPartner);
 
-        if (resolvedPartner.token_cache && resolvedPartner.token_expiry && resolvedPartner.token_expiry > Date.now()) {
-            const cached = typeof resolvedPartner.token_cache === 'string'
-                ? resolvedPartner.token_cache
-                : await DataVault.decrypt(resolvedPartner.token_cache);
-            if (typeof cached === 'string' && cached.trim().length > 0) {
-                return cached;
-            }
+        const cachedToken = await providerTokenService.getCachedToken(resolvedPartner);
+        if (cachedToken?.token) {
+            return cachedToken.token;
         }
 
-        if (!authConfig || authConfig.type === 'none') {
+        if (registry.auth?.type === 'none') {
             return '';
         }
 
+        const authConfig = assertAuthConfig(resolvedPartner);
+
         if (authConfig.type === 'oauth2_client_credentials') {
-        const response = await this.executeRequest(authConfig, {
+            const response = await this.executeRequest(authConfig, {
                 partner: resolvedPartner,
                 registry,
-                serviceRoot: this.resolveServiceRoot(registry, 'auth'),
+                serviceRoot: this.resolveServiceRoot(registry, resolveOperationServiceKey('AUTH')),
             });
             const token =
                 typeof response.external_id === 'string' && response.external_id.trim().length > 0
@@ -85,70 +91,96 @@ export class GenericRestProvider implements IPaymentProvider {
                     authConfig.cache_ttl_seconds ||
                     3600,
             );
-            await MerchantFabric.updatePartnerToken(resolvedPartner.id, token, expiresIn);
+            await providerTokenService.cacheToken(resolvedPartner.id, token, expiresIn);
             return token;
         }
 
-        const secrets = resolvedPartner.provider_metadata?.secrets || {};
-        const connectionSecret = resolvedPartner.connection_secret || secrets.connection_secret || secrets.api_key;
-        if (typeof connectionSecret === 'string' && connectionSecret.trim().length > 0) {
-            return connectionSecret;
-        }
-
-        const clientSecret = resolvedPartner.client_secret || secrets.client_secret || secrets.access_token;
-        if (typeof clientSecret === 'string' && clientSecret.trim().length > 0) {
-            return clientSecret;
+        const staticToken = await providerTokenService.resolveStaticToken(resolvedPartner);
+        if (staticToken) {
+            return staticToken;
         }
 
         throw new Error('GENERIC_PROVIDER_CREDENTIALS_MISSING');
     }
 
-    public async stkPush(partner: FinancialPartner, phone: string, amount: number, reference: string): Promise<ProviderResponse> {
+    public async execute(partner: FinancialPartner, request: ProviderExecutionRequest): Promise<ProviderExecutionResponse> {
         const resolvedPartner = await this.resolvePartner(partner);
-        const registry = this.getRegistry(resolvedPartner);
-        const config = this.getOperationConfig(registry, 'COLLECTION_REQUEST', registry.stk_push);
-        if (!config) throw new Error("STK_PUSH_CONFIG_MISSING");
-
-        const context = await this.buildContext(resolvedPartner, { phone, amount, reference });
+        const registry = assertProviderRegistry(resolvedPartner);
+        const config = assertOperationConfig(resolvedPartner, request.operation);
+        const context = await this.buildContext(resolvedPartner, {
+            phone: request.phone,
+            amount: request.amount,
+            reference: request.reference,
+            currency: request.currency,
+            account_number: request.accountNumber,
+            destination_tag: request.destinationTag,
+            external_reference: request.externalReference,
+            metadata: request.metadata || {},
+            idempotency_key: request.idempotencyKey,
+        });
         const response = await this.executeRequest(config, {
             ...context,
-            serviceRoot: this.resolveServiceRoot(registry, 'stk_push'),
+            serviceRoot: this.resolveServiceRoot(registry, resolveOperationServiceKey(request.operation)),
         });
+
+        if (request.operation === 'BALANCE_INQUIRY') {
+            let balance = 0;
+            if (config.response_mapping?.balance_field) {
+                balance = Number(this.getValueByPath(response.raw, config.response_mapping.balance_field)) || 0;
+            }
+            return {
+                success: true,
+                providerRef: response.external_id || request.reference,
+                status: 'completed',
+                message: response.message || 'Balance retrieved successfully.',
+                rawPayload: response.raw,
+                balance,
+                metadata: { operation: request.operation },
+            };
+        }
 
         return {
             success: true,
-            providerRef: response.external_id || `GEN-${Math.random().toString(36).substring(7).toUpperCase()}`,
-            message: response.status || `Generic request sent to ${partner.name}.`,
-            rawPayload: response.raw
+            providerRef:
+                response.external_id ||
+                request.reference ||
+                `GEN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+            status: this.normalizeExecutionStatus(response.status),
+            message: response.message || `Provider request accepted by ${resolvedPartner.name}.`,
+            externalId: response.external_id,
+            rawPayload: response.raw,
+            metadata: {
+                operation: request.operation,
+                reference: request.reference,
+            },
         };
     }
 
-    public async disburse(partner: FinancialPartner, phone: string, amount: number, reference: string): Promise<ProviderResponse> {
-        const resolvedPartner = await this.resolvePartner(partner);
-        const registry = this.getRegistry(resolvedPartner);
-        const config = this.getOperationConfig(registry, 'DISBURSEMENT_REQUEST', registry.disbursement);
-        if (!config) throw new Error("DISBURSEMENT_CONFIG_MISSING");
-
-        const context = await this.buildContext(resolvedPartner, { phone, amount, reference });
-        const response = await this.executeRequest(config, {
-            ...context,
-            serviceRoot: this.resolveServiceRoot(registry, 'disbursement'),
+    public async stkPush(partner: FinancialPartner, phone: string, amount: number, reference: string): Promise<ProviderExecutionResponse> {
+        return this.execute(partner, {
+            operation: 'COLLECTION_REQUEST',
+            phone,
+            amount,
+            reference,
         });
+    }
 
-        return {
-            success: true,
-            providerRef: response.external_id || `GEN-PAY-${Math.random().toString(36).substring(7).toUpperCase()}`,
-            message: response.status || "Disbursement processed via Generic REST node.",
-            rawPayload: response.raw
-        };
+    public async disburse(partner: FinancialPartner, phone: string, amount: number, reference: string): Promise<ProviderExecutionResponse> {
+        return this.execute(partner, {
+            operation: 'DISBURSEMENT_REQUEST',
+            phone,
+            amount,
+            reference,
+        });
     }
 
     public parseCallback(
         payload: any,
         partner?: FinancialPartner,
+        context?: { headers?: Record<string, string | undefined> },
     ): ProviderCallbackResult {
         const resolvedPartner = partner || ({} as FinancialPartner);
-        const callbackConfig = this.getRegistry(resolvedPartner).callback || {};
+        const callbackConfig = assertCallbackConfig(resolvedPartner);
         const reference =
             this.readMappedValue(payload, callbackConfig.reference_field) ||
             payload?.reference ||
@@ -181,30 +213,23 @@ export class GenericRestProvider implements IPaymentProvider {
     }
 
     public async getBalance(partner: FinancialPartner): Promise<number> {
-        const resolvedPartner = await this.resolvePartner(partner);
-        const registry = this.getRegistry(resolvedPartner);
-        const config = this.getOperationConfig(registry, 'BALANCE_INQUIRY', registry.balance);
-        if (!config) {
-            console.warn(`[GenericRestProvider] Balance config missing for ${resolvedPartner.name}`);
-            return 0;
-        }
-
-        const context = await this.buildContext(resolvedPartner);
-        const response = await this.executeRequest(config, {
-            ...context,
-            serviceRoot: this.resolveServiceRoot(registry, 'balance'),
+        const response = await this.execute(partner, {
+            operation: 'BALANCE_INQUIRY',
+            reference: `balance-${partner.id}`,
         });
-        
-        if (config.response_mapping?.balance_field) {
-            const balance = this.getValueByPath(response.raw, config.response_mapping.balance_field);
-            return Number(balance) || 0;
-        }
-        
-        return 0;
+        return Number(response.balance || 0);
+    }
+
+    private normalizeExecutionStatus(status?: string): ProviderExecutionResponse['status'] {
+        const normalized = String(status || '').trim().toLowerCase();
+        if (['success', 'successful', 'completed', 'complete', 'ok'].includes(normalized)) return 'completed';
+        if (['pending', 'queued'].includes(normalized)) return 'pending';
+        if (['processing', 'in_progress'].includes(normalized)) return 'processing';
+        if (['failed', 'rejected', 'declined', 'error'].includes(normalized)) return 'failed';
+        return 'accepted';
     }
 
     private async executeRequest(config: RestEndpointConfig, context: any): Promise<any> {
-        // 1. Resolve Endpoint
         const url = this.resolveAbsoluteUrl(
             this.resolveTemplate(config.url, context),
             context.partner,
@@ -212,17 +237,13 @@ export class GenericRestProvider implements IPaymentProvider {
         );
         this.assertTrustedProviderUrl(url);
 
-        // 2. Resolve Headers
         const headers = this.resolveHeaders(config.headers || {}, context);
         headers['Accept'] ??= 'application/json';
 
-        // 3. Resolve Payload
-        const body = config.payload_template 
+        const body = config.payload_template
             ? JSON.stringify(this.resolveObject(config.payload_template, context))
             : undefined;
 
-        console.log(`[GenericRestProvider] Executing ${config.method} ${url}`);
-        
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
         try {
@@ -236,7 +257,10 @@ export class GenericRestProvider implements IPaymentProvider {
             const responseData = rawText ? JSON.parse(rawText) : {};
 
             if (!response.ok) {
-                throw new Error(responseData.message || `HTTP Error ${response.status}: ${response.statusText}`);
+                const error: any = new Error(responseData.message || `HTTP Error ${response.status}: ${response.statusText}`);
+                error.statusCode = response.status;
+                error.rawPayload = responseData;
+                throw error;
             }
 
             if (config.response_mapping) {
@@ -244,14 +268,11 @@ export class GenericRestProvider implements IPaymentProvider {
                     external_id: this.readMappedValue(responseData, config.response_mapping.id_field),
                     status: this.readMappedValue(responseData, config.response_mapping.status_field),
                     message: this.readMappedValue(responseData, config.response_mapping.message_field),
-                    raw: responseData
+                    raw: responseData,
                 };
             }
 
             return { raw: responseData };
-        } catch (error) {
-            console.error(`[GenericRestProvider] Error:`, error);
-            throw error;
         } finally {
             clearTimeout(timeout);
         }
@@ -262,7 +283,7 @@ export class GenericRestProvider implements IPaymentProvider {
         extra: Record<string, any> = {},
     ): Promise<Record<string, any>> {
         const resolvedPartner = await this.resolvePartner(partner);
-        const registry = this.getRegistry(resolvedPartner);
+        const registry = assertProviderRegistry(resolvedPartner);
         const authType = registry.auth?.type || 'api_key';
         const accessToken =
             authType === 'none' ? '' : await this.authenticate(resolvedPartner).catch(() => '');
@@ -305,10 +326,7 @@ export class GenericRestProvider implements IPaymentProvider {
 
     private resolveAbsoluteUrl(url: string, partner: FinancialPartner, serviceRoot?: string): string {
         if (/^https?:\/\//i.test(url)) return url;
-        const baseUrl = serviceRoot?.trim() || partner.api_base_url?.trim();
-        if (!baseUrl) {
-            throw new Error('PROVIDER_BASE_URL_MISSING');
-        }
+        const baseUrl = serviceRoot?.trim() || resolveProviderBaseUrl(partner, assertProviderRegistry(partner));
         return new URL(url, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`).toString();
     }
 
@@ -360,7 +378,7 @@ export class GenericRestProvider implements IPaymentProvider {
             const match = template.match(/^\{\{(.*?)\}\}$/);
             if (match) {
                 const value = this.getValueByPath(context, match[1].trim());
-                return value !== undefined ? value : template; 
+                return value !== undefined ? value : template;
             }
             return this.resolveTemplate(template, context);
         } else if (Array.isArray(template)) {

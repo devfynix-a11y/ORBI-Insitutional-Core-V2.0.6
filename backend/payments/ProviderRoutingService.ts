@@ -4,9 +4,17 @@ import {
     FinancialPartner,
     MoneyOperation,
     ProviderResolutionInput,
+    ProviderRoutingDecision,
     RailType,
     ResolvedProviderConfig,
 } from '../../types.js';
+import { normalizeFinancialPartnerMetadata, resolveProviderCode } from './financialPartnerMetadata.js';
+import {
+    assertProviderRegistry,
+    resolveOperationConfig,
+    resolveOperationServiceKey,
+    resolveProviderBaseUrl,
+} from './providers/ProviderRegistryAdapter.js';
 
 function normalizeRail(value?: string): RailType | undefined {
     const normalized = String(value || '').trim().toUpperCase();
@@ -57,7 +65,13 @@ export class ProviderRoutingService {
 
         const routed = await this.resolveViaRoutingRules(sb, input);
         if (routed) {
-            const resolved = this.toResolvedProviderConfig(routed, input.operation);
+            const resolved = this.toResolvedProviderConfig(routed.partner, input.operation, this.buildDecision({
+                input,
+                partner: routed.partner,
+                source: 'routing_rule',
+                ruleId: routed.ruleId,
+                priority: routed.priority,
+            }));
             this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: resolved });
             if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
                 try {
@@ -91,14 +105,11 @@ export class ProviderRoutingService {
             throw new Error(`PROVIDER_ROUTE_NOT_FOUND:${input.rail}:${input.operation}`);
         }
 
-        const operationConfig = partner.mapping_config?.operations?.[input.operation];
-        const baseUrl =
-            partner.mapping_config?.service_roots?.[this.operationToServiceKey(input.operation)] ||
-            partner.mapping_config?.service_root ||
-            partner.api_base_url ||
-            undefined;
-
-        const resolved = this.toResolvedProviderConfig(partner, input.operation);
+        const resolved = this.toResolvedProviderConfig(
+            partner,
+            input.operation,
+            this.buildDecision({ input, partner, source: 'registry_fallback' }),
+        );
         this.cache.set(cacheKey, { expiresAt: Date.now() + this.cacheTtlMs, data: resolved });
         if (redis && process.env.ORBI_DISABLE_REDIS_CACHE !== 'true') {
             try {
@@ -121,10 +132,13 @@ export class ProviderRoutingService {
         });
     }
 
-    private async resolveViaRoutingRules(sb: any, input: ProviderResolutionInput): Promise<FinancialPartner | null> {
+    private async resolveViaRoutingRules(
+        sb: any,
+        input: ProviderResolutionInput,
+    ): Promise<{ partner: FinancialPartner; ruleId?: string; priority?: number } | null> {
         let routingQuery = sb
             .from('provider_routing_rules')
-            .select('priority, country_code, currency, provider_id, financial_partners(*)')
+            .select('id, priority, country_code, currency, provider_id, financial_partners(*)')
             .eq('rail', input.rail)
             .eq('operation_code', input.operation)
             .eq('status', 'ACTIVE')
@@ -151,30 +165,31 @@ export class ProviderRoutingService {
         }
 
         const candidates = (data || [])
-            .map((row: any) => row.financial_partners)
-            .filter(Boolean) as FinancialPartner[];
+            .map((row: any) => ({
+                partner: row.financial_partners as FinancialPartner,
+                ruleId: row.id as string | undefined,
+                priority: row.priority as number | undefined,
+            }))
+            .filter((row: any) => row.partner);
 
-        const filtered = candidates.filter((partner) => this.matchesResolutionInput(partner, input));
+        const filtered = candidates.filter((row: any) => this.matchesResolutionInput(row.partner, input));
         return filtered[0] || null;
     }
 
-    private toResolvedProviderConfig(partner: FinancialPartner, operation: MoneyOperation): ResolvedProviderConfig {
-        const operationConfig = partner.mapping_config?.operations?.[operation];
-        const baseUrl =
-            partner.mapping_config?.service_roots?.[this.operationToServiceKey(operation)] ||
-            partner.mapping_config?.service_root ||
-            partner.api_base_url ||
-            undefined;
+    private toResolvedProviderConfig(
+        partner: FinancialPartner,
+        operation: MoneyOperation,
+        routingDecision?: ProviderRoutingDecision,
+    ): ResolvedProviderConfig {
+        const registry = assertProviderRegistry(partner);
+        const operationConfig = resolveOperationConfig(registry, operation);
+        const baseUrl = resolveProviderBaseUrl(partner, registry, operation);
 
         return {
             providerId: partner.id,
-            providerCode: String(
-                partner.provider_metadata?.provider_code ||
-                partner.provider_metadata?.brand_name ||
-                partner.name,
-            ),
+            providerCode: resolveProviderCode(partner),
             providerName: partner.name,
-            rail: normalizeRail(String(partner.provider_metadata?.rail || '')) || fallbackRailFromPartner(partner),
+            rail: normalizeRail(String(normalizeFinancialPartnerMetadata(partner).rail || '')) || fallbackRailFromPartner(partner),
             operation,
             authType: partner.logic_type,
             baseUrl,
@@ -184,32 +199,31 @@ export class ProviderRoutingService {
             extraConfig: {
                 partnerType: partner.type,
                 supportedCurrencies: partner.supported_currencies || [],
-                providerMetadata: partner.provider_metadata || {},
+                providerMetadata: normalizeFinancialPartnerMetadata(partner),
             },
+            routingDecision,
         };
     }
 
     private matchesResolutionInput(partner: FinancialPartner, input: ProviderResolutionInput): boolean {
+        const metadata = normalizeFinancialPartnerMetadata(partner);
+        const registry = assertProviderRegistry(partner);
         if (input.preferredProviderCode) {
-            const code = String(
-                partner.provider_metadata?.provider_code ||
-                partner.provider_metadata?.brand_name ||
-                partner.name,
-            ).trim().toUpperCase();
+            const code = resolveProviderCode(partner).trim().toUpperCase();
             if (code !== String(input.preferredProviderCode).trim().toUpperCase()) {
                 return false;
             }
         }
 
-        const rail = normalizeRail(String(partner.provider_metadata?.rail || '')) || fallbackRailFromPartner(partner);
+        const rail = normalizeRail(String(metadata.rail || '')) || fallbackRailFromPartner(partner);
         if (rail !== input.rail) return false;
 
-        const operations = (partner.provider_metadata?.operations || []) as Array<MoneyOperation | string>;
+        const operations = (metadata.operations || []) as Array<MoneyOperation | string>;
         if (operations.length > 0 && !operations.map((value) => String(value).trim().toUpperCase()).includes(input.operation)) {
             return false;
         }
 
-        const countryCodes = (partner.provider_metadata?.countries || []) as string[];
+        const countryCodes = (metadata.countries || []) as string[];
         if (input.countryCode && countryCodes.length > 0) {
             const requestedCountry = String(input.countryCode).trim().toUpperCase();
             if (!countryCodes.map((code) => String(code).trim().toUpperCase()).includes(requestedCountry)) {
@@ -225,11 +239,11 @@ export class ProviderRoutingService {
             }
         }
 
-        if (input.operation && partner.mapping_config?.operations && !partner.mapping_config.operations[input.operation]) {
+        if (input.operation && !resolveOperationConfig(registry, input.operation)) {
             const fallbackAllowed =
-                (input.operation === 'COLLECTION_REQUEST' && partner.mapping_config.stk_push) ||
-                (input.operation === 'DISBURSEMENT_REQUEST' && partner.mapping_config.disbursement) ||
-                (input.operation === 'BALANCE_INQUIRY' && partner.mapping_config.balance);
+                (input.operation === 'COLLECTION_REQUEST' && registry.stk_push) ||
+                (input.operation === 'DISBURSEMENT_REQUEST' && registry.disbursement) ||
+                (input.operation === 'BALANCE_INQUIRY' && registry.balance);
             if (!fallbackAllowed) return false;
         }
 
@@ -237,19 +251,34 @@ export class ProviderRoutingService {
     }
 
     private resolvePriority(partner: FinancialPartner, operation: MoneyOperation): number {
-        const metadataPriority = Number(partner.provider_metadata?.routing_priority);
-        const operationPriority = Number((partner.mapping_config as any)?.routing?.[operation]?.priority);
+        const metadataPriority = Number(normalizeFinancialPartnerMetadata(partner).routing_priority);
+        const operationPriority = Number((assertProviderRegistry(partner) as any)?.routing?.[operation]?.priority);
         if (Number.isFinite(operationPriority)) return operationPriority;
         if (Number.isFinite(metadataPriority)) return metadataPriority;
         return 100;
     }
 
-    private operationToServiceKey(operation: MoneyOperation): string {
-        if (operation === 'COLLECTION_REQUEST') return 'stk_push';
-        if (operation === 'DISBURSEMENT_REQUEST') return 'disbursement';
-        if (operation === 'BALANCE_INQUIRY') return 'balance';
-        if (operation === 'AUTH') return 'auth';
-        return operation.toLowerCase();
+    private buildDecision(params: {
+        input: ProviderResolutionInput;
+        partner: FinancialPartner;
+        source: ProviderRoutingDecision['source'];
+        ruleId?: string;
+        priority?: number;
+    }): ProviderRoutingDecision {
+        return {
+            providerId: params.partner.id,
+            providerCode: resolveProviderCode(params.partner),
+            rail: params.input.rail,
+            operation: params.input.operation,
+            source: params.source,
+            ruleId: params.ruleId,
+            priority: params.priority,
+            countryCode: params.input.countryCode,
+            currency: params.input.currency,
+            preferredProviderCode: params.input.preferredProviderCode,
+            preferredProviderId: params.input.preferredProviderId,
+            resolvedAt: new Date().toISOString(),
+        };
     }
 }
 

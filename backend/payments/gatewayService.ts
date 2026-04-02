@@ -1,51 +1,65 @@
-
-import { FinancialPartner } from '../../types.js';
+import { FinancialPartner, ProviderResolutionInput } from '../../types.js';
+import { providerSelectionService } from './ProviderSelectionService.js';
 import { ProviderFactory } from './providers/ProviderFactory.js';
+import { toProviderDomainError } from './providers/ProviderErrorNormalizer.js';
+import { providerRetryPolicy } from './providers/ProviderRetryPolicy.js';
 
-/**
- * ORBI EXTERNAL GATEWAY SERVICE (V3.0)
- * ------------------------------
- * Orchestrator node using provider-registry driven execution.
- */
 export class GatewayService {
-    
-    /**
-     * INITIATE STK PUSH (CASH-IN)
-     */
-    public async initiateStkPush(partner: FinancialPartner, phone: string, amount: number, reference: string) {
-        // ProviderFactory now resolves the registry-backed adapter for this partner.
+    public async initiateCollection(partner: FinancialPartner, phone: string, amount: number, reference: string) {
         const providerNode = ProviderFactory.getProvider(partner);
-        
-        const response = await providerNode.stkPush(partner, phone, amount, reference);
-        
+        const response = await providerRetryPolicy.execute(
+            partner,
+            'COLLECTION_REQUEST',
+            () => providerNode.execute(partner, {
+                operation: 'COLLECTION_REQUEST',
+                phone,
+                amount,
+                reference,
+            }),
+        );
+
         if (!response.success) {
-            throw new Error(`PROVIDER_REJECTION: ${response.message}`);
+            throw toProviderDomainError(new Error(`PROVIDER_REJECTION: ${response.message}`), partner);
         }
 
         return {
             success: true,
             provider_ref: response.providerRef,
-            message: response.message
+            message: response.message,
+            status: response.status,
         };
     }
 
-    /**
-     * DISBURSEMENT (CASH-OUT / B2C)
-     */
+    public async initiateStkPush(partner: FinancialPartner, phone: string, amount: number, reference: string) {
+        return this.initiateCollection(partner, phone, amount, reference);
+    }
+
     public async processPayout(partner: FinancialPartner, phone: string, amount: number, reference: string) {
         const providerNode = ProviderFactory.getProvider(partner);
-        
-        const response = await providerNode.disburse(partner, phone, amount, reference);
-        
+        const response = await providerRetryPolicy.execute(
+            partner,
+            'DISBURSEMENT_REQUEST',
+            () => providerNode.execute(partner, {
+                operation: 'DISBURSEMENT_REQUEST',
+                phone,
+                amount,
+                reference,
+            }),
+        );
+
         if (!response.success) {
-            throw new Error(`DISBURSEMENT_REJECTED: ${response.message}`);
+            throw toProviderDomainError(new Error(`DISBURSEMENT_REJECTED: ${response.message}`), partner);
         }
 
         return {
             success: true,
             provider_ref: response.providerRef,
-            status: 'PROCESSING'
+            status: response.status.toUpperCase(),
         };
+    }
+
+    public async resolveSelection(input: ProviderResolutionInput) {
+        return providerSelectionService.select(input);
     }
 }
 

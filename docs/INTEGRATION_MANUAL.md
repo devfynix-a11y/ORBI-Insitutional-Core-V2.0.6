@@ -1494,7 +1494,7 @@ Use the `id` from Step 1 to construct the callback URL you provide to the partne
 When a request hits this URL:
 1.  The system looks up the partner by the UUID in the URL.
 2.  It retrieves the `connection_secret` (`sec_mpesa_tz_839204`).
-3.  It loads the specific provider logic based on the name (e.g., `MpesaProvider`).
+3.  It resolves the registry-backed provider configuration from `financial_partners` and `mapping_config`.
 4.  It verifies the request signature using the secret.
 
 > **CRITICAL**: If the UUID in the URL does not exist or the signature fails, the request is rejected with `403 Forbidden`.
