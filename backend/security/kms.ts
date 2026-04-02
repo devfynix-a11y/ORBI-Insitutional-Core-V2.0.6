@@ -39,6 +39,30 @@ class SecureKMSService {
         return this.keyMaterial.get(id) || null;
     }
 
+    private validateSingleActiveKeyPerType(dbKeys: any[]) {
+        const activeByType = new Map<KeyType, any[]>();
+
+        for (const dbKey of dbKeys || []) {
+            if (dbKey?.status !== 'ACTIVE') continue;
+            const keyType = dbKey.type as KeyType;
+            const existing = activeByType.get(keyType) || [];
+            existing.push(dbKey);
+            activeByType.set(keyType, existing);
+        }
+
+        for (const [type, activeKeys] of activeByType.entries()) {
+            if (activeKeys.length <= 1) continue;
+
+            const keyIds = activeKeys.map((key) => key.key_id);
+            kmsLogger.fatal('kms.multiple_active_keys_detected', {
+                key_type: type,
+                key_ids: keyIds,
+                active_key_count: activeKeys.length,
+            });
+            throw new Error(`[KMS] Multiple ACTIVE keys detected for ${type}: ${keyIds.join(', ')}`);
+        }
+    }
+
     private async getWrappingKey(secret: string): Promise<CryptoKey> {
         const encoder = new TextEncoder();
         const masterKeyMaterial = await crypto.subtle.importKey(
@@ -137,6 +161,8 @@ class SecureKMSService {
                 return await this.initDeterministic(primaryKeyMaterial);
             }
 
+            this.validateSingleActiveKeyPerType(dbKeys || []);
+
             const types: KeyType[] = ['AUTH', 'ENCRYPTION', 'SECRET_WRAPPING', 'SYSTEM', 'SIGNING'];
             const primaryWrappingKey = await this.getWrappingKey(uniqueSecrets[0]);
             
@@ -173,7 +199,12 @@ class SecureKMSService {
                             this.activeKeyIds[dbKey.type as KeyType] = dbKey.key_id;
                         }
                     } else {
-                        kmsLogger.error('kms.unwrap_failed', { key_id: dbKey.key_id, key_type: dbKey.type, key_status: dbKey.status });
+                        const unwrapPayload = { key_id: dbKey.key_id, key_type: dbKey.type, key_status: dbKey.status };
+                        if (dbKey.status === 'ACTIVE') {
+                            kmsLogger.error('kms.unwrap_failed', unwrapPayload);
+                        } else {
+                            kmsLogger.warn('kms.unwrap_failed_rotated_key', unwrapPayload);
+                        }
                     }
                 }
             }
