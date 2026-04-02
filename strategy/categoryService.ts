@@ -3,6 +3,7 @@ import { Category } from '../types.js';
 import { Storage, STORAGE_KEYS } from '../backend/storage.js';
 import { getSupabase, createAuthenticatedClient } from '../services/supabaseClient.js';
 import { DataVault } from '../backend/security/encryption.js';
+import { DataProtection } from '../backend/security/DataProtection.js';
 
 export class CategoryService {
     private getDb(token?: string) {
@@ -31,12 +32,12 @@ export class CategoryService {
     private async hydrateCategories(raw: any[]): Promise<Category[]> {
         return await Promise.all(raw.map(async c => ({
             ...c,
-            budget: typeof c.budget === 'string' ? Number(await DataVault.decrypt(c.budget)) : c.budget
+            budget: typeof c.budget === 'string' ? await DataProtection.decryptAmount(c.budget) : c.budget
         })));
     }
 
     async postCategory(c: Category, token?: string) { 
-        const encryptedBudget = await DataVault.encrypt(c.budget);
+        const encryptedBudget = await DataProtection.encryptAmount(Number(c.budget || 0));
         const sb = this.getDb(token);
         if (sb) {
             const { data, error } = await sb
@@ -67,7 +68,7 @@ export class CategoryService {
 
     // Fixed: Added missing updateCategory method
     async updateCategory(c: Category, token?: string) { 
-        const encryptedBudget = await DataVault.encrypt(c.budget);
+        const encryptedBudget = await DataProtection.encryptAmount(Number(c.budget || 0));
         const sb = this.getDb(token);
         if (sb) {
             const { error } = await sb

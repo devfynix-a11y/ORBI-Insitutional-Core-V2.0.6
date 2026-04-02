@@ -4,9 +4,17 @@ import { UUID } from '../../services/utils.js';
 import { getSupabase, getAdminSupabase } from '../supabaseClient.js';
 import { DataVault } from '../security/encryption.js';
 import { Audit } from '../security/audit.js';
+import { DataProtection } from '../security/DataProtection.js';
 
 import { RegulatoryService } from './regulatoryService.js';
 import { TransactionService } from '../../ledger/transactionService.js';
+import {
+    assertSettlementEligible,
+    buildInternalTransferSettlementAppendKey,
+    createBalancePreview,
+    FINANCIAL_INVARIANTS,
+    normalizeFinancialAuthorityError,
+} from './financialInvariants.js';
 import { TransactionStateMachine } from './stateMachine.js';
 import { ReconciliationEngine } from './reconciliationEngine.js';
 import { MonitoringService } from '../infrastructure/MonitoringService.js';
@@ -132,7 +140,7 @@ export class BankingEngineService {
                 // If it's a transfer and not held for review, settle
                 if (initialStatus === 'processing' && statusOverride !== 'held_for_review') {
                     // Fire and forget settlement to avoid blocking the response
-                    this.completeSettlement(txId).catch(err => 
+                    this.completeSettlement(txId, undefined, `engine:auto:${txId}`).catch(err => 
                         console.error(`[BankingEngine] Background Settlement Failed for ${txId}:`, err)
                     );
                 } else if (initialStatus === 'completed') {
@@ -202,7 +210,7 @@ export class BankingEngineService {
             };
 
         } catch (e: any) {
-            const mappedError = txService.normalizeFinancialAuthorityError(e, 'BANKING_ENGINE_PROCESS');
+            const mappedError = normalizeFinancialAuthorityError(e, 'BANKING_ENGINE_PROCESS');
             console.error(`[BankingEngine] Critical Failure: ${mappedError.message}`);
             return { success: false, error: mappedError.message };
         }
@@ -309,14 +317,12 @@ export class BankingEngineService {
 
             intent.metadata = {
                 ...(intent.metadata || {}),
-                balance_preview: {
+                balance_preview: createBalancePreview({
                     available: balanceHint,
                     required: totalDebit,
-                    sufficient: balanceHint >= totalDebit,
-                    wallet_name: walletName,
-                    wallet_id: sourceWalletId,
-                    authoritative: false
-                }
+                    walletName,
+                    walletId: sourceWalletId,
+                }),
             };
 
             if (balanceHint < totalDebit && !intent.isSimulation) {
@@ -576,12 +582,103 @@ export class BankingEngineService {
      * Finalizes a staged internal transfer by moving funds from the 
      * internal transaction wallet to the target operating wallet.
      */
-    public async completeSettlement(txId: string, txData?: any): Promise<boolean> {
+    private async claimInternalTransferSettlement(txId: string, workerId: string) {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) {
+            throw new Error('LEDGER_FAULT: Cloud connectivity required.');
+        }
+
+        const workerClaimId = UUID.generate();
+        const { data, error } = await sb.rpc('claim_internal_transfer_settlement', {
+            p_tx_id: txId,
+            p_worker_id: workerId,
+            p_worker_claim_id: workerClaimId,
+        });
+
+        if (error) {
+            throw normalizeFinancialAuthorityError(error, 'SETTLEMENT_CLAIM');
+        }
+
+        const claim = Array.isArray(data) ? data[0] : data;
+        if (!claim) {
+            throw new Error(`INVALID_SETTLEMENT_STATE: Settlement claim for ${txId} did not return lifecycle data.`);
+        }
+
+        return {
+            appendAlreadyApplied: claim.append_already_applied === true,
+            alreadyCompleted: claim.already_completed === true,
+            appendKey: String(claim.append_key || buildInternalTransferSettlementAppendKey(txId)),
+            appendPhase: String(claim.append_phase || FINANCIAL_INVARIANTS.internalTransferSettlementAppendPhase),
+            workerClaimId: String(claim.worker_claim_id || workerClaimId),
+            transactionStatus: String(claim.transaction_status || ''),
+        };
+    }
+
+    private async finalizeInternalTransferSettlement(
+        txId: string,
+        workerClaimId: string,
+        result: 'COMPLETED' | 'HELD_FOR_REVIEW',
+        note: string,
+        zeroSumValid: boolean,
+    ) {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) {
+            throw new Error('LEDGER_FAULT: Cloud connectivity required.');
+        }
+
+        const { data, error } = await sb.rpc('complete_internal_transfer_settlement', {
+            p_tx_id: txId,
+            p_worker_claim_id: workerClaimId,
+            p_result: result,
+            p_result_note: note,
+            p_zero_sum_valid: zeroSumValid,
+        });
+
+        if (error) {
+            throw normalizeFinancialAuthorityError(error, 'SETTLEMENT_FINALIZE');
+        }
+
+        const completion = Array.isArray(data) ? data[0] : data;
+        if (!completion) {
+            throw new Error(`INVALID_SETTLEMENT_STATE: Settlement completion for ${txId} did not return status data.`);
+        }
+
+        return {
+            previousStatus: String(completion.previous_status || ''),
+            finalStatus: String(completion.final_status || ''),
+            lifecycleStage: String(completion.lifecycle_stage || ''),
+            lifecycleStatus: String(completion.lifecycle_status || ''),
+            alreadyFinalized: completion.already_finalized === true,
+        };
+    }
+
+    private async emitSettlementStatusEffects(txId: string, tx: any, previousStatus: string, finalStatus: TransactionStatus, note: string) {
+        const txService = new TransactionService();
+        await txService.logTransactionEvent(txId, previousStatus || tx?.status || null, finalStatus, 'settlement_worker', { notes: note });
+
+        if (tx?.user_id) {
+            SocketRegistry.notifyTransactionUpdate(tx.user_id, { ...tx, status: finalStatus, status_notes: note });
+        }
+
+        if (finalStatus === 'completed') {
+            TransactionStateMachine.transition(txId, previousStatus as TransactionStatus || 'processing', 'completed', { settlement: true });
+            Audit.log('FINANCIAL', tx?.user_id, 'TRANSACTION_SETTLED', { txId }).catch(() => {});
+            if (tx?.user_id && tx?.wallet_id) {
+                const txServiceForBalance = new TransactionService();
+                const balance = await txServiceForBalance.calculateBalanceFromLedger(tx.wallet_id);
+                SocketRegistry.notifyBalanceUpdate(tx.user_id, tx.wallet_id, balance);
+            }
+            await this.sendTransferNotifications(txId, { ...tx, status: finalStatus, status_notes: note });
+        }
+    }
+
+    public async completeSettlement(txId: string, txData?: any, workerId?: string): Promise<boolean> {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return false;
 
         try {
             const txService = new TransactionService();
+            const settlementWorkerId = workerId || `engine:settlement:${txId}`;
             
             // Use provided txData or fetch from DB
             let tx = txData;
@@ -590,29 +687,14 @@ export class BankingEngineService {
                 tx = data;
             }
 
-            if (!tx) {
-                throw new Error(`INVALID_SETTLEMENT_STATE: Transaction ${txId} was not found for settlement.`);
-            }
-
-            if (tx.status === 'completed') {
+            const claim = await this.claimInternalTransferSettlement(txId, settlementWorkerId);
+            if (claim.alreadyCompleted) {
                 console.info(`[BankingEngine] Settlement already completed for ${txId}.`);
                 return true;
             }
+            assertSettlementEligible({ txId, txExists: !!tx, status: claim.transactionStatus || tx?.status });
 
-            if (tx.status !== 'processing') {
-                throw new Error(`INVALID_SETTLEMENT_STATE: Transaction ${txId} is ${tx.status}, expected processing.`);
-            }
-
-            // CHECK IF ALREADY SETTLED LEGS EXIST TO PREVENT DOUBLE SETTLEMENT
-            const existingLegs = await txService.getLedgerEntries(txId);
-            const hasSettlementLegs = existingLegs.some(l => l.description?.includes('PaySafe Settlement'));
-            if (hasSettlementLegs) {
-                console.info(`[BankingEngine] Settlement already finalized for ${txId}. Updating status.`);
-                await txService.updateTransactionStatus(txId, 'completed', 'Settlement finalized by processor.');
-                return true;
-            }
-
-            const amount = Number(await DataVault.decrypt(tx.amount));
+            const amount = await DataProtection.decryptAmount(tx.amount);
             const targetWalletId = tx.to_wallet_id;
             const currency = tx.currency;
             const targetCurrency = tx.metadata?.target_currency || currency;
@@ -625,16 +707,15 @@ export class BankingEngineService {
                 .eq('vault_role', 'INTERNAL_TRANSFER')
                 .maybeSingle();
 
-            if (!internalVault) {
-                throw new Error(`INVALID_SETTLEMENT_STATE: Transaction ${txId} is missing its internal settlement vault.`);
-            }
+            assertSettlementEligible({ txId, txExists: true, status: tx.status, hasInternalVault: !!internalVault });
+            const settlementVaultId = internalVault!.id;
 
             if (!targetWalletId) throw new Error("SETTLEMENT_ERROR: Missing target wallet.");
 
             const legs: LedgerEntry[] = [
                 {
                     transactionId: txId,
-                    walletId: internalVault.id,
+                    walletId: settlementVaultId,
                     type: 'DEBIT',
                     amount: targetAmount,
                     currency: targetCurrency,
@@ -652,19 +733,22 @@ export class BankingEngineService {
                 }
             ];
 
-            // Post the remaining legs with a strong append marker so settlement cannot be applied twice.
-            try {
-                await txService.addLedgerEntries(txId, legs, {
-                    appendKey: `settlement:${txId}:paysafe_release:v1`,
-                    appendPhase: 'PAYSAFE_SETTLEMENT',
-                });
-            } catch (e: any) {
-                const mappedAppendError = txService.normalizeFinancialAuthorityError(e, 'SETTLEMENT_APPEND');
-                if (mappedAppendError.message.startsWith('IDEMPOTENCY_VIOLATION')) {
-                    console.info(`[BankingEngine] Settlement append already applied for ${txId}. Finalizing status.`);
-                } else {
-                    throw mappedAppendError;
+            if (!claim.appendAlreadyApplied) {
+                try {
+                    await txService.addLedgerEntries(txId, legs, {
+                        appendKey: claim.appendKey,
+                        appendPhase: claim.appendPhase,
+                    });
+                } catch (e: any) {
+                    const mappedAppendError = normalizeFinancialAuthorityError(e, 'SETTLEMENT_APPEND');
+                    if (mappedAppendError.message.startsWith('IDEMPOTENCY_VIOLATION')) {
+                        console.info(`[BankingEngine] Settlement append already applied for ${txId}. Finalizing status.`);
+                    } else {
+                        throw mappedAppendError;
+                    }
                 }
+            } else {
+                console.info(`[BankingEngine] Settlement append marker already exists for ${txId}; skipping duplicate append.`);
             }
             
             // 5. FORENSIC VERIFICATION (Zero-Sum Check)
@@ -682,20 +766,36 @@ export class BankingEngineService {
                     userId: tx.user_id
                 });
 
-                // In a real banking system, we might block settlement or flag for manual review
-                await txService.updateTransactionStatus(txId, 'held_for_review', `Zero-sum violation detected: ${sum}`);
+                await this.finalizeInternalTransferSettlement(
+                    txId,
+                    claim.workerClaimId,
+                    'HELD_FOR_REVIEW',
+                    `Zero-sum violation detected: ${sum}`,
+                    false,
+                );
                 return false;
             }
 
-            // Update status to completed
-            TransactionStateMachine.transition(txId, 'processing', 'completed', { settlement: true });
-            await txService.updateTransactionStatus(txId, 'completed', 'Settlement finalized by processor.');
-            
-            Audit.log('FINANCIAL', tx.user_id, 'TRANSACTION_SETTLED', { txId }).catch(() => {});
+            const completion = await this.finalizeInternalTransferSettlement(
+                txId,
+                claim.workerClaimId,
+                'COMPLETED',
+                'Settlement finalized by processor.',
+                true,
+            );
+
+            if (!completion.alreadyFinalized) {
+                await this.emitSettlementStatusEffects(
+                    txId,
+                    tx,
+                    completion.previousStatus || claim.transactionStatus || 'processing',
+                    'completed',
+                    'Settlement finalized by processor.',
+                );
+            }
             return true;
         } catch (e: any) {
-            const txService = new TransactionService();
-            const mappedError = txService.normalizeFinancialAuthorityError(e, 'SETTLEMENT');
+            const mappedError = normalizeFinancialAuthorityError(e, 'SETTLEMENT');
             console.error(`[BankingEngine] Settlement Failed for ${txId}: ${mappedError.message}`);
             
             // Determine if error is transient
@@ -733,7 +833,7 @@ export class BankingEngineService {
             }
             if (!tx) return;
 
-            const amount = decryptedAmount || Number(await DataVault.decrypt(tx.amount));
+            const amount = decryptedAmount || await DataProtection.decryptAmount(tx.amount);
             const targetAmount = tx.metadata?.fx_details?.finalAmount || amount;
             const targetWalletId = tx.to_wallet_id;
             const fromWalletId = tx.from_wallet_id || tx.walletId;

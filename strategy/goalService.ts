@@ -3,6 +3,7 @@ import { Goal } from '../types.js';
 import { Storage, STORAGE_KEYS } from '../backend/storage.js';
 import { getSupabase, getAdminSupabase, createAuthenticatedClient } from '../services/supabaseClient.js';
 import { DataVault } from '../backend/security/encryption.js';
+import { DataProtection } from '../backend/security/DataProtection.js';
 import { TransactionService } from '../ledger/transactionService.js';
 import { Audit } from '../backend/security/audit.js';
 
@@ -336,7 +337,7 @@ export class GoalService {
         let sourceAmount = Number(tx.amount || 0);
         if (typeof tx.amount === 'string') {
             try {
-                sourceAmount = Number(await DataVault.decrypt(tx.amount));
+                sourceAmount = await DataProtection.decryptAmount(tx.amount);
             } catch {
                 sourceAmount = Number(tx.amount || 0);
             }
@@ -440,8 +441,8 @@ export class GoalService {
     private async hydrateGoals(raw: any[]): Promise<Goal[]> {
         return await Promise.all(raw.map(async g => ({
             ...g,
-            target: typeof g.target === 'string' ? Number(await DataVault.decrypt(g.target)) : g.target,
-            current: typeof g.current === 'string' ? Number(await DataVault.decrypt(g.current)) : g.current,
+            target: typeof g.target === 'string' ? await DataProtection.decryptAmount(g.target) : g.target,
+            current: typeof g.current === 'string' ? await DataProtection.decryptAmount(g.current) : g.current,
             fundingStrategy: g.funding_strategy || 'manual',
             autoAllocationEnabled: g.auto_allocation_enabled || false
         })));
@@ -451,8 +452,8 @@ export class GoalService {
         let encryptedTarget: any = g.target;
         let encryptedCurrent: any = g.current;
         try {
-            encryptedTarget = await DataVault.encrypt(g.target);
-            encryptedCurrent = await DataVault.encrypt(g.current);
+            encryptedTarget = await DataProtection.encryptAmount(Number(g.target || 0));
+            encryptedCurrent = await DataProtection.encryptAmount(Number(g.current || 0));
         } catch (e: any) {
             console.warn('[GoalService] Encryption unavailable, storing raw goal amounts locally.', e?.message || e);
         }
@@ -541,8 +542,8 @@ export class GoalService {
                 const index = items.findIndex(i => String(i.id) === String(localGoal.id));
                 const localPayload = {
                     ...localGoal,
-                    target: await DataVault.encrypt(localGoal.target),
-                    current: await DataVault.encrypt(localGoal.current)
+                    target: await DataProtection.encryptAmount(Number(localGoal.target || 0)),
+                    current: await DataProtection.encryptAmount(Number(localGoal.current || 0))
                 };
                 if (index === -1) {
                     items.push(localPayload);
@@ -562,7 +563,7 @@ export class GoalService {
 
             if (g.name !== undefined) updated.name = g.name;
             if (g.target !== undefined) {
-                updated.target = await DataVault.encrypt(g.target);
+                updated.target = await DataProtection.encryptAmount(Number(g.target || 0));
             }
             if (g.deadline !== undefined) updated.deadline = g.deadline === '' ? null : g.deadline;
             if (g.color !== undefined) updated.color = g.color;
@@ -603,7 +604,7 @@ export class GoalService {
             }
             goalName = goal.name || goalName;
             goalUserId = goal.user_id || '';
-            currentAmount = Number(await DataVault.decrypt(goal.current));
+            currentAmount = await DataProtection.decryptAmount(goal.current);
             const existingSource = goal.source_wallet_id as string | null;
 
             const operatingWalletId = await this.resolveOperatingWalletId(sb, goalUserId);
@@ -639,7 +640,7 @@ export class GoalService {
         }
 
         const newAmount = currentAmount + amount;
-        const encryptedCurrent = await DataVault.encrypt(newAmount);
+        const encryptedCurrent = await DataProtection.encryptAmount(newAmount);
 
         if (sb) {
             const referenceId = `GOAL-ALLOC-${UUID.generateShortCode(12)}`;
@@ -720,7 +721,7 @@ export class GoalService {
             if (error || !goal) {
                 throw new Error(error?.message || 'Goal not found');
             }
-            currentAmount = Number(await DataVault.decrypt(goal.current));
+            currentAmount = await DataProtection.decryptAmount(goal.current);
             goalName = goal.name || goalName;
             goalUserId = goal.user_id || '';
             sourceWalletId = String(goal.source_wallet_id || '');
@@ -764,7 +765,7 @@ export class GoalService {
         }
 
         const newAmount = currentAmount - amount;
-        const encryptedCurrent = await DataVault.encrypt(newAmount);
+        const encryptedCurrent = await DataProtection.encryptAmount(newAmount);
 
         if (sb) {
             const referenceId = `GOAL-WITHDRAW-${UUID.generateShortCode(12)}`;

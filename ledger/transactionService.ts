@@ -1,13 +1,17 @@
 
 import { Transaction, LedgerEntry, TransactionStatus, Wallet } from '../types.js';
 import { getSupabase, getAdminSupabase } from '../services/supabaseClient.js';
-import { DataVault, VaultError } from '../backend/security/encryption.js'; 
+import { DataProtection } from '../backend/security/DataProtection.js';
 import { Audit } from '../backend/security/audit.js';
 import { UUID } from '../services/utils.js';
 import { RegulatoryService } from './regulatoryService.js';
 import { Messaging } from '../backend/features/MessagingService.js';
 import { SocketRegistry } from '../backend/infrastructure/SocketRegistry.js';
 import { TransactionStateMachine } from '../backend/ledger/stateMachine.js';
+import {
+    assertReversalEligible,
+    normalizeFinancialAuthorityError,
+} from '../backend/ledger/financialInvariants.js';
 import { RiskComplianceEngine } from '../backend/security/RiskComplianceEngine.js';
 import { PerfMonitor } from '../backend/infrastructure/PerfMonitor.js';
 
@@ -18,37 +22,21 @@ import { PerfMonitor } from '../backend/infrastructure/PerfMonitor.js';
  */
 export class TransactionService {
     public normalizeFinancialAuthorityError(error: any, context: string = 'FINANCIAL_AUTHORITY'): Error {
-        const rawMessage = String(error?.message || error?.details || error || 'UNKNOWN_ERROR');
-        const normalized = rawMessage.toUpperCase();
-        const dbCode = String(error?.code || '');
+        return normalizeFinancialAuthorityError(error, context);
+    }
 
-        if (normalized.includes('INSUFFICIENT_FUNDS')) {
-            return new Error(`INSUFFICIENT_FUNDS: ${context} rejected the request because the authoritative SQL balance check found insufficient funds.`);
-        }
-
-        if (normalized.includes('APPEND_ALREADY_APPLIED') || normalized.includes('IDEMPOTENCY_VIOLATION') || dbCode === '23505') {
-            return new Error(`IDEMPOTENCY_VIOLATION: ${context} rejected a duplicate financial mutation.`);
-        }
-
-        if (normalized.includes('WALLET_LOCKED') || normalized.includes('GOAL_MISSING')) {
-            return new Error(`LOCKED_WALLET: ${context} could not proceed because one of the financial containers is locked or unavailable.`);
-        }
-
-        if (normalized.includes('INVALID_SETTLEMENT_STATE') || normalized.includes('SETTLEMENT_ABORTED') || normalized.includes('SETTLEMENT_ERROR')) {
-            return new Error(`INVALID_SETTLEMENT_STATE: ${context} cannot continue because the settlement is no longer in a valid state.`);
-        }
-
-        if (
-            dbCode === '40001' ||
-            dbCode === '40P01' ||
-            normalized.includes('COULD NOT SERIALIZE ACCESS') ||
-            normalized.includes('DEADLOCK DETECTED') ||
-            normalized.includes('CONCURRENT')
-        ) {
-            return new Error(`CONCURRENCY_CONFLICT: ${context} conflicted with another financial update. Retry with the same idempotency key.`);
-        }
-
-        return new Error(`${context}: ${rawMessage}`);
+    private async decryptTransactionRows(rows: any[]): Promise<any[]> {
+        return Promise.all((rows || []).map(async (row: any) => ({
+            ...row,
+            amount: row?.amount !== undefined ? await DataProtection.decryptAmount(row.amount, Number(row.amount || 0)) : row?.amount,
+            description: row?.description !== undefined ? await DataProtection.decryptDescription(row.description, row.description || '') : row?.description,
+            walletId: row?.wallet_id ?? row?.walletId,
+            toWalletId: row?.to_wallet_id ?? row?.toWalletId,
+            createdAt: row?.created_at ?? row?.createdAt,
+            updatedAt: row?.updated_at ?? row?.updatedAt,
+            statusNotes: row?.status_notes ?? row?.statusNotes,
+            categoryId: row?.category_id ?? row?.categoryId,
+        })));
     }
 
     private async getCachedBalanceSnapshot(walletId: string): Promise<number | null> {
@@ -73,7 +61,7 @@ export class TransactionService {
             }
 
             try {
-                return Number(await DataVault.decrypt(goal.current)) || 0;
+                return await DataProtection.decryptAmount(goal.current);
             } catch {
                 return null;
             }
@@ -102,7 +90,7 @@ export class TransactionService {
 
             let balance = 0;
             for (const leg of legs) {
-                const amount = Number(await DataVault.decrypt(leg.amount));
+                const amount = await DataProtection.decryptAmount(leg.amount);
                 if (leg.entry_type === 'CREDIT') {
                     balance += amount;
                 } else {
@@ -176,7 +164,7 @@ export class TransactionService {
             let totalSpent = 0;
             if (txs) {
                 for (const tx of txs) {
-                    totalSpent += Number(await DataVault.decrypt(tx.amount));
+                    totalSpent += await DataProtection.decryptAmount(tx.amount);
                 }
             }
 
@@ -272,13 +260,13 @@ export class TransactionService {
     private async resolveBudgetTarget(category: any): Promise<number> {
         if (category?.target_amount !== undefined && category?.target_amount !== null) {
             const value = typeof category.target_amount === 'string'
-                ? Number(await DataVault.decrypt(category.target_amount))
+                ? await DataProtection.decryptAmount(category.target_amount)
                 : Number(category.target_amount);
             if (!isNaN(value) && value > 0) return value;
         }
         if (category?.budget !== undefined && category?.budget !== null) {
             const value = typeof category.budget === 'string'
-                ? Number(await DataVault.decrypt(category.budget))
+                ? await DataProtection.decryptAmount(category.budget)
                 : Number(category.budget);
             if (!isNaN(value) && value > 0) return value;
         }
@@ -325,7 +313,7 @@ export class TransactionService {
         let spent = 0;
         if (txs) {
             for (const tx of txs) {
-                spent += Number(await DataVault.decrypt(tx.amount));
+                spent += await DataProtection.decryptAmount(tx.amount);
             }
         }
 
@@ -400,8 +388,8 @@ export class TransactionService {
 
         // 1. Encrypt PII Metadata
         const [encAmt, encDesc] = await Promise.all([
-            DataVault.encrypt(t.amount || 0), 
-            DataVault.encrypt(t.description || 'Sovereign Transaction')
+            DataProtection.encryptAmount(Number(t.amount || 0)), 
+            DataProtection.encryptDescription(String(t.description || 'Sovereign Transaction'))
         ]);
 
         // 2. Prepare legs for SQL-authoritative posting.
@@ -428,7 +416,7 @@ export class TransactionService {
                 throw new Error(`LEG_AMOUNT_INVALID: Leg for ${walletId} must have a positive numeric amount.`);
             }
 
-            const eAmt = await DataVault.encrypt(leg.amount);
+            const eAmt = await DataProtection.encryptAmount(Number(leg.amount || 0));
 
             preparedLegs.push({
                 wallet_id: walletId,
@@ -541,7 +529,7 @@ export class TransactionService {
             if (!Number.isFinite(Number(leg.amount)) || Number(leg.amount) <= 0) {
                 throw new Error(`LEG_AMOUNT_INVALID: Leg for ${walletId} must have a positive numeric amount.`);
             }
-            const eAmt = await DataVault.encrypt(leg.amount);
+            const eAmt = await DataProtection.encryptAmount(Number(leg.amount || 0));
 
             preparedLegs.push({
                 transaction_id: txId,
@@ -727,7 +715,7 @@ export class TransactionService {
             
             if (!data) return [];
 
-            const translated = await DataVault.translate(data);
+            const translated = await this.decryptTransactionRows(data);
 
             const { data: movementRows } = await sb
                 .from('external_fund_movements')
@@ -914,7 +902,7 @@ export class TransactionService {
                 if (error) throw error;
                 if (!data) return [];
 
-                const translated = await DataVault.translate(data);
+                const translated = await this.decryptTransactionRows(data);
 
             // Enrichment for Global View
             const allWalletIds = new Set<string>();
@@ -998,13 +986,13 @@ export class TransactionService {
             
             // Decrypt amounts and balances for forensic view
             return await Promise.all((data || []).map(async (leg: any) => {
-                const amount = await DataVault.decrypt(leg.amount);
-                const balanceAfter = await DataVault.decrypt(leg.balance_after_encrypted || leg.balance_after);
+                const amount = await DataProtection.decryptAmount(leg.amount);
+                const balanceAfter = await DataProtection.decryptAmount(leg.balance_after_encrypted || leg.balance_after);
                 
                 return {
                     ...leg,
-                    amount: (amount === VaultError.INTEGRITY_FAIL || amount === VaultError.HEALING_REQUIRED) ? 0 : Number(amount),
-                    balance_after: (balanceAfter === VaultError.INTEGRITY_FAIL || balanceAfter === VaultError.HEALING_REQUIRED) ? 0 : Number(balanceAfter)
+                    amount: Number(amount),
+                    balance_after: Number(balanceAfter)
                 };
             }));
         } catch (e: any) {
@@ -1040,7 +1028,7 @@ export class TransactionService {
             const movements: Record<string, Record<string, number>> = {};
 
             for (const leg of (data || [])) {
-                const amount = Number(await DataVault.decrypt(leg.amount));
+                const amount = await DataProtection.decryptAmount(leg.amount);
                 const date = leg.created_at.split('T')[0];
                 const categoryId = leg.transactions?.[0]?.category_id || 'uncategorized';
 
@@ -1116,8 +1104,8 @@ export class TransactionService {
             if (!data) return [];
 
             return await Promise.all(data.map(async (leg: any) => {
-                const amount = await DataVault.decrypt(leg.amount);
-                const balanceAfter = await DataVault.decrypt(leg.balance_after_encrypted || leg.balance_after);
+                const amount = await DataProtection.decryptAmount(leg.amount);
+                const balanceAfter = await DataProtection.decryptAmount(leg.balance_after_encrypted || leg.balance_after);
                 
                 return {
                     ...leg,
@@ -1167,7 +1155,7 @@ export class TransactionService {
         if (!sb) throw new Error("VAULT_OFFLINE");
 
         const ledgerBalance = await this.calculateBalanceFromLedger(walletId);
-        const encryptedBalance = await DataVault.encrypt(ledgerBalance);
+        const encryptedBalance = await DataProtection.encryptAmount(ledgerBalance);
 
         await sb.rpc('repair_wallet_balance_emergency', {
             target_wallet_id: walletId,
@@ -1245,8 +1233,8 @@ export class TransactionService {
             // 3. Decrypt and return
             return await Promise.all((data || []).map(async (leg: any) => ({
                 ...leg,
-                amount: Number(await DataVault.decrypt(leg.amount)),
-                balance_after: Number(await DataVault.decrypt(leg.balance_after_encrypted || leg.balance_after))
+                amount: await DataProtection.decryptAmount(leg.amount),
+                balance_after: await DataProtection.decryptAmount(leg.balance_after_encrypted || leg.balance_after)
             })));
         } catch (e: any) {
             console.error(`[Ledger] Fee transaction fetch failed: ${e.message}`);
@@ -1265,7 +1253,7 @@ export class TransactionService {
 
         const reversalTxId = UUID.generate();
         const reversalLegs: LedgerEntry[] = await Promise.all((legs || []).map(async (leg: any) => {
-            const amount = Number(await DataVault.decrypt(leg.amount));
+            const amount = await DataProtection.decryptAmount(leg.amount);
             return {
                 transactionId: reversalTxId,
                 walletId: leg.wallet_id,
@@ -1280,7 +1268,7 @@ export class TransactionService {
         await this.postTransactionWithLedger({
             id: reversalTxId,
             user_id: tx.user_id,
-            amount: Number(await DataVault.decrypt(tx.amount)),
+            amount: await DataProtection.decryptAmount(tx.amount),
             description: `Auto-Reversal of ${txId.substring(0,8)}`,
             type: 'transfer',
             status: 'completed'
@@ -1305,9 +1293,7 @@ export class TransactionService {
 
         const { data: tx } = await sb.from('transactions').select('*').eq('id', txId).single();
         if (!tx) throw new Error('TRANSACTION_NOT_FOUND');
-        if (['reversed', 'failed', 'refunded', 'cancelled'].includes(String(tx.status || '').toLowerCase())) {
-            throw new Error('TRANSACTION_NOT_REVERSIBLE');
-        }
+        assertReversalEligible(tx.status);
 
         if (options.actorRole === 'USER') {
             if (tx.user_id !== actorId) throw new Error('ACCESS_DENIED');
@@ -1561,9 +1547,7 @@ export class TransactionService {
 
         const { data: tx } = await sb.from('transactions').select('*').eq('id', txId).single();
         if (!tx) throw new Error('TRANSACTION_NOT_FOUND');
-        if (['reversed', 'failed', 'refunded', 'cancelled'].includes(String(tx.status || '').toLowerCase())) {
-            throw new Error('TRANSACTION_NOT_REVERSIBLE');
-        }
+        assertReversalEligible(tx.status);
 
         await this.reverseTransaction(txId, actorId);
 
@@ -1639,7 +1623,7 @@ export class TransactionService {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return;
 
-        const amount = tx.amount ? Number(await DataVault.decrypt(tx.amount).catch(() => tx.amount)) : 0;
+        const amount = tx.amount ? await DataProtection.decryptAmount(tx.amount, Number(tx.amount || 0)) : 0;
         const reference = tx.reference_id || tx.referenceId || tx.id;
         const subject = `Transaction Issue: ${details.issueType}`;
         const body = [

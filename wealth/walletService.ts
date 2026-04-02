@@ -3,6 +3,7 @@ import { Wallet, Transaction, User, LedgerEntry } from '../types.js';
 import { Storage, STORAGE_KEYS } from '../backend/storage.js';
 import { getSupabase, getAdminSupabase } from '../services/supabaseClient.js';
 import { DataVault } from '../backend/security/encryption.js';
+import { DataProtection } from '../backend/security/DataProtection.js';
 import { TransactionService } from '../ledger/transactionService.js';
 import { UUID } from '../services/utils.js';
 
@@ -17,7 +18,7 @@ export class WalletService {
         const sb = getAdminSupabase();
         if (!sb) return;
 
-        const encryptedBalance = await DataVault.encrypt(0);
+        const encryptedBalance = await DataProtection.encryptAmount(0);
 
         const { error: opError } = await sb.from('platform_vaults').insert({
             id: UUID.generate(),
@@ -105,9 +106,9 @@ export class WalletService {
         const raw = Storage.getFromDB(STORAGE_KEYS.WALLETS) as any[];
         return await Promise.all(raw.map(async w => ({
             ...w,
-            balance: typeof w.balance === 'string' ? Number(await DataVault.decrypt(w.balance)) : w.balance,
-            actualBalance: typeof w.actualBalance === 'string' ? Number(await DataVault.decrypt(w.actualBalance)) : w.actualBalance,
-            availableBalance: typeof w.availableBalance === 'string' ? Number(await DataVault.decrypt(w.availableBalance)) : w.availableBalance
+            balance: typeof w.balance === 'string' ? await DataProtection.decryptAmount(w.balance) : w.balance,
+            actualBalance: typeof w.actualBalance === 'string' ? await DataProtection.decryptAmount(w.actualBalance) : w.actualBalance,
+            availableBalance: typeof w.availableBalance === 'string' ? await DataProtection.decryptAmount(w.availableBalance) : w.availableBalance
         })));
     }
 

@@ -2,6 +2,7 @@ import { getSupabase, getAdminSupabase } from '../supabaseClient.js';
 import { TransactionService } from '../../ledger/transactionService.js';
 import { UUID } from '../../services/utils.js';
 import { DataVault } from '../security/encryption.js';
+import { DataProtection } from '../security/DataProtection.js';
 import { Audit } from '../security/audit.js';
 import { Messaging } from '../features/MessagingService.js';
 
@@ -171,8 +172,8 @@ export class TreasuryService {
             id: txId,
             reference_id: `TREAS-${UUID.generateShortCode(8)}`,
             user_id: userId,
-            amount: await DataVault.encrypt(amount),
-            description: await DataVault.encrypt(`Treasury Withdrawal Request: ${reason}`),
+            amount: await DataProtection.encryptAmount(amount),
+            description: await DataProtection.encryptDescription(`Treasury Withdrawal Request: ${reason}`),
             type: 'transfer',
             status: 'held_for_review',
             wallet_id: goalId,
@@ -265,7 +266,7 @@ export class TreasuryService {
         // 3. Check if fully approved
         if (metadata.approvals_received >= metadata.approvals_required) {
             // Execute the withdrawal
-            const amount = Number(await DataVault.decrypt(tx.amount));
+            const amount = await DataProtection.decryptAmount(tx.amount);
             const txService = new TransactionService();
             
             const legs = [
