@@ -13,6 +13,7 @@ import {
 import { providerRoutingService } from './ProviderRoutingService.js';
 import { platformFeeService } from './PlatformFeeService.js';
 import { GoalService } from '../../strategy/goalService.js';
+import { buildLifecycleFailureMetadata } from './providerFailureMetadata.js';
 
 type InstitutionalAccountLookup = {
     id?: string;
@@ -74,6 +75,7 @@ type NormalizedMovement = {
     sourceExternalRef?: string;
     targetExternalRef?: string;
     metadata: Record<string, any>;
+    routingDecision?: Record<string, any>;
 };
 
 type MovementContext = Awaited<ReturnType<InstitutionalFundsService['buildMovementContext']>>;
@@ -223,6 +225,8 @@ export class InstitutionalFundsService {
                 direction: 'EXTERNAL_TO_INTERNAL',
                 status: 'initiated',
                 provider_id: preview.providerId || null,
+                settlement_lifecycle_id: null,
+                provider_event_id: null,
                 institutional_source_account_id: preview.sourceInstitutionalAccount?.id || null,
                 target_wallet_id: preview.targetWalletId || null,
                 gross_amount: preview.grossAmount,
@@ -286,6 +290,8 @@ export class InstitutionalFundsService {
                     direction: preview.direction,
                     status: 'recorded',
                     provider_id: preview.providerId || null,
+                    settlement_lifecycle_id: null,
+                    provider_event_id: null,
                     institutional_source_account_id: preview.sourceInstitutionalAccount?.id || null,
                     institutional_target_account_id: preview.targetInstitutionalAccount?.id || null,
                     source_wallet_id: preview.sourceWalletId || null,
@@ -333,6 +339,8 @@ export class InstitutionalFundsService {
                 direction: preview.direction,
                 status: 'initiated',
                 provider_id: preview.providerId || null,
+                settlement_lifecycle_id: null,
+                provider_event_id: null,
                 institutional_source_account_id: preview.sourceInstitutionalAccount?.id || null,
                 institutional_target_account_id: preview.targetInstitutionalAccount?.id || null,
                 source_wallet_id: preview.sourceWalletId || null,
@@ -412,6 +420,7 @@ export class InstitutionalFundsService {
                 .update({
                     status: 'processing',
                     updated_at: new Date().toISOString(),
+                    provider_event_id: providerEventId ?? movement.provider_event_id ?? null,
                     metadata: {
                         ...(movement.metadata || {}),
                         webhook_status: status,
@@ -433,12 +442,22 @@ export class InstitutionalFundsService {
                 .update({
                     status: 'failed',
                     updated_at: new Date().toISOString(),
+                    provider_event_id: providerEventId ?? movement.provider_event_id ?? null,
                     metadata: {
                         ...(movement.metadata || {}),
                         webhook_status: status,
                         webhook_message: message || null,
                         provider_event_id: providerEventId || null,
                         last_webhook_payload: rawPayload || null,
+                        ...buildLifecycleFailureMetadata(
+                            'PROVIDER_WEBHOOK_FAILED',
+                            message || 'Provider reported failure during webhook settlement.',
+                            {
+                                source: 'webhook',
+                                provider_event_id: providerEventId || null,
+                                movement_direction: movement.direction,
+                            },
+                        ),
                     },
                 })
                 .eq('id', movement.id)
@@ -454,6 +473,7 @@ export class InstitutionalFundsService {
                 .update({
                     status: 'completed',
                     updated_at: new Date().toISOString(),
+                    provider_event_id: providerEventId ?? movement.provider_event_id ?? null,
                     metadata: {
                         ...(movement.metadata || {}),
                         webhook_status: status,
@@ -544,6 +564,7 @@ export class InstitutionalFundsService {
                 .update({
                     status: 'processing',
                     updated_at: new Date().toISOString(),
+                    provider_event_id: providerEventId ?? movement.provider_event_id ?? null,
                     metadata: {
                         ...(movement.metadata || {}),
                         webhook_status: status,
@@ -565,12 +586,23 @@ export class InstitutionalFundsService {
                 .update({
                     status: 'failed',
                     updated_at: new Date().toISOString(),
+                    provider_event_id: providerEventId ?? movement.provider_event_id ?? null,
                     metadata: {
                         ...(movement.metadata || {}),
                         webhook_status: status,
                         webhook_message: message || null,
                         provider_event_id: providerEventId || null,
                         last_webhook_payload: rawPayload || null,
+                        ...buildLifecycleFailureMetadata(
+                            'PROVIDER_WEBHOOK_FAILED',
+                            message || 'Provider reported failure for deposit intent.',
+                            {
+                                source: 'webhook',
+                                provider_event_id: providerEventId || null,
+                                movement_direction: movement.direction,
+                                intent_kind: 'INCOMING_DEPOSIT',
+                            },
+                        ),
                     },
                 })
                 .eq('id', movement.id)
@@ -655,6 +687,10 @@ export class InstitutionalFundsService {
         const referenceId = `EXT-${UUID.generateShortCode(12)}`;
         const now = new Date().toISOString();
         const { movementId, userId, preview, existingMovement, createdAt } = args;
+        const providerEventId = (preview.metadata as Record<string, any> | undefined)?.provider_event_id
+            ?? existingMovement?.provider_event_id
+            ?? null;
+        const settlementLifecycleId = existingMovement?.settlement_lifecycle_id ?? null;
         if (preview.direction === 'EXTERNAL_TO_EXTERNAL') {
             throw new Error('EXTERNAL_TO_EXTERNAL_NO_LEDGER');
         }
@@ -696,6 +732,8 @@ export class InstitutionalFundsService {
             direction: preview.direction,
             status: 'completed' as ExternalFundMovementStatus,
             provider_id: preview.providerId || null,
+            settlement_lifecycle_id: settlementLifecycleId,
+            provider_event_id: providerEventId,
             institutional_source_account_id: preview.sourceInstitutionalAccount?.id || null,
             institutional_target_account_id: preview.targetInstitutionalAccount?.id || null,
             transaction_id: txId,
@@ -782,7 +820,15 @@ export class InstitutionalFundsService {
 
     private async buildMovementContext(userId: string, payload: ExternalFundMovementPayload) {
         const normalized = await this.normalizePayload(payload);
-        normalized.providerId = normalized.providerId || await this.resolveProviderId(normalized);
+        const resolvedProvider = normalized.providerId ? { providerId: normalized.providerId } : await this.resolveProviderId(normalized);
+        normalized.providerId = resolvedProvider?.providerId || normalized.providerId;
+        if (resolvedProvider?.routingDecision) {
+            normalized.routingDecision = resolvedProvider.routingDecision;
+            normalized.metadata = {
+                ...normalized.metadata,
+                routing_decision: resolvedProvider.routingDecision,
+            };
+        }
         const internalFlow = normalized.direction !== 'EXTERNAL_TO_EXTERNAL';
         const sourceInternalWallet = normalized.direction === 'INTERNAL_TO_EXTERNAL'
             ? await this.resolveOperatingAndPaySafeWallets(userId, normalized.sourceWalletId)
@@ -849,8 +895,12 @@ export class InstitutionalFundsService {
         };
     }
 
-    private async resolveProviderId(normalized: NormalizedMovement): Promise<string | undefined> {
-        if (normalized.providerId) return normalized.providerId;
+    private async resolveProviderId(
+        normalized: NormalizedMovement,
+    ): Promise<{ providerId?: string; routingDecision?: Record<string, any> } | undefined> {
+        if (normalized.providerId) {
+            return { providerId: normalized.providerId };
+        }
         if (!normalized.rail) return undefined;
 
         const defaultOperation: MoneyOperation =
@@ -866,7 +916,17 @@ export class InstitutionalFundsService {
             preferredProviderCode: normalized.preferredProviderCode,
         });
 
-        return resolved.providerId;
+        return {
+            providerId: resolved.providerId,
+            routingDecision: resolved.routingDecision || {
+                providerId: resolved.providerId,
+                providerCode: resolved.providerCode,
+                rail: resolved.rail,
+                operation: resolved.operation,
+                source: 'registry_fallback',
+                resolvedAt: new Date().toISOString(),
+            },
+        };
     }
 
     private async normalizePayload(payload: ExternalFundMovementPayload): Promise<NormalizedMovement> {

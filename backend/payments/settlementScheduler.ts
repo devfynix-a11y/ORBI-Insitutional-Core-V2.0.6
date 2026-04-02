@@ -10,6 +10,7 @@ import {
   settlementLifecycleManager,
   SettlementPhase,
 } from './settlementLifecycleManager.js';
+import { buildLifecycleFailureMetadata } from './providerFailureMetadata.js';
 
 export class SettlementScheduler {
   private sb = getSupabase();
@@ -103,7 +104,7 @@ export class SettlementScheduler {
 
     const { data: stuckSettlements } = await this.client
       .from('settlement_lifecycle')
-      .select('id,user_id,amount,phase_started_at')
+      .select('id,user_id,amount,phase_started_at,metadata')
       .eq('current_phase', SettlementPhase.RECONCILIATION_RUNNING)
       .lt('phase_started_at', stuckBefore);
 
@@ -113,6 +114,18 @@ export class SettlementScheduler {
         .update({
           current_phase: SettlementPhase.FAILED,
           phase_completed_at: new Date().toISOString(),
+          metadata: {
+            ...(settlement.metadata || {}),
+            ...buildLifecycleFailureMetadata(
+              'RECONCILIATION_TIMEOUT',
+              'Reconciliation exceeded the allowed processing window.',
+              {
+                source: 'scheduler',
+                previous_phase: SettlementPhase.RECONCILIATION_RUNNING,
+                phase_started_at: settlement.phase_started_at,
+              },
+            ),
+          },
         })
         .eq('id', settlement.id);
 
@@ -127,7 +140,7 @@ export class SettlementScheduler {
   private async retryFailedSettlements(): Promise<void> {
     const { data: failedSettlements } = await this.client
       .from('settlement_lifecycle')
-      .select('id,user_id,retry_count,phase_completed_at,updated_at,created_at')
+      .select('id,user_id,retry_count,phase_completed_at,updated_at,created_at,metadata')
       .eq('current_phase', SettlementPhase.FAILED)
       .lt('retry_count', 3);
 
@@ -148,6 +161,13 @@ export class SettlementScheduler {
           phase_started_at: new Date().toISOString(),
           retry_count: retryCount + 1,
           auto_settle_at: new Date().toISOString(),
+          metadata: {
+            ...(settlement.metadata || {}),
+            retry_requeued_at: new Date().toISOString(),
+            retry_requeued_by: 'scheduler',
+            retry_backoff_minutes: backoffMinutes,
+            retry_attempt: retryCount + 1,
+          },
         })
         .eq('id', settlement.id);
 
@@ -186,6 +206,14 @@ export class SettlementScheduler {
             ...(movement.metadata || {}),
             timeout_reaped_at: now,
             timeout_reason: timeoutReason,
+            ...buildLifecycleFailureMetadata(
+              'EXTERNAL_SETTLEMENT_TIMEOUT',
+              timeoutReason,
+              {
+                source: 'scheduler',
+                previous_status: movement.status,
+              },
+            ),
           },
         })
         .eq('id', movement.id);

@@ -20,6 +20,16 @@ export enum SettlementPhase {
   REVERSED = 'REVERSED',
 }
 
+export enum SettlementFailureReason {
+  RECONCILIATION_TRANSITION_DENIED = 'RECONCILIATION_TRANSITION_DENIED',
+  RECONCILIATION_VERIFICATION_FAILED = 'RECONCILIATION_VERIFICATION_FAILED',
+  PROVIDER_CONFIRMATION_ALREADY_APPLIED = 'PROVIDER_CONFIRMATION_ALREADY_APPLIED',
+  INTERNAL_COMMIT_TRANSITION_DENIED = 'INTERNAL_COMMIT_TRANSITION_DENIED',
+  INTERNAL_COMMIT_ALREADY_IN_PROGRESS = 'INTERNAL_COMMIT_ALREADY_IN_PROGRESS',
+  INTERNAL_COMMIT_APPEND_ALREADY_APPLIED = 'INTERNAL_COMMIT_APPEND_ALREADY_APPLIED',
+  INTERNAL_COMMIT_FAILED = 'INTERNAL_COMMIT_FAILED',
+}
+
 export interface SettlementLifecycle {
   settlementId: string;
   userId: string;
@@ -50,11 +60,105 @@ export class SettlementLifecycleManager {
   private sb = getSupabase();
   private ledger = new TransactionService();
   private static readonly internalCommitPhaseMarker = 'INTERNAL_COMMIT';
+  private static readonly internalCommitAppendPhase = 'GATEWAY_INTERNAL_COMMIT';
+  private static readonly providerConfirmationKeyPrefix = 'provider_confirmation';
+  private static readonly allowedTransitions: Record<SettlementPhase, SettlementPhase[]> = {
+    [SettlementPhase.EXTERNAL_PENDING]: [SettlementPhase.RECONCILIATION_RUNNING, SettlementPhase.FAILED],
+    [SettlementPhase.RECONCILIATION_RUNNING]: [SettlementPhase.READY_FOR_INTERNAL_COMMIT, SettlementPhase.FAILED],
+    [SettlementPhase.READY_FOR_INTERNAL_COMMIT]: [SettlementPhase.INTERNALLY_SETTLED, SettlementPhase.FAILED],
+    [SettlementPhase.INTERNALLY_SETTLED]: [SettlementPhase.REVERSED],
+    [SettlementPhase.FAILED]: [],
+    [SettlementPhase.DISPUTE_UNDER_REVIEW]: [SettlementPhase.REVERSED, SettlementPhase.FAILED],
+    [SettlementPhase.REVERSED]: [],
+  };
 
   private get client() {
     this.sb = this.sb || getSupabase();
     if (!this.sb) throw new Error('DB_OFFLINE');
     return this.sb;
+  }
+
+  private getProviderConfirmationKey(settlement: any): string {
+    return `${SettlementLifecycleManager.providerConfirmationKeyPrefix}:${settlement.provider_id}:${settlement.external_settlement_id}`;
+  }
+
+  private buildInternalCommitReference(settlementId: string): string {
+    return `SETTLEMENT:${settlementId}:${SettlementLifecycleManager.internalCommitPhaseMarker}`;
+  }
+
+  private buildInternalCommitAppendKey(settlementId: string): string {
+    return `settlement:${settlementId}:${SettlementLifecycleManager.internalCommitAppendPhase}:v1`;
+  }
+
+  private async transitionLifecyclePhase(
+    settlementId: string,
+    fromPhase: SettlementPhase,
+    toPhase: SettlementPhase,
+    updates: Record<string, any>,
+  ): Promise<any> {
+    const allowed = SettlementLifecycleManager.allowedTransitions[fromPhase] || [];
+    if (!allowed.includes(toPhase)) {
+      throw new Error(
+        `INVALID_SETTLEMENT_TRANSITION: ${fromPhase} -> ${toPhase} is not allowed for settlement ${settlementId}`,
+      );
+    }
+
+    const timestamp = new Date().toISOString();
+    const { data, error } = await this.client
+      .from('settlement_lifecycle')
+      .update({
+        current_phase: toPhase,
+        phase_started_at: timestamp,
+        updated_at: timestamp,
+        ...updates,
+      })
+      .eq('id', settlementId)
+      .eq('current_phase', fromPhase)
+      .select('*');
+
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      throw new Error(`INVALID_SETTLEMENT_TRANSITION: Settlement ${settlementId} is no longer in ${fromPhase}`);
+    }
+
+    return data[0];
+  }
+
+  private async recordFailure(
+    settlementId: string,
+    reason: SettlementFailureReason,
+    error: unknown,
+    extraMetadata: Record<string, any> = {},
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const message = String((error as any)?.message || error || reason);
+    const { data: settlement } = await this.client
+      .from('settlement_lifecycle')
+      .select('metadata')
+      .eq('id', settlementId)
+      .single();
+
+    const metadata = {
+      ...(settlement?.metadata || {}),
+      failure_reason: reason,
+      failure_recorded_at: now,
+      failure_details: {
+        reason,
+        message,
+        ...extraMetadata,
+      },
+    };
+
+    await this.client
+      .from('settlement_lifecycle')
+      .update({
+        current_phase: SettlementPhase.FAILED,
+        phase_completed_at: now,
+        updated_at: now,
+        last_error: reason,
+        metadata,
+      })
+      .eq('id', settlementId);
   }
 
   async recordExternalPayment(
@@ -66,6 +170,7 @@ export class SettlementLifecycleManager {
     currency: string,
     walletId: string,
     autoSettleAfterMinutes: number = 5,
+    externalMovementId?: string | null,
   ): Promise<SettlementLifecycle> {
     try {
       const settlementId = `settle_lifecycle_${UUID.generate()}`;
@@ -85,6 +190,7 @@ export class SettlementLifecycleManager {
         external_settlement_id: externalSettlementId,
         provider_id: providerId,
         wallet_id: walletId,
+        external_movement_id: externalMovementId || null,
         auto_settle_after_minutes: autoSettleAfterMinutes,
         auto_settle_at: autoSettleAt,
         created_at: now,
@@ -93,12 +199,25 @@ export class SettlementLifecycleManager {
 
       if (createError) throw createError;
 
+      if (externalMovementId) {
+        const { error: movementError } = await this.client
+          .from('external_fund_movements')
+          .update({
+            settlement_lifecycle_id: settlementId,
+            updated_at: now,
+          })
+          .eq('id', externalMovementId);
+
+        if (movementError) throw movementError;
+      }
+
       await Audit.log('FINANCIAL', userId, 'SETTLEMENT_PHASE1_EXTERNAL_RECORDED', {
         settlementId,
         externalSettlementId,
         providerId,
         amount,
         autoSettleAt,
+        externalMovementId: externalMovementId || null,
       });
 
       return {
@@ -131,21 +250,48 @@ export class SettlementLifecycleManager {
         .single();
 
       if (!settlement) throw new Error('Settlement not found');
+      const providerConfirmationKey = this.getProviderConfirmationKey(settlement);
+      if (
+        settlement.metadata?.provider_confirmation_key === providerConfirmationKey &&
+        settlement.metadata?.provider_confirmation_applied_at
+      ) {
+        if (
+          settlement.current_phase === SettlementPhase.READY_FOR_INTERNAL_COMMIT ||
+          settlement.current_phase === SettlementPhase.INTERNALLY_SETTLED
+        ) {
+          return true;
+        }
+        await this.recordFailure(
+          settlementId,
+          SettlementFailureReason.PROVIDER_CONFIRMATION_ALREADY_APPLIED,
+          new Error(`Provider confirmation already applied while settlement is in ${settlement.current_phase}`),
+          { providerConfirmationKey, currentPhase: settlement.current_phase },
+        );
+        return false;
+      }
+
+      if (settlement.current_phase === SettlementPhase.READY_FOR_INTERNAL_COMMIT || settlement.current_phase === SettlementPhase.INTERNALLY_SETTLED) {
+        return true;
+      }
+
       if (settlement.current_phase !== SettlementPhase.EXTERNAL_PENDING) {
         throw new Error(`Cannot reconcile settlement in phase: ${settlement.current_phase}`);
       }
 
       const reconciliationId = `recon_${UUID.generate()}`;
-      const { error: phaseError } = await this.client
-        .from('settlement_lifecycle')
-        .update({
-          current_phase: SettlementPhase.RECONCILIATION_RUNNING,
-          phase_started_at: new Date().toISOString(),
+      await this.transitionLifecyclePhase(
+        settlementId,
+        SettlementPhase.EXTERNAL_PENDING,
+        SettlementPhase.RECONCILIATION_RUNNING,
+        {
           reconciliation_id: reconciliationId,
-        })
-        .eq('id', settlementId);
-
-      if (phaseError) throw phaseError;
+          metadata: {
+            ...(settlement.metadata || {}),
+            provider_confirmation_key: providerConfirmationKey,
+            provider_confirmation_applied_at: new Date().toISOString(),
+          },
+        },
+      );
 
       const reconciliationResult = await this.performReconciliation(
         settlement.provider_id,
@@ -164,15 +310,19 @@ export class SettlementLifecycleManager {
       if (reconError) throw reconError;
 
       if (reconciliationResult.verified) {
-        const { error: moveError } = await this.client
-          .from('settlement_lifecycle')
-          .update({
-            current_phase: SettlementPhase.READY_FOR_INTERNAL_COMMIT,
-            phase_started_at: new Date().toISOString(),
-          })
-          .eq('id', settlementId);
-
-        if (moveError) throw moveError;
+        await this.transitionLifecyclePhase(
+          settlementId,
+          SettlementPhase.RECONCILIATION_RUNNING,
+          SettlementPhase.READY_FOR_INTERNAL_COMMIT,
+          {
+            metadata: {
+              ...(settlement.metadata || {}),
+              provider_confirmation_key: providerConfirmationKey,
+              provider_confirmation_applied_at: new Date().toISOString(),
+              reconciliation_verified_at: new Date().toISOString(),
+            },
+          },
+        );
 
         await Audit.log(
           'FINANCIAL',
@@ -188,15 +338,16 @@ export class SettlementLifecycleManager {
         return true;
       }
 
-      const { error: failError } = await this.client
-        .from('settlement_lifecycle')
-        .update({
-          current_phase: SettlementPhase.FAILED,
-          phase_completed_at: new Date().toISOString(),
-        })
-        .eq('id', settlementId);
-
-      if (failError) throw failError;
+      await this.recordFailure(
+        settlementId,
+        SettlementFailureReason.RECONCILIATION_VERIFICATION_FAILED,
+        reconciliationResult.notes || 'Reconciliation verification failed',
+        {
+          discrepancy: reconciliationResult.discrepancy,
+          reconciliationId,
+          providerConfirmationKey,
+        },
+      );
 
       await Audit.log('SECURITY', settlement.user_id, 'SETTLEMENT_RECONCILIATION_FAILED', {
         settlementId,
@@ -208,6 +359,11 @@ export class SettlementLifecycleManager {
       return false;
     } catch (error: any) {
       console.error('[SettlementLifecycle] Reconciliation failed:', error.message);
+      await this.recordFailure(
+        settlementId,
+        SettlementFailureReason.RECONCILIATION_TRANSITION_DENIED,
+        error,
+      ).catch(() => {});
       throw error;
     }
   }
@@ -273,6 +429,8 @@ export class SettlementLifecycleManager {
         ...(settlement.metadata || {}),
         internal_commit_claim_id: claimId,
         internal_commit_claimed_at: claimTimestamp,
+        internal_commit_append_phase: SettlementLifecycleManager.internalCommitAppendPhase,
+        internal_commit_append_key: this.buildInternalCommitAppendKey(settlementId),
       };
 
       const { data: claimedRows, error: claimError } = await this.client
@@ -383,7 +541,7 @@ export class SettlementLifecycleManager {
       await this.ledger.postTransactionWithLedger(
         {
           id: financialTxId,
-          referenceId: `SETTLEMENT:${settlementId}:${SettlementLifecycleManager.internalCommitPhaseMarker}`,
+          referenceId: this.buildInternalCommitReference(settlementId),
           user_id: settlement.user_id,
           walletId: settlementSourceWalletId,
           toWalletId: settlement.wallet_id,
@@ -398,6 +556,8 @@ export class SettlementLifecycleManager {
             external_settlement_id: settlement.external_settlement_id,
             reconciliation_id: settlement.reconciliation_id,
             settlement_path: `GATEWAY_${settlement.provider_id}`,
+            settlement_append_phase: SettlementLifecycleManager.internalCommitAppendPhase,
+            settlement_append_key: this.buildInternalCommitAppendKey(settlementId),
           },
         },
         ledgerLegs,
@@ -413,7 +573,8 @@ export class SettlementLifecycleManager {
           metadata: {
             ...claimMetadata,
             internal_commit_completed_at: new Date().toISOString(),
-            internal_commit_reference: `SETTLEMENT:${settlementId}:${SettlementLifecycleManager.internalCommitPhaseMarker}`,
+            internal_commit_reference: this.buildInternalCommitReference(settlementId),
+            internal_commit_result: 'COMPLETED',
           },
         })
         .eq('id', settlementId);
@@ -439,17 +600,24 @@ export class SettlementLifecycleManager {
         newWalletBalance: await this.ledger.calculateBalanceFromLedger(settlement.wallet_id),
       };
     } catch (error: any) {
-      await this.client
-        .from('settlement_lifecycle')
-        .update({
-          current_phase: SettlementPhase.FAILED,
-          phase_completed_at: new Date().toISOString(),
-        })
-        .eq('id', settlementId);
+      const structuredReason =
+        String(error?.message || '').includes('SETTLEMENT_COMMIT_ALREADY_IN_PROGRESS')
+          ? SettlementFailureReason.INTERNAL_COMMIT_ALREADY_IN_PROGRESS
+          : String(error?.message || '').includes('APPEND_ALREADY_APPLIED') ||
+            String(error?.message || '').includes('IDEMPOTENCY_VIOLATION')
+            ? SettlementFailureReason.INTERNAL_COMMIT_APPEND_ALREADY_APPLIED
+            : String(error?.message || '').includes('Cannot commit settlement in phase')
+              ? SettlementFailureReason.INTERNAL_COMMIT_TRANSITION_DENIED
+              : SettlementFailureReason.INTERNAL_COMMIT_FAILED;
+
+      await this.recordFailure(settlementId, structuredReason, error, {
+        phase: 'INTERNAL_COMMIT',
+      });
 
       await Audit.log('SECURITY', 'SYSTEM', 'SETTLEMENT_PHASE2_COMMIT_FAILED', {
         settlementId,
         error: error.message,
+        reason: structuredReason,
       });
 
       throw error;
