@@ -49,6 +49,7 @@ export interface SettlementLifecycle {
 export class SettlementLifecycleManager {
   private sb = getSupabase();
   private ledger = new TransactionService();
+  private static readonly internalCommitPhaseMarker = 'INTERNAL_COMMIT';
 
   private get client() {
     this.sb = this.sb || getSupabase();
@@ -250,8 +251,64 @@ export class SettlementLifecycleManager {
         .single();
 
       if (!settlement) throw new Error('Settlement not found');
+      if (
+        settlement.current_phase === SettlementPhase.INTERNALLY_SETTLED &&
+        settlement.financial_tx_id
+      ) {
+        return {
+          success: true,
+          financialTxId: settlement.financial_tx_id,
+          newWalletBalance: await this.ledger.calculateBalanceFromLedger(
+            settlement.wallet_id,
+          ),
+        };
+      }
       if (settlement.current_phase !== SettlementPhase.READY_FOR_INTERNAL_COMMIT) {
         throw new Error(`Cannot commit settlement in phase: ${settlement.current_phase}`);
+      }
+
+      const claimTimestamp = new Date().toISOString();
+      const claimId = UUID.generate();
+      const claimMetadata = {
+        ...(settlement.metadata || {}),
+        internal_commit_claim_id: claimId,
+        internal_commit_claimed_at: claimTimestamp,
+      };
+
+      const { data: claimedRows, error: claimError } = await this.client
+        .from('settlement_lifecycle')
+        .update({
+          phase_started_at: claimTimestamp,
+          updated_at: claimTimestamp,
+          metadata: claimMetadata,
+        })
+        .eq('id', settlementId)
+        .eq('current_phase', SettlementPhase.READY_FOR_INTERNAL_COMMIT)
+        .eq('phase_started_at', settlement.phase_started_at)
+        .is('financial_tx_id', null)
+        .select('id');
+
+      if (claimError) throw claimError;
+      if (!claimedRows || claimedRows.length === 0) {
+        const { data: latestSettlement, error: latestSettlementError } = await this.client
+          .from('settlement_lifecycle')
+          .select('current_phase, financial_tx_id, wallet_id')
+          .eq('id', settlementId)
+          .single();
+        if (latestSettlementError) throw latestSettlementError;
+        if (
+          latestSettlement?.current_phase === SettlementPhase.INTERNALLY_SETTLED &&
+          latestSettlement.financial_tx_id
+        ) {
+          return {
+            success: true,
+            financialTxId: latestSettlement.financial_tx_id,
+            newWalletBalance: await this.ledger.calculateBalanceFromLedger(
+              latestSettlement.wallet_id,
+            ),
+          };
+        }
+        throw new Error('SETTLEMENT_COMMIT_ALREADY_IN_PROGRESS');
       }
 
       const { data: wallet } = await this.client
@@ -262,7 +319,21 @@ export class SettlementLifecycleManager {
 
       if (!wallet) throw new Error('Target wallet not found');
 
-      const financialTxId = `ftx_${UUID.generate()}`;
+      const settlementSourceWalletId = String(
+        sourceWalletId ||
+          process.env.SETTLEMENT_SUSPENSE_WALLET_ID ||
+          '',
+      ).trim();
+      if (!settlementSourceWalletId) {
+        throw new Error('SETTLEMENT_SOURCE_WALLET_REQUIRED');
+      }
+
+      const feeWalletId = String(process.env.SYSTEM_FEE_WALLET_ID || '').trim();
+      if (!feeWalletId) {
+        throw new Error('SYSTEM_FEE_WALLET_REQUIRED');
+      }
+
+      const financialTxId = UUID.generate();
       const settlementCurrency = String(settlement.currency || '').trim().toUpperCase();
       if (!settlementCurrency) throw new Error('SETTLEMENT_CURRENCY_REQUIRED');
       const timestamp = new Date().toISOString();
@@ -281,7 +352,7 @@ export class SettlementLifecycleManager {
 
       const ledgerLegs = [
         {
-          walletId: sourceWalletId || `${settlement.provider_id}_settlement_account`,
+          walletId: settlementSourceWalletId,
           type: 'DEBIT' as const,
           amount: Number(settlement.amount || 0) + Number(platformFee || 0),
           currency: settlementCurrency,
@@ -299,7 +370,7 @@ export class SettlementLifecycleManager {
           timestamp,
         },
         {
-          walletId: process.env.SYSTEM_FEE_WALLET_ID || 'system_fees',
+          walletId: feeWalletId,
           type: 'CREDIT' as const,
           amount: Number(platformFee || 0),
           currency: settlementCurrency,
@@ -312,9 +383,9 @@ export class SettlementLifecycleManager {
       await this.ledger.postTransactionWithLedger(
         {
           id: financialTxId,
-          referenceId: `GATEWAY-${settlement.external_settlement_id}`,
+          referenceId: `SETTLEMENT:${settlementId}:${SettlementLifecycleManager.internalCommitPhaseMarker}`,
           user_id: settlement.user_id,
-          walletId: sourceWalletId || `${settlement.provider_id}_settlement_account`,
+          walletId: settlementSourceWalletId,
           toWalletId: settlement.wallet_id,
           amount: Number(settlement.amount || 0),
           currency: settlement.currency,
@@ -339,6 +410,11 @@ export class SettlementLifecycleManager {
           financial_tx_id: financialTxId,
           phase_completed_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
+          metadata: {
+            ...claimMetadata,
+            internal_commit_completed_at: new Date().toISOString(),
+            internal_commit_reference: `SETTLEMENT:${settlementId}:${SettlementLifecycleManager.internalCommitPhaseMarker}`,
+          },
         })
         .eq('id', settlementId);
 
