@@ -86,6 +86,7 @@ test('operational health snapshot aggregates connectivity queue and counts', asy
 
 test('operational health snapshot becomes critical when db connectivity is unavailable', async () => {
   const service = new OperationalHealthService({
+    getSupabaseClient: () => null as any,
     getAdminSupabaseClient: () => null as any,
     getQueueStatus: async () => ({ pending: 0, processing: 0, completed: 0, failed: 0, total_active: 0 }),
     getSettlementHealth: async () => ({ running: true, pendingCount: {} }),

@@ -1391,7 +1391,10 @@ DECLARE
     v_provider_code TEXT := BTRIM(COALESCE(NEW.provider_metadata->>'provider_code', ''));
     v_rail TEXT := BTRIM(COALESCE(NEW.provider_metadata->>'rail', ''));
     v_operations_count INTEGER := COALESCE(jsonb_array_length(COALESCE(NEW.provider_metadata->'operations', '[]'::jsonb)), 0);
-    v_mapping_operations_count INTEGER := COALESCE(jsonb_object_length(COALESCE(NEW.mapping_config->'operations', '{}'::jsonb)), 0);
+    v_mapping_operations_count INTEGER := COALESCE((
+        SELECT COUNT(*)
+        FROM jsonb_each(COALESCE(NEW.mapping_config->'operations', '{}'::jsonb))
+    ), 0);
     v_supports_webhooks BOOLEAN := COALESCE((NEW.provider_metadata->>'supports_webhooks')::BOOLEAN, FALSE);
     v_has_callback BOOLEAN := COALESCE(NEW.mapping_config ? 'callback', FALSE);
     v_callback_reference TEXT := BTRIM(COALESCE(NEW.mapping_config->'callback'->>'reference_field', ''));
@@ -1406,7 +1409,10 @@ BEGIN
     END IF;
 
     IF BTRIM(COALESCE(NEW.mapping_config->>'service_root', '')) = ''
-       AND COALESCE(jsonb_object_length(COALESCE(NEW.mapping_config->'service_roots', '{}'::jsonb)), 0) = 0 THEN
+       AND COALESCE((
+            SELECT COUNT(*)
+            FROM jsonb_each(COALESCE(NEW.mapping_config->'service_roots', '{}'::jsonb))
+        ), 0) = 0 THEN
         RAISE EXCEPTION 'PROVIDER_ACTIVATION_SERVICE_ROOT_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
     END IF;
 

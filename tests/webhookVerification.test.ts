@@ -3,6 +3,7 @@ import test from 'node:test';
 import crypto from 'node:crypto';
 
 import { webhookVerificationService } from '../backend/payments/WebhookVerificationService.js';
+import { RedisClusterFactory } from '../backend/infrastructure/RedisClusterFactory.js';
 
 test('webhook verification rejects missing signature when secret is configured', async () => {
     await assert.rejects(
@@ -23,8 +24,10 @@ test('webhook verification rejects missing signature when secret is configured',
 
 test('webhook verification accepts valid signed payload with timestamp freshness', async () => {
     process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE = 'true';
+    const previousRedisGetClient = RedisClusterFactory.getClient;
+    (RedisClusterFactory as any).getClient = () => null;
     const timestamp = String(Math.floor(Date.now() / 1000));
-    const rawPayload = JSON.stringify({ event_id: 'evt-2', status: 'SUCCESS' });
+    const rawPayload = JSON.stringify({ event_id: `evt-${crypto.randomUUID()}`, status: 'SUCCESS' });
     const signature = crypto
         .createHmac('sha256', 'topsecret')
         .update(`${timestamp}.${rawPayload}`)
@@ -50,8 +53,11 @@ test('webhook verification accepts valid signed payload with timestamp freshness
         { 'x-timestamp': timestamp },
     );
 
-    assert.equal(result.providerEventId, 'evt-2');
+    assert.equal(result.providerEventId, JSON.parse(rawPayload).event_id);
     assert.equal(result.freshnessStatus, 'fresh');
+
+    (RedisClusterFactory as any).getClient = previousRedisGetClient;
+    delete process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE;
 });
 
 test('webhook verification rejects stale timestamps when provided', async () => {

@@ -14,6 +14,22 @@ import {
   sessionHasAnyPermission,
   sessionHasAnyRole,
 } from '../src/middleware/auth/authorization.ts';
+import { RedisClusterFactory } from '../backend/infrastructure/RedisClusterFactory.js';
+
+const stableSerialize = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  if (typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableSerialize(entry)).join(',')}]`;
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entryValue]) => entryValue !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableSerialize(entryValue)}`).join(',')}}`;
+};
+
+const hashBody = (body: unknown) =>
+  crypto.createHash('sha256').update(stableSerialize(body)).digest('hex');
 
 const createResponse = () => {
   const response: any = {
@@ -183,12 +199,16 @@ test('createInternalWorkerMiddleware accepts signed requests and exposes audit m
   process.env.WORKER_SECRET = 'top-secret';
   process.env.WORKER_SIGNING_SECRET = 'signing-secret';
   process.env.ORBI_REQUIRE_SIGNED_INTERNAL_REQUESTS = 'true';
+  process.env.ORBI_ALLOW_PROCESS_LOCAL_INTERNAL_REPLAY_STORE = 'true';
+
+  const previousRedisGetClient = RedisClusterFactory.getClient;
+  (RedisClusterFactory as any).getClient = () => null;
 
   const body = { amount: 1500, currency: 'TZS' };
-  const bodySha256 = crypto.createHash('sha256').update('{"amount":1500,"currency":"TZS"}').digest('hex');
+  const bodySha256 = hashBody(body);
   const timestamp = new Date().toISOString();
-  const nonce = 'nonce-123';
-  const requestId = 'req-123';
+  const nonce = `nonce-${crypto.randomUUID()}`;
+  const requestId = `req-${crypto.randomUUID()}`;
   const canonical = [
     'POST',
     '/api/internal/transactions/claim',
@@ -234,18 +254,25 @@ test('createInternalWorkerMiddleware accepts signed requests and exposes audit m
   assert.equal(req.internalRequestIdentity.signatureVerified, true);
   assert.equal(req.internalRequestIdentity.replayProtected, true);
   assert.equal(getInternalAuditMetadata(req).worker_request_id, requestId);
+
+  (RedisClusterFactory as any).getClient = previousRedisGetClient;
+  delete process.env.ORBI_ALLOW_PROCESS_LOCAL_INTERNAL_REPLAY_STORE;
 });
 
 test('createInternalWorkerMiddleware blocks replayed signed requests', async () => {
   process.env.WORKER_SECRET = 'top-secret';
   process.env.WORKER_SIGNING_SECRET = 'signing-secret';
   process.env.ORBI_REQUIRE_SIGNED_INTERNAL_REQUESTS = 'true';
+  process.env.ORBI_ALLOW_PROCESS_LOCAL_INTERNAL_REPLAY_STORE = 'true';
+
+  const previousRedisGetClient = RedisClusterFactory.getClient;
+  (RedisClusterFactory as any).getClient = () => null;
 
   const body = { amount: 1500, currency: 'TZS' };
-  const bodySha256 = crypto.createHash('sha256').update('{"amount":1500,"currency":"TZS"}').digest('hex');
+  const bodySha256 = hashBody(body);
   const timestamp = new Date().toISOString();
-  const nonce = 'nonce-replay';
-  const requestId = 'req-replay';
+  const nonce = `nonce-${crypto.randomUUID()}`;
+  const requestId = `req-${crypto.randomUUID()}`;
   const canonical = [
     'POST',
     '/api/internal/transactions/claim',
@@ -290,6 +317,8 @@ test('createInternalWorkerMiddleware blocks replayed signed requests', async () 
   assert.equal(secondRes.statusCode, 409);
   assert.equal(secondRes.body.error, 'REPLAY_DETECTED');
 
+  (RedisClusterFactory as any).getClient = previousRedisGetClient;
+  delete process.env.ORBI_ALLOW_PROCESS_LOCAL_INTERNAL_REPLAY_STORE;
   delete process.env.ORBI_REQUIRE_SIGNED_INTERNAL_REQUESTS;
 });
 

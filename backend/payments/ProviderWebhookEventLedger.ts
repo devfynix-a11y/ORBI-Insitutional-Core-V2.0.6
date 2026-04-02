@@ -37,6 +37,10 @@ class ProviderWebhookEventLedger {
         process.env.NODE_ENV !== 'production' &&
         process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE === 'true';
     private readonly localStore = new Map<string, ProviderWebhookEventRecord>();
+    private shouldUseLocalStore(sb: ReturnType<typeof getAdminSupabase> | ReturnType<typeof getSupabase> | null) {
+        const forceLocal = process.env.ORBI_FORCE_LOCAL_WEBHOOK_EVENT_LEDGER === 'true';
+        return forceLocal || !sb;
+    }
 
     async recordReceipt(input: Omit<ProviderWebhookEventRecord, 'id' | 'application_status' | 'verification_status'> & {
         verification_status?: string;
@@ -50,7 +54,7 @@ class ProviderWebhookEventLedger {
             ...input,
         };
 
-        if (!sb) {
+        if (this.shouldUseLocalStore(sb)) {
             return this.recordLocalReceipt(baseRecord);
         }
 
@@ -110,7 +114,7 @@ class ProviderWebhookEventLedger {
 
     async claimForApplication(id: string): Promise<boolean> {
         const sb = getAdminSupabase() || getSupabase();
-        if (!sb) {
+        if (this.shouldUseLocalStore(sb)) {
             const record = this.findLocalRecord(id);
             if (!record) return false;
             if (!['received', 'failed'].includes(record.application_status)) return false;
@@ -152,7 +156,7 @@ class ProviderWebhookEventLedger {
 
     private async updateRecord(id: string, patch: Partial<ProviderWebhookEventRecord>) {
         const sb = getAdminSupabase() || getSupabase();
-        if (!sb) {
+        if (this.shouldUseLocalStore(sb)) {
             const record = this.findLocalRecord(id);
             if (!record) return;
             const next = { ...record, ...patch };

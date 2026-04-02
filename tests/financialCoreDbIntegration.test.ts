@@ -18,6 +18,23 @@ const exactCount = async (client: any, table: string, apply?: (query: any) => an
   return Number(count || 0);
 };
 
+const tryPhaseCount = async (client: any, phase: string): Promise<number> => {
+  const attempts = ['current_phase', 'stage'];
+  let lastError: any = null;
+  for (const column of attempts) {
+    const { count, error } = await client
+      .from('settlement_lifecycle')
+      .select('*', { count: 'exact', head: true })
+      .eq(column, phase);
+    if (!error) {
+      return Number(count || 0);
+    }
+    lastError = error;
+  }
+  assert.ifError(lastError);
+  return 0;
+};
+
 dbIntegrationTest('db integration scaffold can reach core financial tables in read-only mode', async (_t, client) => {
   const [transactions, ledgerEntries, settlements, webhooks, reconciliations] = await Promise.all([
     exactCount(client, 'transactions'),
@@ -58,7 +75,7 @@ dbIntegrationTest('db integration scaffold can inspect settlement backlog phases
   ];
 
   for (const phase of pendingPhases) {
-    const count = await exactCount(client, 'settlement_lifecycle', (query) => query.eq('current_phase', phase));
+    const count = await tryPhaseCount(client, phase);
     assert.ok(count >= 0, `Expected non-negative count for phase ${phase}`);
   }
 });

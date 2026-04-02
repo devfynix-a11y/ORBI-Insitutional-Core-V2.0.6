@@ -5,12 +5,16 @@ import { providerWebhookEventLedger } from '../backend/payments/ProviderWebhookE
 
 test('provider webhook event ledger deduplicates local receipts and allows replay after failed application', async () => {
     const previousReplayMode = process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE;
+    const previousForceLocal = process.env.ORBI_FORCE_LOCAL_WEBHOOK_EVENT_LEDGER;
     process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE = 'true';
+    process.env.ORBI_FORCE_LOCAL_WEBHOOK_EVENT_LEDGER = 'true';
     const ledgerAny = providerWebhookEventLedger as any;
     const previousAllowLocalStore = ledgerAny.allowLocalStore;
     const previousLocalStore = ledgerAny.localStore;
+    const previousForceLocalStore = ledgerAny.forceLocalStore;
     ledgerAny.allowLocalStore = true;
     ledgerAny.localStore = new Map();
+    ledgerAny.forceLocalStore = true;
 
     try {
         const suffix = `itest-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
@@ -75,10 +79,16 @@ test('provider webhook event ledger deduplicates local receipts and allows repla
     } finally {
         ledgerAny.allowLocalStore = previousAllowLocalStore;
         ledgerAny.localStore = previousLocalStore;
+        ledgerAny.forceLocalStore = previousForceLocalStore;
         if (previousReplayMode === undefined) {
             delete process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE;
         } else {
             process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE = previousReplayMode;
+        }
+        if (previousForceLocal === undefined) {
+            delete process.env.ORBI_FORCE_LOCAL_WEBHOOK_EVENT_LEDGER;
+        } else {
+            process.env.ORBI_FORCE_LOCAL_WEBHOOK_EVENT_LEDGER = previousForceLocal;
         }
     }
 });
