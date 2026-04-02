@@ -3,6 +3,7 @@ import { getAdminSupabase } from '../supabaseClient.js';
 import { UUID } from '../../services/utils.js';
 import { DataVault } from '../security/encryption.js';
 import crypto from 'crypto';
+import { DataProtection } from '../security/DataProtection.js';
 
 export class ProvisioningService {
     /**
@@ -38,7 +39,7 @@ export class ProvisioningService {
             console.info(`[Provisioning] Starting genesis for user ${userId}...`);
 
             // 2. Create Vaults & Wallets
-            const encryptedZero = await DataVault.encrypt(0);
+            const encryptedZero = await DataProtection.encryptAmount(0);
             
             // Fetch customer_id if not provided
             let finalCustomerId = customerId;

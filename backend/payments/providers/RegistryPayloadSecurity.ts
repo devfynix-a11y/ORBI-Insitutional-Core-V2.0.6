@@ -1,4 +1,4 @@
-import { DataVault } from '../../security/encryption.js';
+import { providerSecretVault } from './ProviderSecretVault.js';
 
 const SENSITIVE_EXACT_KEYS = new Set([
     'client_secret',
@@ -49,9 +49,8 @@ export async function secureProviderRegistryPayload(input: any): Promise<any> {
         }
 
         if (typeof value === 'string' && isSensitiveKey(key)) {
-            clone[key] = await DataVault.encrypt(value, {
+            clone[key] = await providerSecretVault.wrapSecret(value, key as any, {
                 domain: 'PROVIDER_REGISTRY',
-                field: key,
             });
             continue;
         }

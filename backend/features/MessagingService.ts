@@ -5,6 +5,7 @@ import { UUID } from '../../services/utils.js';
 import { Storage, STORAGE_KEYS } from '../storage.js';
 import { GoogleGenAI } from "@google/genai";
 import { DataVault } from '../security/encryption.js';
+import { DataProtection } from '../security/DataProtection.js';
 import { orbiGatewayService } from '../infrastructure/orbiGatewayService.js';
 import parsePhoneNumber from 'libphonenumber-js';
 
@@ -224,8 +225,8 @@ CEO, ORBI`
         
         // Encrypt sensitive content before persistence
         const [encSubject, encBody] = await Promise.all([
-            DataVault.encrypt(displaySubject),
-            DataVault.encrypt(displayBody)
+            DataProtection.encryptMessageContent(displaySubject, { field: 'subject' }),
+            DataProtection.encryptMessageContent(displayBody, { field: 'body' })
         ]);
 
         const msg: UserMessage = {
@@ -675,8 +676,8 @@ CEO, ORBI`
             if (data) {
                 return Promise.all(data.map(async (msg) => ({
                     ...msg,
-                    subject: await DataVault.decrypt(msg.subject).catch(() => msg.subject),
-                    body: await DataVault.decrypt(msg.body).catch(() => msg.body)
+                    subject: await DataProtection.decryptMessageContent(msg.subject, msg.subject),
+                    body: await DataProtection.decryptMessageContent(msg.body, msg.body)
                 })));
             }
         }

@@ -3,12 +3,12 @@
  * =======================
  * This file has been replaced by the dynamic provider registry system.
  * 
- * SEE: cardProvider.ts (dynamic provider implementation)
- * SEE: cardProviderIntegration.ts (registry initialization)
+ * SEE: GenericRestProvider.ts (registry-driven provider execution)
+ * SEE: ProviderFactory.ts (runtime provider resolution)
  * SEE: cardRoutes.ts (API endpoints)
  * 
  * The card payment processor is now registered in the Admin UI provider registry
- * just like mpesaProvider, stripeProvider, and other payment providers.
+ * just like other payment providers.
  * 
  * No manual provider modules are needed - all configuration is done through:
  * 1. Admin UI: /api/admin/partners (provider registry management)
@@ -22,13 +22,10 @@
  *   import { cardProcessor } from './cardProcessor.ts';
  *   const token = await cardProcessor.tokenizeCard(userId, cardData);
  * 
- * NEW (Dynamic Registry):
- *   import { CardProvider } from './providers/cardProvider.ts';
- *   import { initializeCardProvider } from './cardProviderIntegration.ts';
- *   
- *   // During app startup:
- *   initializeCardProvider();
- *   
+ * NEW (Registry Runtime):
+ *   // Provider execution is resolved at runtime from financial_partners
+ *   // through ProviderFactory -> GenericRestProvider.
+ *
  *   // All providers route through gateway:
  *   const gateway = gatewayRouter.getGateway('CARD');
  *   const auth = await gateway.authorizePayment(initiation);

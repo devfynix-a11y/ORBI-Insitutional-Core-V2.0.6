@@ -7,6 +7,7 @@ import { institutionalFundsService } from './InstitutionalFundsService.js';
 import { EntProcessor } from '../enterprise/wealth/EnterprisePaymentProcessor.js';
 import { platformFeeService } from './PlatformFeeService.js';
 import crypto from 'crypto';
+import { DataProtection } from '../security/DataProtection.js';
 
 /**
  * ORBI PAYMENT CARD PROCESSOR (V2.0)
@@ -114,8 +115,14 @@ export class CardProcessor {
     const fingerprint = this.generateFingerprint(cardRequest.cardNumber);
 
     // 3. ENCRYPT SENSITIVE CARD DATA (PCI-DSS)
-    const encryptedCardNumber = await DataVault.encrypt(cardRequest.cardNumber);
-    const encryptedCVV = await DataVault.encrypt(cardRequest.cvv);
+    const encryptedCardNumber = await DataProtection.encryptValue(cardRequest.cardNumber, {
+      domain: 'PCI_CARD_NUMBER',
+      userId,
+    });
+    const encryptedCVV = await DataProtection.encryptValue(cardRequest.cvv, {
+      domain: 'PCI_CVV',
+      userId,
+    });
 
     // 4. STORE TOKENIZED CARD
     const cardTokenId = `ct_${UUID.generate()}`;

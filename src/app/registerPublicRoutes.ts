@@ -12,6 +12,7 @@ import { registerOperationsRoutes } from '../routes/public/operations.js';
 import { registerWealthRoutes } from '../routes/public/wealth.js';
 import { registerProviderRoutes, mountProviderRoutes } from '../routes/providers/index.js';
 import gatewayRoutes from '../../backend/payments/gatewayRoutes.js';
+import { DataProtection } from '../../backend/security/DataProtection.js';
 import { WAF } from '../../backend/security/waf.js';
 import { Sentinel } from '../../backend/security/sentinel.js';
 import { queryStringValue, TransactionAuditDecisionSchema, TransactionIssueSchema } from './helpers.js';
@@ -43,7 +44,7 @@ type Deps = {
   OTPService: any;
   ConfigClient: any;
   KMS: any;
-  DataVault: any;
+  DataProtection: any;
   TransactionSigning: any;
   SandboxController: any;
   Webhooks: any;
@@ -112,7 +113,7 @@ export const registerAppPublicRoutes = (deps: Deps) => {
     OTPService,
     ConfigClient,
     KMS,
-    DataVault,
+    DataProtection,
     TransactionSigning,
     SandboxController,
     Webhooks,
@@ -244,7 +245,7 @@ export const registerAppPublicRoutes = (deps: Deps) => {
     LogicCore,
     ConfigClient,
     KMS,
-    DataVault,
+    DataProtection,
     TransactionSigning,
     SandboxController,
     sandboxRoutesEnabled,

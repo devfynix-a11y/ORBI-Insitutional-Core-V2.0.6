@@ -4,6 +4,7 @@ import { getSupabase } from '../services/supabaseClient.js';
 import { DataVault } from '../backend/security/encryption.js';
 import { UUID } from '../services/utils.js';
 import { Storage } from '../backend/storage.js';
+import { providerSecretVault } from '../backend/payments/providers/ProviderSecretVault.js';
 
 export type SystemNodeRole = 'GOV_TAX' | 'SERVICE_FEE' | 'ESCROW_VAULT' | 'BANK_POOL' | 'FEE_COLLECTOR' | 'OPERATIONAL_RESERVE';
 
@@ -165,7 +166,10 @@ class RegulatoryControl {
     public async registerPartner(name: string, type: string, icon: string, color: string, connection: string, metadata?: any): Promise<FinancialPartner> {
         const sb = getSupabase();
         if (!sb) throw new Error("CLOUD_NODE_OFFLINE");
-        const encryptedSecret = await DataVault.encrypt(connection);
+        const encryptedSecret = await providerSecretVault.wrapSecret(connection, 'connection_secret', {
+            domain: 'REGULATORY_PARTNER',
+            partnerName: name,
+        });
         const newPartner: Partial<FinancialPartner> = {
             id: UUID.generate(), name, type: type as any, icon, color,
             connection_secret: encryptedSecret, provider_metadata: metadata || {},

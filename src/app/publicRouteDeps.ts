@@ -38,7 +38,7 @@ import { FXEngine } from '../../backend/ledger/FXEngine.js';
 import { TransactionSigning } from '../../backend/src/modules/transaction/signing.service.js';
 import { OTPService } from '../../backend/security/otpService.js';
 import { KMS } from '../../backend/security/kms.js';
-import { DataVault } from '../../backend/security/encryption.js';
+import { DataProtection } from '../../backend/security/DataProtection.js';
 import { SandboxController } from '../../backend/sandbox/sandboxController.js';
 import { syncUserIdentityClassification } from './identity.js';
 
@@ -99,7 +99,7 @@ export const buildPublicRouteDeps = ({
   OTPService,
   ConfigClient,
   KMS,
-  DataVault,
+  DataProtection,
   TransactionSigning,
   SandboxController,
   Webhooks,

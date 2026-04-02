@@ -2,6 +2,7 @@ import { jsPDF } from "jspdf";
 import { Transaction } from '../types.js';
 import { CurrencyUtils, EnvUtils, APP_LOGO_URL } from '../services/utils.js';
 import { DataVault } from '../backend/security/encryption.js';
+import { DataProtection } from '../backend/security/DataProtection.js';
 
 /**
  * ORBI MODERN RECEIPT ENGINE V6.0
@@ -14,7 +15,7 @@ export const ReceiptEngine = {
     private: {
         async decryptValue(v: any): Promise<string> {
             if (typeof v === 'string' && v.startsWith('enc_v')) {
-                const res = await DataVault.decrypt(v);
+                const res = await DataProtection.decryptValue(v);
                 return String(res);
             }
             return String(v || '');

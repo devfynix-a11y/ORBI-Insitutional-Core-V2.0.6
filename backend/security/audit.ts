@@ -1,9 +1,9 @@
 
 import { UUID } from '../../services/utils.js';
 import { getSupabase } from '../supabaseClient.js';
-import { KMS } from './kms.js';
 import { AuditLogEntry, AuditEventType } from '../../types.js';
 import { SocketRegistry } from '../infrastructure/SocketRegistry.js';
+import { Signatures } from './SignatureService.js';
 
 export type { AuditEventType };
 
@@ -81,20 +81,7 @@ class AuditLogService {
 
     private async signPayload(payload: string): Promise<string> {
         try {
-            await KMS.waitReady();
-            const key = await KMS.getActiveKey('SIGNING');
-            if (!key) return `unsigned_${Date.now()}`;
-            
-            // Determine algorithm based on key
-            const algorithm = key.algorithm.name === 'ECDSA' 
-                ? { name: 'ECDSA', hash: { name: 'SHA-256' } }
-                : { name: 'HMAC' };
-
-            const signature = await crypto.subtle.sign(algorithm, key, new TextEncoder().encode(payload));
-            const bytes = new Uint8Array(signature);
-            let binary = '';
-            for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-            return btoa(binary);
+            return await Signatures.sign(payload);
         } catch (e) { 
             console.error("[Audit] Signing fault:", e);
             return `signing_fault_${Date.now()}`; 

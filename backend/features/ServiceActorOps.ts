@@ -10,6 +10,7 @@ import type { User, UserRole } from '../../types.js';
 import { Messaging } from './MessagingService.js';
 import { createHash } from 'crypto';
 import { DEFAULT_INSTITUTIONAL_APP_ORIGIN, DEFAULT_MOBILE_APP_ORIGIN, TRUSTED_MOBILE_APP_ORIGINS } from '../config/appIdentity.js';
+import { DataProtection } from '../security/DataProtection.js';
 
 type ServiceActorRole = 'MERCHANT' | 'AGENT';
 
@@ -232,7 +233,7 @@ class ServiceActorOperations {
         const amount =
             Number(
                 typeof transaction.amount === 'string'
-                    ? await DataVault.decrypt(transaction.amount)
+                    ? await DataProtection.decryptAmount(transaction.amount)
                     : transaction.amount || 0,
             ) || 0;
 
@@ -876,7 +877,7 @@ class ServiceActorOperations {
                 customer_user_id: transaction.user_id,
                 direction:
                     transaction.type === 'withdrawal' || transaction.type === 'expense' ? 'outbound' : 'inbound',
-                amount: Number(await DataVault.decrypt(transaction.amount || 0)),
+                amount: await DataProtection.decryptAmount(transaction.amount || 0),
                 currency: transaction.currency || 'TZS',
                 status: transaction.status,
                 service_type: 'merchant_payment',
@@ -909,7 +910,7 @@ class ServiceActorOperations {
                 agent_wallet_id: primaryWallet?.id || null,
                 customer_user_id: transaction.user_id,
                 direction: transaction?.metadata?.cash_direction === 'withdrawal' ? 'outbound' : 'inbound',
-                amount: Number(await DataVault.decrypt(transaction.amount || 0)),
+                amount: await DataProtection.decryptAmount(transaction.amount || 0),
                 currency: transaction.currency || 'TZS',
                 status: transaction.status,
                 service_type:
@@ -978,7 +979,7 @@ class ServiceActorOperations {
             .maybeSingle();
 
         const sourceAmount = Number(
-            typeof transaction.amount === 'string' ? await DataVault.decrypt(transaction.amount) : transaction.amount || 0,
+            typeof transaction.amount === 'string' ? await DataProtection.decryptAmount(transaction.amount) : transaction.amount || 0,
         );
         let rate = 0;
         let fixedAmount = 0;

@@ -9,6 +9,7 @@ import { BankingEngine } from './transactionEngine.js';
 import { ProviderFactory } from '../payments/providers/ProviderFactory.js';
 import { SocketRegistry } from '../infrastructure/SocketRegistry.js';
 import { Messaging } from '../features/MessagingService.js';
+import { DataProtection } from '../security/DataProtection.js';
 // emailService and brevoSmsService removed as per user request.
 
 /**
@@ -137,7 +138,7 @@ export class ReconciliationService {
                 let ledgerBalance = 0;
                 if (legs) {
                     for (const leg of legs) {
-                        const amt = Number(await DataVault.decrypt(leg.amount));
+                        const amt = await DataProtection.decryptAmount(leg.amount);
                         if (leg.entry_type === 'CREDIT') ledgerBalance += amt;
                         else ledgerBalance -= amt;
                     }
@@ -207,11 +208,12 @@ export class ReconciliationService {
                     if (tx.status === 'completed' || tx.status === 'processing') {
                         console.warn(`[ReconEngine] GHOST_TX: ${tx.id} has no ledger legs!`);
                         anomalies++;
+                        const txAmount = await DataProtection.decryptAmount(tx.amount);
                         await this.saveReport({
                             type: 'SYSTEM',
-                            expected_balance: Number(await DataVault.decrypt(tx.amount)),
+                            expected_balance: txAmount,
                             actual_balance: 0,
-                            difference: Number(await DataVault.decrypt(tx.amount)),
+                            difference: txAmount,
                             status: 'MISMATCH',
                             metadata: { txId: tx.id, issue: 'GHOST_TRANSACTION' }
                         });
@@ -223,7 +225,7 @@ export class ReconciliationService {
                 if (tx.type === 'transfer') {
                     let sum = 0;
                     for (const leg of legs) {
-                        const amt = Number(await DataVault.decrypt(leg.amount));
+                        const amt = await DataProtection.decryptAmount(leg.amount);
                         if (leg.entry_type === 'CREDIT') sum += amt;
                         else sum -= amt;
                     }
@@ -293,10 +295,10 @@ export class ReconciliationService {
                 }
 
                 // Decrypt and sum
-                const txAmount = Number(await DataVault.decrypt(tx.amount));
+                const txAmount = await DataProtection.decryptAmount(tx.amount);
                 let ledgerSum = 0;
                 for (const leg of legs) {
-                    const legAmt = Number(await DataVault.decrypt(leg.amount));
+                    const legAmt = await DataProtection.decryptAmount(leg.amount);
                     if (leg.entry_type === 'CREDIT') ledgerSum += legAmt;
                     else ledgerSum -= legAmt;
                 }

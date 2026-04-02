@@ -4,6 +4,7 @@ import { TransactionService } from '../../ledger/transactionService.js';
 import { Audit } from '../security/audit.js';
 import { DataVault } from '../security/encryption.js';
 import { MonitoringService } from '../infrastructure/MonitoringService.js';
+import { DataProtection } from '../security/DataProtection.js';
 
 /**
  * ORBI RECONCILIATION ENGINE (V5.0)
@@ -106,8 +107,8 @@ export class ReconciliationEngineService {
 
         for (let i = 0; i < legs.length; i++) {
             const leg = legs[i];
-            const amount = Number(await DataVault.decrypt(leg.amount));
-            const reportedBalanceAfter = Number(await DataVault.decrypt(leg.balance_after_encrypted || leg.balance_after));
+            const amount = await DataProtection.decryptAmount(leg.amount);
+            const reportedBalanceAfter = await DataProtection.decryptAmount(leg.balance_after_encrypted || leg.balance_after);
 
             if (leg.entry_type === 'CREDIT') {
                 calculatedBalance += amount;

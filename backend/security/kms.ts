@@ -3,7 +3,7 @@ import { getSupabase, getAdminSupabase } from '../supabaseClient.js';
 import { UUID, EnvUtils } from '../../services/utils.js';
 import { CONFIG } from '../../services/config.js';
 
-export type KeyType = 'AUTH' | 'ENCRYPTION' | 'SYSTEM' | 'SIGNING';
+export type KeyType = 'AUTH' | 'ENCRYPTION' | 'SECRET_WRAPPING' | 'SYSTEM' | 'SIGNING';
 
 interface KeyMetadata {
     id: string; 
@@ -17,7 +17,7 @@ interface KeyMetadata {
 class SecureKMSService {
     private keys: Map<string, KeyMetadata> = new Map();
     private keyMaterial: Map<string, CryptoKey> = new Map();
-    private activeKeyIds: Record<KeyType, string> = { AUTH: '', ENCRYPTION: '', SYSTEM: '', SIGNING: '' };
+    private activeKeyIds: Record<KeyType, string> = { AUTH: '', ENCRYPTION: '', SECRET_WRAPPING: '', SYSTEM: '', SIGNING: '' };
     
     private initPromise: Promise<void> | null = null;
     private isReady = false;
@@ -134,7 +134,7 @@ class SecureKMSService {
                 return await this.initDeterministic(primaryKeyMaterial);
             }
 
-            const types: KeyType[] = ['AUTH', 'ENCRYPTION', 'SYSTEM', 'SIGNING'];
+            const types: KeyType[] = ['AUTH', 'ENCRYPTION', 'SECRET_WRAPPING', 'SYSTEM', 'SIGNING'];
             const primaryWrappingKey = await this.getWrappingKey(uniqueSecrets[0]);
             
             // 1. Unwrap and load all keys (both ACTIVE and ROTATED)
@@ -195,11 +195,11 @@ class SecureKMSService {
 
     private async initDeterministic(masterKeyMaterial: CryptoKey) {
         const encoder = new TextEncoder();
-        const types: KeyType[] = ['AUTH', 'ENCRYPTION', 'SYSTEM', 'SIGNING'];
+        const types: KeyType[] = ['AUTH', 'ENCRYPTION', 'SECRET_WRAPPING', 'SYSTEM', 'SIGNING'];
         for (const type of types) {
             const id = `key-v1-det-${type.toLowerCase()}`; 
             let key: CryptoKey;
-            if (type === 'ENCRYPTION') {
+            if (type === 'ENCRYPTION' || type === 'SECRET_WRAPPING') {
                 const salt = process.env.KMS_SALT ? encoder.encode(`${process.env.KMS_SALT}-${type}`) : encoder.encode(`salt-v1-${type}`);
                 key = await crypto.subtle.deriveKey(
                     { name: 'PBKDF2', salt: salt, iterations: 310000, hash: 'SHA-256' },
@@ -230,7 +230,7 @@ class SecureKMSService {
         const id = `key-v${version}-${type.toLowerCase()}-${UUID.generate().slice(0, 8)}`;
         let key: CryptoKey;
 
-        if (type === 'ENCRYPTION') {
+        if (type === 'ENCRYPTION' || type === 'SECRET_WRAPPING') {
             key = await crypto.subtle.generateKey(
                 { name: 'AES-GCM', length: 256 },
                 true,
@@ -299,7 +299,7 @@ class SecureKMSService {
         let algorithm: any;
         let usages: KeyUsage[];
 
-        if (dbKey.type === 'ENCRYPTION') {
+        if (dbKey.type === 'ENCRYPTION' || dbKey.type === 'SECRET_WRAPPING') {
             algorithm = { name: 'AES-GCM', length: 256 };
             usages = ['encrypt', 'decrypt'];
         } else if (dbKey.type === 'SIGNING') {
