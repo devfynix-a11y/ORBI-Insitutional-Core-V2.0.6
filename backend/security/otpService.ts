@@ -5,6 +5,9 @@ import { RedisClusterFactory } from '../infrastructure/RedisClusterFactory.js';
 import { getAdminSupabase } from '../../services/supabaseClient.js';
 import { orbiGatewayService } from '../infrastructure/orbiGatewayService.js';
 import parsePhoneNumber from 'libphonenumber-js';
+import { logger } from '../infrastructure/logger.js';
+
+const otpLogger = logger.child({ component: 'otp_service' });
 
 interface OTPRecord {
     code: string;
@@ -25,13 +28,13 @@ export class OTPService {
         const throttleKey = this.THROTTLE_PREFIX + userId + ':' + action;
         const isThrottled = await RedisManager.get(throttleKey);
         if (isThrottled) {
-            console.warn(`[OTPService] Throttling active for ${userId} on ${action}`);
+            otpLogger.warn('otp.throttled', { actor_id: userId, action });
             return { requestId: 'THROTTLED' };
         }
 
         // Validation
         if (!contact) {
-            console.error(`[OTPService] Cannot send OTP for ${action}: No contact provided for user ${userId}`);
+            otpLogger.error('otp.missing_contact', { actor_id: userId, action });
             return { requestId: 'ERROR_NO_CONTACT' };
         }
 
@@ -167,12 +170,12 @@ export class OTPService {
                 }
             }
 
-            console.log(`[OTPService] Generating OTP for ${action} (User: ${userId}, Contact: ${actualContact}, Type: ${actualType})`);
+            otpLogger.info('otp.dispatch_started', { actor_id: userId, action, delivery_type: actualType, contact: actualContact, request_id: requestId });
 
             const ANDROID_HASH = process.env.ORBI_ANDROID_SMS_HASH;
 
             if (actualType === 'sms') {
-                console.log(`[OTPService] Sending SMS OTP to ${actualContact}`);
+                otpLogger.info('otp.dispatch_channel_selected', { actor_id: userId, action, delivery_type: 'sms', contact: actualContact, request_id: requestId });
                 await orbiGatewayService.sendTemplate('OTP_Message', actualContact, { 
                     otp: code, 
                     name: name,
@@ -180,7 +183,7 @@ export class OTPService {
                     androidHash: ANDROID_HASH 
                 }, { messageType: 'transactional', language, fcmToken, channel: 'sms', requestId });
             } else if (actualType === 'whatsapp') {
-                console.log(`[OTPService] Sending WhatsApp OTP to ${actualContact}`);
+                otpLogger.info('otp.dispatch_channel_selected', { actor_id: userId, action, delivery_type: 'whatsapp', contact: actualContact, request_id: requestId });
                 await orbiGatewayService.sendTemplate('OTP_Message', actualContact, { 
                     otp: code, 
                     name: name,
@@ -188,7 +191,7 @@ export class OTPService {
                     androidHash: ANDROID_HASH 
                 }, { messageType: 'transactional', language, fcmToken, channel: 'whatsapp', requestId });
             } else if (actualType === 'email') {
-                console.log(`[OTPService] Sending Email OTP to ${actualContact}`);
+                otpLogger.info('otp.dispatch_channel_selected', { actor_id: userId, action, delivery_type: 'email', contact: actualContact, request_id: requestId });
                 await orbiGatewayService.sendTemplate('OTP_Message', actualContact, { 
                     otp: code, 
                     name: name,
@@ -196,7 +199,7 @@ export class OTPService {
                     androidHash: ANDROID_HASH 
                 }, { messageType: 'transactional', language, fcmToken, channel: 'email', requestId });
             } else if (actualType === 'push' && fcmToken) {
-                console.log(`[OTPService] Sending Push OTP to ${actualContact}`);
+                otpLogger.info('otp.dispatch_channel_selected', { actor_id: userId, action, delivery_type: 'push', contact: actualContact, request_id: requestId });
                 await orbiGatewayService.sendTemplate('OTP_Message', fcmToken, { 
                     otp: code, 
                     name: name,
@@ -205,9 +208,9 @@ export class OTPService {
                 }, { messageType: 'transactional', language, fcmToken, channel: 'push', requestId });
             }
             
-            console.info(`[OTPService] OTP Code ${code} generated for ${userId}. Delivery type ${actualType} handled via orbiGatewayService.`);
+            otpLogger.info('otp.dispatch_completed', { actor_id: userId, action, delivery_type: actualType, request_id: requestId });
         } catch (error) {
-            console.error(`[OTPService] Fault during dispatch:`, error);
+            otpLogger.error('otp.dispatch_failed', { actor_id: userId, action, delivery_type: actualType, request_id: requestId }, error);
         }
 
         return { requestId, code, deliveryType: actualType, deliveryContact: actualContact };
@@ -226,30 +229,30 @@ export class OTPService {
         }
 
         if (!record) {
-            console.warn(`[OTPService] Verification failed: No record found for key ${key} (User: ${userId})`);
+            otpLogger.warn('otp.verify_record_missing', { actor_id: userId, request_id: requestId });
             return false;
         }
 
         if (record.userId !== userId) {
-            console.warn(`[OTPService] Verification failed: User ID mismatch. Expected ${record.userId}, got ${userId}`);
+            otpLogger.warn('otp.verify_user_mismatch', { actor_id: userId, expected_actor_id: record.userId, request_id: requestId });
             return false;
         }
 
         if (record.expiresAt < Date.now()) {
-            console.warn(`[OTPService] Verification failed: OTP expired for key ${key}`);
+            otpLogger.warn('otp.verify_expired', { actor_id: userId, request_id: requestId });
             await RedisManager.delete(key);
             await this.removeFromDB(userId, requestId);
             return false;
         }
 
         if (record.code === code) {
-            console.log(`[OTPService] Verification successful for key ${key}`);
+            otpLogger.info('otp.verify_succeeded', { actor_id: userId, request_id: requestId });
             await RedisManager.delete(key);
             await this.removeFromDB(userId, requestId);
             return true;
         }
 
-        console.warn(`[OTPService] Verification failed: Code mismatch for key ${key}. Expected ${record.code}, got ${code}`);
+        otpLogger.warn('otp.verify_code_mismatch', { actor_id: userId, request_id: requestId });
         return false;
     }
 
@@ -280,7 +283,7 @@ export class OTPService {
                 user_metadata: { ...metadata, active_otps: cleanedOtps }
             });
         } catch (e) {
-            console.error('[OTPService] DB Save Fallback Failed:', e);
+            otpLogger.error('otp.db_save_fallback_failed', { actor_id: userId, request_id: requestId }, e);
         }
     }
 
@@ -293,7 +296,7 @@ export class OTPService {
             const otps = data.user?.user_metadata?.active_otps || {};
             return otps[requestId] || null;
         } catch (e) {
-            console.error('[OTPService] DB Get Fallback Failed:', e);
+            otpLogger.error('otp.db_get_fallback_failed', { actor_id: userId, request_id: requestId }, e);
             return null;
         }
     }
@@ -314,7 +317,7 @@ export class OTPService {
                 });
             }
         } catch (e) {
-            console.error('[OTPService] DB Remove Fallback Failed:', e);
+            otpLogger.error('otp.db_remove_fallback_failed', { actor_id: userId, request_id: requestId }, e);
         }
     }
 

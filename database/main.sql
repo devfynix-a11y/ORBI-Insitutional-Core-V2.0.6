@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
     meta JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+COMMENT ON TABLE public.audit_logs IS 'LEGACY / NON-AUTHORITATIVE. Do not use for production-critical financial, settlement, webhook, or privileged repair auditing. Use audit_trail, transaction_events, financial_events, provider_webhook_events, and settlement_lifecycle instead.';
 
 CREATE TABLE IF NOT EXISTS public.users (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -4272,6 +4273,9 @@ CREATE INDEX IF NOT EXISTS idx_transactions_status_updated ON public.transaction
 CREATE INDEX IF NOT EXISTS idx_transactions_review_timeout ON public.transactions(updated_at DESC) WHERE status = 'held_for_review';
 CREATE INDEX IF NOT EXISTS idx_transactions_processing_timeout ON public.transactions(updated_at DESC) WHERE status = 'processing';
 CREATE INDEX IF NOT EXISTS idx_transaction_events_transaction_created ON public.transaction_events(transaction_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_trail_transaction_timestamp ON public.audit_trail(transaction_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_trail_event_timestamp ON public.audit_trail(event_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_trail_actor_timestamp ON public.audit_trail(actor_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_institutional_payment_accounts_role ON public.institutional_payment_accounts(role, currency, status);
 CREATE INDEX IF NOT EXISTS idx_institutional_payment_accounts_provider ON public.institutional_payment_accounts(provider_id);
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_user_date ON public.external_fund_movements(user_id, created_at);

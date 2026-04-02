@@ -17,9 +17,11 @@ import { GatewayService } from './gatewayService.js';
 import { settlementLifecycleManager } from './settlementLifecycleManager.js';
 import { settlementScheduler } from './settlementScheduler.js';
 import { Webhooks } from './webhookHandler.js';
+import { buildRequestLogContext, logger } from '../infrastructure/logger.js';
 
 const router = Router();
 const gatewayService = new GatewayService();
+const gatewayRouteLogger = logger.child({ component: 'gateway_routes' });
 
 const InitiatePaymentSchema = z.object({
   amount: z.number().positive('Amount must be positive'),
@@ -178,7 +180,7 @@ router.post('/gateway/payment/initiate', async (req: Request, res: Response) => 
       currency,
     });
   } catch (error: any) {
-    console.error('[GatewayAPI] Initiate payment error:', error.message);
+    gatewayRouteLogger.error('gateway.payment_initiate_failed', buildRequestLogContext(req, { provider_id: req.body?.providerId, amount: req.body?.amount, currency: req.body?.currency }), error);
     res.status(400).json({ error: error.message });
   }
 });
@@ -258,7 +260,7 @@ router.post('/gateway/payment/:orderId/settle', async (req: Request, res: Respon
       message: `Payment recorded externally from ${providerId}. Will be verified and settled to wallet in ${lifecycle.autoSettleAfterMinutes} minutes.`,
     });
   } catch (error: any) {
-    console.error('[GatewayAPI] Settlement error:', error.message);
+    gatewayRouteLogger.error('gateway.settlement_failed', buildRequestLogContext(req, { order_id: req.params?.orderId, provider_id: req.body?.providerId, target_wallet_id: req.body?.targetWalletId }), error);
     res.status(400).json({ error: error.message });
   }
 });
@@ -442,7 +444,7 @@ router.post('/gateway/settlement/:settlementId/confirm', async (req: Request, re
       newPhase: updated?.current_phase,
     });
   } catch (error: any) {
-    console.error('[GatewayAPI] Confirm settlement error:', error.message);
+    gatewayRouteLogger.error('gateway.confirm_settlement_failed', buildRequestLogContext(req, { settlement_id: req.params?.settlementId }), error);
     res.status(400).json({ error: error.message });
   }
 });
@@ -560,7 +562,7 @@ router.post('/webhooks/gateway/:providerId', async (req: Request, res: Response)
       req.header('x-request-id') ||
       undefined;
 
-    console.info(`[GatewayWebhook] Received webhook from ${providerId}`);
+    gatewayRouteLogger.info('gateway.webhook_received', buildRequestLogContext(req, { provider_id: providerId }));
     await Webhooks.handleCallback(req.body, providerId, {
       signature: signatureHeader,
       rawPayload: (req as any).rawBody,

@@ -1,7 +1,10 @@
+import { logger } from './logger.js';
 import parsePhoneNumber from 'libphonenumber-js';
 import { TemplateName, TemplatePayloads } from '../templates/template_types.js';
 
-export class OrbiGatewayService {
+export const gatewayInfraLogger = logger.child({ component: 'orbi_gateway_service' });
+
+class OrbiGatewayService {
     private apiKey: string | undefined;
     private baseUrl: string | undefined;
 
@@ -12,10 +15,10 @@ export class OrbiGatewayService {
         );
         
         if (!this.apiKey) {
-            console.warn('OrbiGatewayService: ORBI_GATEWAY_API_KEY is missing.');
+            gatewayInfraLogger.warn('gateway_service.api_key_missing');
         }
         if (!this.baseUrl) {
-            console.warn('OrbiGatewayService: ORBI_GATEWAY_URL is missing.');
+            gatewayInfraLogger.warn('gateway_service.url_missing');
         }
     }
 
@@ -39,7 +42,7 @@ export class OrbiGatewayService {
 
     async sendSms(recipient: string, body: string, language: string = 'en', ownerUid?: string, ownerEmail?: string, requestId?: string): Promise<boolean> {
         if (!this.apiKey || !this.baseUrl) {
-            console.error('OrbiGatewayService: Missing configuration. SMS not sent.');
+            gatewayInfraLogger.error('gateway_service.sms_missing_configuration', { channel: 'sms' });
             return false;
         }
 
@@ -66,21 +69,21 @@ export class OrbiGatewayService {
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error(`OrbiGatewayService: Failed to send SMS. Endpoint: ${endpoint}, Status: ${response.status}, Error: ${errorText}`);
+                gatewayInfraLogger.error('gateway_service.sms_failed', { endpoint, status_code: response.status, channel: 'sms', recipient: normalizedRecipient, error_text: errorText });
                 return false;
             }
 
-            console.log(`OrbiGatewayService: SMS sent successfully to ${normalizedRecipient}`);
+            gatewayInfraLogger.info('gateway_service.sms_sent', { channel: 'sms', recipient: normalizedRecipient });
             return true;
         } catch (error) {
-            console.error('OrbiGatewayService: Error sending SMS:', error);
+            gatewayInfraLogger.error('gateway_service.sms_exception', { channel: 'sms', recipient: normalizedRecipient }, error);
             return false;
         }
     }
 
     async sendEmail(recipient: string, subject: string, body: string, html?: string, language: string = 'en', ownerUid?: string, ownerEmail?: string, requestId?: string): Promise<boolean> {
         if (!this.apiKey || !this.baseUrl) {
-            console.error('OrbiGatewayService: Missing configuration. Email not sent.');
+            gatewayInfraLogger.error('gateway_service.email_missing_configuration', { channel: 'email', recipient });
             return false;
         }
 
@@ -107,21 +110,21 @@ export class OrbiGatewayService {
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error(`OrbiGatewayService: Failed to send Email. Endpoint: ${endpoint}, Status: ${response.status}, Error: ${errorText}`);
+                gatewayInfraLogger.error('gateway_service.email_failed', { endpoint, status_code: response.status, channel: 'email', recipient, error_text: errorText });
                 return false;
             }
 
-            console.log(`OrbiGatewayService: Email sent successfully to ${recipient}`);
+            gatewayInfraLogger.info('gateway_service.email_sent', { channel: 'email', recipient });
             return true;
         } catch (error) {
-            console.error('OrbiGatewayService: Error sending Email:', error);
+            gatewayInfraLogger.error('gateway_service.email_exception', { channel: 'email', recipient }, error);
             return false;
         }
     }
 
     async sendPush(fcmToken: string, title: string, body: string, data: Record<string, any> = {}, language: string = 'en', ownerUid?: string, ownerEmail?: string, requestId?: string): Promise<boolean> {
         if (!this.apiKey || !this.baseUrl) {
-            console.error('OrbiGatewayService: Missing configuration. Push notification not sent.');
+            gatewayInfraLogger.error('gateway_service.push_missing_configuration', { channel: 'push' });
             return false;
         }
 
@@ -137,7 +140,7 @@ export class OrbiGatewayService {
                 requestId
             };
 
-            console.log(`[OrbiGatewayService] Full Push Payload for POST request: ${JSON.stringify(payload, null, 2)}`);
+            gatewayInfraLogger.debug('gateway_service.push_payload_prepared', { channel: 'push', payload });
 
             const endpoint = `${this.baseUrl}/api/send-push`;
             const response = await fetch(endpoint, {
@@ -151,14 +154,14 @@ export class OrbiGatewayService {
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error(`OrbiGatewayService: Failed to send Push. Endpoint: ${endpoint}, Status: ${response.status}, Error: ${errorText}`);
+                gatewayInfraLogger.error('gateway_service.push_failed', { endpoint, status_code: response.status, channel: 'push', error_text: errorText });
                 return false;
             }
 
-            console.log(`OrbiGatewayService: Push notification sent successfully.`);
+            gatewayInfraLogger.info('gateway_service.push_sent', { channel: 'push' });
             return true;
         } catch (error) {
-            console.error('OrbiGatewayService: Error sending Push:', error);
+            gatewayInfraLogger.error('gateway_service.push_exception', { channel: 'push' }, error);
             return false;
         }
     }
@@ -169,12 +172,12 @@ export class OrbiGatewayService {
         data: TemplatePayloads[T], 
         options: { channel?: string; language?: string; messageType?: 'transactional' | 'promotional'; fcmToken?: string; ownerUid?: string; ownerEmail?: string; requestId?: string } = {}
     ): Promise<boolean> {
+        const { channel = 'sms', language = 'en', messageType = 'transactional', fcmToken, ownerUid, ownerEmail, requestId } = options;
+
         if (!this.apiKey || !this.baseUrl) {
-            console.error('OrbiGatewayService: Missing configuration. Template message not sent.');
+            gatewayInfraLogger.error('gateway_service.template_missing_configuration', { channel, recipient, template_name: templateName });
             return false;
         }
-
-        const { channel = 'sms', language = 'en', messageType = 'transactional', fcmToken, ownerUid, ownerEmail, requestId } = options;
 
         const normalizedRecipient = (channel === 'sms' || channel === 'whatsapp') ? this.normalizePhone(recipient) : recipient;
 
@@ -192,7 +195,7 @@ export class OrbiGatewayService {
                 ...(fcmToken && channel !== 'push' ? { fcmToken } : {})
             };
 
-            console.log(`[OrbiGatewayService] Full Template Payload for POST request: ${JSON.stringify(payload, null, 2)}`);
+            gatewayInfraLogger.debug('gateway_service.template_payload_prepared', { channel, recipient, template_name: templateName, payload });
 
             const endpoint = `${this.baseUrl}/api/send-template`;
             const response = await fetch(endpoint, {
@@ -206,14 +209,14 @@ export class OrbiGatewayService {
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error(`OrbiGatewayService: Failed to send template message. Endpoint: ${endpoint}, Status: ${response.status}, Error: ${errorText}`);
+                gatewayInfraLogger.error('gateway_service.template_failed', { endpoint, status_code: response.status, channel, recipient, template_name: templateName, error_text: errorText });
                 return false;
             }
 
-            console.log(`OrbiGatewayService: Template message (${templateName}) sent successfully to ${recipient} via ${channel}`);
+            gatewayInfraLogger.info('gateway_service.template_sent', { channel, recipient, template_name: templateName });
             return true;
         } catch (error) {
-            console.error('OrbiGatewayService: Error sending template message:', error);
+            gatewayInfraLogger.error('gateway_service.template_exception', { channel, recipient, template_name: templateName }, error);
             return false;
         }
     }

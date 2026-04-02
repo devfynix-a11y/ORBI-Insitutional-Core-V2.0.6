@@ -10,11 +10,21 @@ let lastBrokerHeartbeat: any = null;
 type MonitoringDeps = {
   authenticateApiKey: any;
   ReconEngine: { runFullAudit: () => Promise<any>; auditWalletTimeline: (walletId: string) => Promise<any> };
+  OperationalHealthService: {
+    captureSnapshot: () => Promise<any>;
+    persistSnapshot: (snapshot?: any) => Promise<any>;
+    renderPrometheus: (snapshot: any) => string;
+  };
 };
 
 type TopLevelDeps = {
   ResilienceEngine: { getCircuitStates: () => any };
   LogicCore: { getAuditTrail: () => Promise<any[]> };
+  OperationalHealthService: {
+    captureSnapshot: () => Promise<any>;
+    persistSnapshot: (snapshot?: any) => Promise<any>;
+    renderPrometheus: (snapshot: any) => string;
+  };
 };
 
 type LegacyGatewayDeps = {
@@ -27,7 +37,7 @@ type LegacyGatewayDeps = {
 };
 
 export const registerMonitoringRoutes = (app: Express, deps: MonitoringDeps) => {
-  const { authenticateApiKey, ReconEngine } = deps;
+  const { authenticateApiKey, ReconEngine, OperationalHealthService } = deps;
 
   app.get('/api/admin/monitor/ledger-health', authenticateApiKey, async (_req, res) => {
     try {
@@ -56,10 +66,53 @@ export const registerMonitoringRoutes = (app: Express, deps: MonitoringDeps) => 
       res.status(500).json({ success: false, error: e.message });
     }
   });
+
+  app.get('/api/admin/monitor/operational-health', authenticateApiKey, async (_req, res) => {
+    try {
+      const snapshot = await OperationalHealthService.captureSnapshot();
+      res.json({ success: true, data: snapshot });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.get('/api/admin/monitor/operational-metrics', authenticateApiKey, async (_req, res) => {
+    try {
+      const snapshot = await OperationalHealthService.captureSnapshot();
+      res.json({
+        success: true,
+        timestamp: snapshot.capturedAt,
+        status: snapshot.status,
+        connectivity: snapshot.connectivity,
+        jobs: snapshot.jobs,
+        metrics: snapshot.metrics,
+      });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.get('/api/admin/monitor/operational-metrics/prometheus', authenticateApiKey, async (_req, res) => {
+    try {
+      const snapshot = await OperationalHealthService.captureSnapshot();
+      res.type('text/plain').send(OperationalHealthService.renderPrometheus(snapshot));
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post('/api/admin/monitor/operational-metrics/snapshot', authenticateApiKey, async (_req, res) => {
+    try {
+      const snapshot = await OperationalHealthService.persistSnapshot();
+      res.json({ success: true, data: snapshot });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
 };
 
 export const registerTopLevelPublicRoutes = (app: Express, deps: TopLevelDeps) => {
-  const { ResilienceEngine, LogicCore } = deps;
+  const { ResilienceEngine, LogicCore, OperationalHealthService } = deps;
 
   app.get('/.well-known/assetlinks.json', (_req, res, next) => {
     const base64Hash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
@@ -103,14 +156,18 @@ export const registerTopLevelPublicRoutes = (app: Express, deps: TopLevelDeps) =
   app.get(['/health', '/heath'], async (_req, res) => {
     const breakerStates = ResilienceEngine.getCircuitStates();
     const ledgerIntegrity = await LogicCore.getAuditTrail().then((logs) => logs.length > 0).catch(() => false);
+    const operational = await OperationalHealthService.captureSnapshot().catch(() => null);
 
     res.json({
-      status: 'NOMINAL',
+      status: operational?.status || 'NOMINAL',
       node: process.env.RENDER_INSTANCE_ID || 'DPS-PRIMARY-RELAY',
       version: '28.0.0',
       uptime: (process as any).uptime(),
       circuits: breakerStates,
       ledger: ledgerIntegrity ? 'VERIFIED' : 'PENDING_SYNC',
+      connectivity: operational?.connectivity,
+      jobs: operational?.jobs,
+      metrics: operational?.metrics,
       ts: Date.now(),
     });
   });
@@ -218,19 +275,25 @@ export const registerLegacyGatewayRoute = (app: Express, deps: LegacyGatewayDeps
       }
 
       res.json({ success: true, data: result, ts: Date.now() });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: 'EXECUTION_FAULT', message: err.message });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message || 'OPERATION_FAILED' });
     }
   });
 };
 
 export const registerTerminalHandlers = (app: Express) => {
-  app.use((req, res, _next) => {
-    res.status(404).json({ success: false, error: 'NOT_FOUND', path: req.path });
+  app.use((req, res) => {
+    res.status(404).json({
+      success: false,
+      error: 'ROUTE_NOT_FOUND',
+      path: req.originalUrl,
+    });
   });
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    console.error('[System] Unhandled Error:', err);
-    res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: err.message || 'Unknown error' });
+    res.status(err?.status || 500).json({
+      success: false,
+      error: err?.message || 'INTERNAL_SERVER_ERROR',
+    });
   });
 };

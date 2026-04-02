@@ -4,6 +4,7 @@ import { configureCoreSecurityMiddleware, createGlobalIpLimiter } from '../middl
 import { authenticateApiKey } from '../../backend/middleware/apiKeyAuth.js';
 import { RedisClusterFactory } from '../../backend/infrastructure/RedisClusterFactory.js';
 import { ResilienceEngine } from '../../backend/infrastructure/ResilienceEngine.js';
+import { operationalHealthService } from '../../backend/infrastructure/OperationalHealthService.js';
 import { Server as LogicCore } from '../../backend/server.js';
 import { ReconciliationEngine as ReconEngine } from '../../backend/ledger/reconciliationEngine.js';
 
@@ -34,6 +35,7 @@ export const createAppContext = (app: Express) => {
   registerMonitoringRoutes(app, {
     authenticateApiKey,
     ReconEngine,
+    OperationalHealthService: operationalHealthService,
   });
 
   const globalIpLimiter = createGlobalIpLimiter(redisAvailable, redisClient);
@@ -41,6 +43,7 @@ export const createAppContext = (app: Express) => {
   registerTopLevelPublicRoutes(app, {
     ResilienceEngine,
     LogicCore,
+    OperationalHealthService: operationalHealthService,
   });
 
   return {

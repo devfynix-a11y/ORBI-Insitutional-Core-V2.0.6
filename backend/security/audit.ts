@@ -1,11 +1,14 @@
 
 import { UUID } from '../../services/utils.js';
-import { getSupabase } from '../supabaseClient.js';
+import { getAdminSupabase, getSupabase } from '../supabaseClient.js';
 import { AuditLogEntry, AuditEventType } from '../../types.js';
 import { SocketRegistry } from '../infrastructure/SocketRegistry.js';
 import { Signatures } from './SignatureService.js';
+import { logger } from '../infrastructure/logger.js';
 
 export type { AuditEventType };
+
+const auditLogger = logger.child({ component: 'audit_log_service' });
 
 /**
  * ORBI IMMUTABLE AUDIT LEDGER (V13.5)
@@ -27,7 +30,7 @@ class AuditLogService {
         this.integrityTimer = setInterval(async () => {
             const { valid, report } = await this.verifyIntegrity();
             if (!valid) {
-                console.error("[Audit] CRITICAL: AUDIT CHAIN COMPROMISED!", report);
+                auditLogger.error('audit.integrity_compromised', { report });
                 // In a real system, alert ThreatSentinel or trigger lockdown
                 SocketRegistry.broadcast({
                     type: 'SECURITY_ALERT',
@@ -45,7 +48,7 @@ class AuditLogService {
     }
 
     private async reconstructChain() {
-        const sb = getSupabase();
+        const sb = getAdminSupabase() || getSupabase();
         if (!sb) return;
 
         try {
@@ -69,7 +72,7 @@ class AuditLogService {
                 this.lastHash = this.logs[this.logs.length - 1].hash;
             }
         } catch (e) {
-            console.error("[Audit] Failed to reconstruct chain from Supabase:", e);
+            auditLogger.error('audit.reconstruct_chain_failed', undefined, e);
         }
     }
 
@@ -83,7 +86,7 @@ class AuditLogService {
         try {
             return await Signatures.sign(payload);
         } catch (e) { 
-            console.error("[Audit] Signing fault:", e);
+            auditLogger.error('audit.signing_failed', undefined, e);
             return `signing_fault_${Date.now()}`; 
         }
     }
@@ -121,7 +124,7 @@ class AuditLogService {
             payload: entry
         });
 
-        const sb = getSupabase();
+        const sb = getAdminSupabase() || getSupabase();
         if (sb) {
             try {
                 await sb.from('audit_trail').insert({
@@ -131,7 +134,7 @@ class AuditLogService {
                     transaction_id: transactionId ? String(transactionId) : null,
                     action: entry.action, metadata: metadataObj, signature: entry.signature
                 });
-            } catch (e) {}
+            } catch (e) { auditLogger.error('audit.persist_failed', { audit_id: entry.id, event_type: type, action, actor_id: actorId, transaction_id: transactionId ? String(transactionId) : null }, e); }
         }
     }
 

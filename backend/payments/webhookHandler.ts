@@ -11,11 +11,14 @@ import {
 } from './WebhookVerificationService.js';
 import { institutionalFundsService } from './InstitutionalFundsService.js';
 import { providerWebhookEventLedger } from './ProviderWebhookEventLedger.js';
+import { logger } from '../infrastructure/logger.js';
 
 /**
  * SOVEREIGN WEBHOOK LISTENER (V4.0)
  * -------------------------
  */
+const webhookLogger = logger.child({ component: 'webhook_handler' });
+
 class WebhookHandler {
     private ledger = new TransactionService();
 
@@ -38,7 +41,7 @@ class WebhookHandler {
 
         const { data: partner } = await sb.from('financial_partners').select('*').eq('id', partnerId).single();
         if (!partner) {
-            console.error(`[Webhook] PARTNER_UNKNOWN: id ${partnerId}`);
+            webhookLogger.error('webhook.partner_unknown', { partner_id: partnerId });
             return;
         }
 
@@ -93,20 +96,20 @@ class WebhookHandler {
                     ? verificationError.inspection
                     : inspection;
             if (message === 'INVALID_SIGNATURE') {
-                console.error(`[Webhook] SECURITY_ALERT: Invalid signature for partner ${partner.name}`);
+                webhookLogger.error('webhook.invalid_signature', { partner_id: partnerId, partner_name: partner.name, payload_sha256: inspectionFromError.payloadSha256, provider_event_id: inspectionFromError.providerEventId });
                 await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SIGNATURE_FAILED', {
                     partnerId,
                     payloadSha256: inspectionFromError.payloadSha256,
                     providerEventId: inspectionFromError.providerEventId,
                 });
             } else if (message === 'MISSING_SIGNATURE') {
-                console.error(`[Webhook] SECURITY_ALERT: Missing signature for partner ${partner.name}`);
+                webhookLogger.error('webhook.missing_signature', { partner_id: partnerId, partner_name: partner.name });
                 await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SIGNATURE_MISSING', { partnerId });
             } else if (message === 'WEBHOOK_SECRET_NOT_CONFIGURED') {
-                console.error(`[Webhook] SECURITY_ALERT: No webhook secret configured for partner ${partner.name}`);
+                webhookLogger.error('webhook.secret_missing', { partner_id: partnerId, partner_name: partner.name });
                 await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SECRET_MISSING', { partnerId });
             } else if (message === 'REPLAY_DETECTED') {
-                console.warn(`[Webhook] REPLAY_DETECTED for partner ${partner.name}`);
+                webhookLogger.warn('webhook.replay_detected', { partner_id: partnerId, partner_name: partner.name, dedupe_key: inspectionFromError.dedupeKey });
                 await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_REPLAY_BLOCKED', {
                     partnerId,
                     dedupeKey: inspectionFromError.dedupeKey,
@@ -168,7 +171,7 @@ class WebhookHandler {
             return { duplicate: true, eventId: receipt.record.id };
         }
 
-        console.info(`[Webhook] Signal for ${reference} from ${partner.name}: ${status}`);
+        webhookLogger.info('webhook.signal_received', { partner_id: partner.id, partner_name: partner.name, reference_id: reference, provider_event_id: providerEventId || inspection.providerEventId, normalized_status: status, event_ledger_id: receipt.record.id });
 
         try {
             const result = await this.applyNormalizedCallback(
@@ -200,6 +203,15 @@ class WebhookHandler {
                 applicationError?.message || 'WEBHOOK_APPLICATION_FAILED',
                 String(applicationError?.message || applicationError),
             );
+            await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_APPLICATION_FAILED', {
+                partner: partner.name,
+                partnerId: partner.id,
+                reference,
+                status,
+                providerEventId: providerEventId || inspection.providerEventId,
+                eventLedgerId: receipt.record.id,
+                message: String(applicationError?.message || applicationError),
+            });
             throw applicationError;
         }
     }

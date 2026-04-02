@@ -121,6 +121,17 @@ export class SettlementLifecycleManager {
       throw new Error(`INVALID_SETTLEMENT_TRANSITION: Settlement ${settlementId} is no longer in ${fromPhase}`);
     }
 
+    await Audit.log('FINANCIAL', data[0].user_id || 'SYSTEM', 'SETTLEMENT_PHASE_TRANSITION', {
+      settlementId,
+      fromPhase,
+      toPhase,
+      providerId: data[0].provider_id || null,
+      orderId: data[0].order_id || null,
+      externalMovementId: data[0].external_movement_id || null,
+      externalSettlementId: data[0].external_settlement_id || null,
+      financialTxId: data[0].financial_tx_id || null,
+    });
+
     return data[0];
   }
 
@@ -134,7 +145,7 @@ export class SettlementLifecycleManager {
     const message = String((error as any)?.message || error || reason);
     const { data: settlement } = await this.client
       .from('settlement_lifecycle')
-      .select('metadata')
+      .select('user_id, provider_id, order_id, external_movement_id, external_settlement_id, financial_tx_id, current_phase, metadata')
       .eq('id', settlementId)
       .single();
 
@@ -159,6 +170,19 @@ export class SettlementLifecycleManager {
         metadata,
       })
       .eq('id', settlementId);
+
+    await Audit.log('SECURITY', settlement?.user_id || 'SYSTEM', 'SETTLEMENT_FAILURE_RECORDED', {
+      settlementId,
+      reason,
+      message,
+      providerId: settlement?.provider_id || null,
+      orderId: settlement?.order_id || null,
+      externalMovementId: settlement?.external_movement_id || null,
+      externalSettlementId: settlement?.external_settlement_id || null,
+      financialTxId: settlement?.financial_tx_id || null,
+      failedFromPhase: settlement?.current_phase || null,
+      failureDetails: extraMetadata,
+    });
   }
 
   async recordExternalPayment(

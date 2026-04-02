@@ -1,3 +1,4 @@
+import { logger } from '../../backend/infrastructure/logger.js';
 import type { Server as HttpServer } from 'http';
 
 export const bootstrapHttp = async ({
@@ -11,13 +12,13 @@ export const bootstrapHttp = async ({
 }) => {
   await new Promise<void>((resolve) => {
     httpServer.listen(port, '0.0.0.0', () => {
-      console.info(`ORBI SOVEREIGN NODE v28.0 - RESTFUL API ACTIVE ON PORT ${port}`);
+      logger.info('http.server_started', { port });
       resolve();
     });
   });
 
   const gracefulShutdown = async () => {
-    console.info('\n[System] SIGTERM/SIGINT received. Initiating graceful shutdown...');
+    logger.warn('http.shutdown_signal_received');
 
     if (onShutdown) {
       await onShutdown();
@@ -25,7 +26,7 @@ export const bootstrapHttp = async ({
 
     await new Promise<void>((resolve) => {
       httpServer.close(() => {
-        console.info('[System] HTTP server closed. All connections drained.');
+        logger.info('http.server_stopped');
         resolve();
       });
     });

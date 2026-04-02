@@ -5,6 +5,9 @@ import { Audit } from '../../../backend/security/audit.js';
 import { getAdminSupabase, getSupabase } from '../../../backend/supabaseClient.js';
 import { isInstitutionalAppIdentity } from '../../../backend/config/appIdentity.js';
 import { extractBearerToken } from '../../middleware/auth/authorization.js';
+import { buildRequestLogContext, logger } from '../../../backend/infrastructure/logger.js';
+
+const authRouteLogger = logger.child({ component: 'auth_public_routes' });
 
 function getDeviceNameFromUA(userAgent?: string): string {
   if (!userAgent) return 'Unknown Device';
@@ -159,7 +162,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
       }
       res.json({ success: true, data: profile });
     } catch (e: any) {
-      console.error(`[User Lookup] Error:`, e);
+      authRouteLogger.error('auth.user_lookup_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -178,7 +181,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, data: profile });
     } catch (e: any) {
-      console.error(`[User Lookup] Error:`, e);
+      authRouteLogger.error('auth.user_lookup_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -298,7 +301,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
   });
 
   v1.post('/auth/login', validate(LoginSchema), async (req, res) => {
-    console.log(`[Auth] Login attempt for: ${req.body.email || req.body.e}`);
+    authRouteLogger.info('auth.login_attempt', buildRequestLogContext(req, { email: req.body.email || req.body.e }));
     try {
       const email = req.body.email || req.body.e;
       const password = req.body.password || req.body.p;
@@ -308,7 +311,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       const result = await LogicCore.login(email, password, { fingerprint, ip, userAgent });
       if (result.error) {
-        console.warn(`[Auth] Login failed for ${email}: ${result.error.message}`);
+        authRouteLogger.warn('auth.login_failed', buildRequestLogContext(req, { email, reason: result.error.message }));
         return res.status(401).json({ success: false, error: result.error.message || 'Authentication failed' });
       }
 
@@ -318,7 +321,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, data: result });
     } catch (e: any) {
-      console.error(`[Auth] Login exception for ${req.body.email}:`, e);
+      authRouteLogger.error('auth.login_exception', buildRequestLogContext(req, { email: req.body.email || req.body.e }), e);
       res.status(500).json({ success: false, error: 'LOGIN_ERROR', message: e.message });
     }
   });
@@ -357,7 +360,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, message: 'Password reset email sent.' });
     } catch (e: any) {
-      console.error(`[Auth] Password Reset Initiate Error:`, e);
+      authRouteLogger.error('auth.password_reset_initiate_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -372,7 +375,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, message: 'Password updated successfully.' });
     } catch (e: any) {
-      console.error(`[Auth] Password Reset Complete Error:`, e);
+      authRouteLogger.error('auth.password_reset_complete_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -392,7 +395,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, data: result });
     } catch (e: any) {
-      console.error(`[Auth] Refresh Session Error:`, e);
+      authRouteLogger.error('auth.refresh_session_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -405,7 +408,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
       await LogicCore.logout(accessToken, refreshToken);
       res.json({ success: true, data: { logged_out: true } });
     } catch (e: any) {
-      console.error('[Auth] Logout Error:', e);
+      authRouteLogger.error('auth.logout_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -458,7 +461,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, data: result.data });
     } catch (e: any) {
-      console.error(`[Auth] Signup Error:`, e);
+      authRouteLogger.error('auth.signup_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -467,7 +470,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
     try {
       res.json({ success: true, data: (req as any).session });
     } catch (e: any) {
-      console.error(`[Auth] Session Error:`, e);
+      authRouteLogger.error('auth.session_fetch_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -481,7 +484,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
       }
       res.json({ success: true, data: result.data });
     } catch (e: any) {
-      console.error(`[User] Profile Get Error:`, e);
+      authRouteLogger.error('user.profile_get_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -505,7 +508,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, data: data || [] });
     } catch (e: any) {
-      console.error('[ServiceAccess] List My Requests Error:', e);
+      authRouteLogger.error('service_access.list_my_requests_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -583,7 +586,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.status(201).json({ success: true, data });
     } catch (e: any) {
-      console.error('[ServiceAccess] Create Request Error:', e);
+      authRouteLogger.error('service_access.create_request_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -595,7 +598,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
       if (result.error) return res.status(403).json({ success: false, error: result.error });
       res.json({ success: true, data: result });
     } catch (e: any) {
-      console.error(`[User] Profile Update Error:`, e);
+      authRouteLogger.error('user.profile_update_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -614,7 +617,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
       res.json({ success: true, message: 'Login information updated successfully.' });
     } catch (e: any) {
-      console.error(`[User] Login Info Update Error:`, e);
+      authRouteLogger.error('user.login_info_update_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });
@@ -657,7 +660,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
       const result = await LogicCore.getKYCStatus(session.sub);
       res.json({ success: true, data: result });
     } catch (e: any) {
-      console.error(`[User] KYC Status Error:`, e);
+      authRouteLogger.error('user.kyc_status_failed', buildRequestLogContext(req), e);
       res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
   });

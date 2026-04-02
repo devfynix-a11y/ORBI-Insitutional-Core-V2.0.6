@@ -2,6 +2,7 @@
 import { getSupabase, getAdminSupabase } from '../supabaseClient.js';
 import { UUID, EnvUtils } from '../../services/utils.js';
 import { CONFIG } from '../../services/config.js';
+import { logger } from '../infrastructure/logger.js';
 
 export type KeyType = 'AUTH' | 'ENCRYPTION' | 'SECRET_WRAPPING' | 'SYSTEM' | 'SIGNING';
 
@@ -13,6 +14,8 @@ interface KeyMetadata {
     wrappedJwk: string; 
     expiresAt: number;
 }
+
+const kmsLogger = logger.child({ component: 'kms' });
 
 class SecureKMSService {
     private keys: Map<string, KeyMetadata> = new Map();
@@ -114,14 +117,14 @@ class SecureKMSService {
                 if (process.env.NODE_ENV === 'production') {
                     throw new Error("[KMS] Database connection not available for key hydration in production.");
                 }
-                console.warn("[KMS] Database connection not available for key hydration. Falling back to deterministic generation.");
+                kmsLogger.warn('kms.db_unavailable_fallback_deterministic');
                 const possibleSecrets = await this.getPossibleSecrets(null);
                 const primaryKeyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(possibleSecrets[0]), { name: 'PBKDF2' }, false, ['deriveKey']);
                 return await this.initDeterministic(primaryKeyMaterial);
             }
 
             const uniqueSecrets = await this.getPossibleSecrets(sb);
-            console.info(`[KMS] Collected ${uniqueSecrets.length} unique secrets for key hydration.`);
+            kmsLogger.info('kms.key_hydration_secrets_collected', { secret_count: uniqueSecrets.length });
 
             // Load ALL existing keys from DB (Active and Rotated) to ensure old data can still be decrypted
             const { data: dbKeys, error } = await sb.from('kms_keys').select('*').order('version', { ascending: false });
@@ -129,7 +132,7 @@ class SecureKMSService {
                 if (process.env.NODE_ENV === 'production') {
                     throw new Error(`[KMS] Could not fetch keys from DB in production: ${error.message}`);
                 }
-                console.warn("[KMS] Could not fetch keys from DB, falling back to deterministic generation.", error.message);
+                kmsLogger.warn('kms.key_fetch_failed_fallback_deterministic', { error_message: error.message });
                 const primaryKeyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(uniqueSecrets[0]), { name: 'PBKDF2' }, false, ['deriveKey']);
                 return await this.initDeterministic(primaryKeyMaterial);
             }
@@ -170,7 +173,7 @@ class SecureKMSService {
                             this.activeKeyIds[dbKey.type as KeyType] = dbKey.key_id;
                         }
                     } else {
-                        console.error(`[KMS] CRITICAL: Failed to unwrap key ${dbKey.key_id} (Type: ${dbKey.type}, Status: ${dbKey.status}). Old data encrypted with this key will be inaccessible.`);
+                        kmsLogger.error('kms.unwrap_failed', { key_id: dbKey.key_id, key_type: dbKey.type, key_status: dbKey.status });
                     }
                 }
             }
@@ -178,7 +181,7 @@ class SecureKMSService {
             // 2. Ensure an ACTIVE key exists for every type
             for (const type of types) {
                 if (!this.activeKeyIds[type]) {
-                    console.info(`[KMS] No active key found for ${type}. Provisioning new key...`);
+                    kmsLogger.info('kms.provisioning_new_active_key', { key_type: type });
                     const existingTypeKeys = Array.from(this.keys.values()).filter(k => k.type === type);
                     const nextVersion = existingTypeKeys.length > 0 ? Math.max(...existingTypeKeys.map(k => k.version)) + 1 : 1;
                     await this.provisionNewKey(type, primaryWrappingKey, sb, nextVersion);
@@ -186,9 +189,9 @@ class SecureKMSService {
             }
 
             this.isReady = true;
-            console.info("[KMS] Institutional Key Management System initialized with DB-backed persistent keys.");
+            kmsLogger.info('kms.initialized_db_backed');
         } catch (e) {
-            console.error("[KMS] Critical failure during key hydration:", e);
+            kmsLogger.error('kms.key_hydration_failed', undefined, e);
             throw e;
         }
     }
@@ -223,7 +226,7 @@ class SecureKMSService {
             this.activeKeyIds[type] = id;
         }
         this.isReady = true;
-        console.info("[KMS] KMS initialized with deterministic fallback keys.");
+        kmsLogger.info('kms.initialized_deterministic_fallback');
     }
 
     private async provisionNewKey(type: KeyType, wrappingKey: CryptoKey, sb: any, version: number = 1) {
@@ -336,7 +339,7 @@ class SecureKMSService {
 
     public async rotate(type: KeyType) {
         if (!this.isReady) await this.waitReady();
-        console.info(`[KMS] Key rotation initiated for ${type}.`);
+        kmsLogger.info('kms.key_rotation_started', { key_type: type });
 
         try {
             const sb = getAdminSupabase() || getSupabase();
@@ -367,9 +370,9 @@ class SecureKMSService {
             // 4. Provision new ACTIVE key
             await this.provisionNewKey(type, primaryWrappingKey, sb, nextVersion);
             
-            console.info(`[KMS] Key rotation successful for ${type}. New version: ${nextVersion}`);
+            kmsLogger.info('kms.key_rotation_succeeded', { key_type: type, new_version: nextVersion });
         } catch (e) {
-            console.error(`[KMS] Key rotation failed for ${type}:`, e);
+            kmsLogger.error('kms.key_rotation_failed', { key_type: type }, e);
             throw e;
         }
     }
@@ -396,7 +399,7 @@ class SecureKMSService {
                     possibleSecrets.unshift(configData.config_data.master_key);
                 }
             } catch (e) {
-                console.warn("[KMS] Could not fetch master key from platform_configs:", e);
+                kmsLogger.warn('kms.master_key_fetch_failed', { error: e instanceof Error ? e.message : String(e) });
             }
         }
         
@@ -409,7 +412,7 @@ class SecureKMSService {
      */
     public async reWrapAllKeys(newMasterSecret: string) {
         if (!this.isReady) await this.waitReady();
-        console.warn("[KMS] CRITICAL: Re-wrapping all keys with new master secret.");
+        kmsLogger.warn('kms.master_key_rewrap_started');
 
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) throw new Error("[KMS] Database unavailable for re-wrap.");
@@ -440,12 +443,12 @@ class SecureKMSService {
                 .eq('key_id', meta.id);
 
             if (error) {
-                console.error(`[KMS] Failed to update wrapped JWK for ${meta.id}:`, error);
+                kmsLogger.error('kms.rewrap_update_failed', { key_id: meta.id }, error);
                 throw error;
             }
 
             meta.wrappedJwk = wrappedB64;
-            console.info(`[KMS] Re-wrapped key ${meta.id} successfully.`);
+            kmsLogger.info('kms.rewrap_key_succeeded', { key_id: meta.id });
         }
 
         // Update platform_configs to reflect the new master key
@@ -455,7 +458,7 @@ class SecureKMSService {
             updated_by: 'system_recovery'
         });
 
-        console.info("[KMS] All keys re-wrapped and master key updated in DB.");
+        kmsLogger.info('kms.master_key_rewrap_completed');
     }
 
     public async createRecoveryKit() {

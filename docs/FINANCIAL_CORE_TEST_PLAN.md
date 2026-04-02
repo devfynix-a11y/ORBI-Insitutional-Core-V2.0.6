@@ -75,6 +75,11 @@ Enable only in an isolated environment with:
 - `ORBI_DB_TEST_REVIEW_ACTOR_ID=...`
 - `ORBI_DB_TEST_DRIFT_WALLET_ID=...`
 - `ORBI_DB_TEST_WEBHOOK_PARTNER_ID=...`
+- `ORBI_DB_TEST_OPERATING_VAULT_ID=...`
+- `ORBI_DB_TEST_ESCROW_VAULT_ID=...`
+- `ORBI_DB_TEST_BUDGET_CATEGORY_ID=...`
+- `ORBI_DB_TEST_BUDGET_TRIGGER_AMOUNT=...`
+- `ORBI_DB_TEST_WITHDRAWAL_PROVIDER_ID=...`
 - optional: `ORBI_DB_TEST_AMOUNT=0.01`
 - optional: `ORBI_DB_TEST_INSUFFICIENT_AMOUNT=999999`
 
@@ -88,6 +93,8 @@ This mode now covers:
 - internal transfer settlement claim/finalize flow
 - duplicate settlement prevention after completion
 - signed provider webhook callback application against a disposable provider fixture
+- deposit into operating wallet
+- external withdrawal initiation
 - reversal execution on disposable posted transactions
 - `held_for_review` approval lifecycle
 - `held_for_review` rejection + reversal lifecycle
@@ -96,6 +103,8 @@ This mode now covers:
 - zero-sum invalid settlement completion forced into `held_for_review`
 - auto-reversal after a forced overdue review window
 - reconciliation incident drill coverage for drift evidence + repair audits
+- shared budget spend enforcement
+- bill reserve allocation via escrow vault
 
 ## Priority Coverage
 

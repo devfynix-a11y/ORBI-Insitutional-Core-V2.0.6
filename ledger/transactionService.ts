@@ -14,6 +14,9 @@ import {
 } from '../backend/ledger/financialInvariants.js';
 import { RiskComplianceEngine } from '../backend/security/RiskComplianceEngine.js';
 import { PerfMonitor } from '../backend/infrastructure/PerfMonitor.js';
+import { logger } from '../backend/infrastructure/logger.js';
+
+const ledgerLogger = logger.child({ component: 'transaction_service' });
 
 /**
  * INSTITUTIONAL LEDGER SERVICE (V22.0 Titanium)
@@ -100,7 +103,7 @@ export class TransactionService {
 
             return Math.round(balance * 10000) / 10000;
         } catch (e: any) {
-            console.error(`[Ledger] Balance calculation failed for ${walletId}: ${e.message}`);
+            ledgerLogger.error('ledger.balance_calculation_failed', { wallet_id: walletId }, e);
             return 0;
         }
     }
@@ -112,12 +115,12 @@ export class TransactionService {
             const ledgerBalance = await this.calculateBalanceFromLedger(walletId);
             const cachedBalance = await this.getCachedBalanceSnapshot(walletId);
             if (cachedBalance !== null && Math.abs(cachedBalance - ledgerBalance) > 0.01) {
-                console.warn(`[Ledger] BALANCE_DRIFT_DETECTED for ${walletId}: cached=${cachedBalance}, ledger=${ledgerBalance}`);
+                ledgerLogger.warn('ledger.balance_drift_detected', { wallet_id: walletId, actor_id: userId, cached_balance: cachedBalance, ledger_balance: ledgerBalance });
             }
 
             return ledgerBalance;
         } catch (e) {
-            console.error(`[Ledger] Failed to fetch latest balance for ${walletId}:`, e);
+            ledgerLogger.error('ledger.latest_balance_failed', { wallet_id: walletId, actor_id: userId }, e);
         }
 
         const cachedBalance = await this.getCachedBalanceSnapshot(walletId);
@@ -127,7 +130,7 @@ export class TransactionService {
 
         const ledgerBalance = await this.calculateBalanceFromLedger(walletId);
         if (ledgerBalance === null || ledgerBalance === undefined || isNaN(ledgerBalance)) {
-            console.error(`[Ledger] Debug: getLatestBalance returned invalid balance: ${ledgerBalance} for wallet: ${walletId}`);
+            ledgerLogger.error('ledger.invalid_balance_result', { wallet_id: walletId, actor_id: userId, ledger_balance: ledgerBalance });
             return 0;
         }
         return ledgerBalance;
@@ -223,7 +226,7 @@ export class TransactionService {
             }
         } catch (e: any) {
             if (e.message.includes('BUDGET_EXCEEDED')) throw e;
-            console.error(`[Ledger] Budget enforcement failed: ${e.message}`);
+            ledgerLogger.error('ledger.budget_enforcement_failed', { actor_id: userId, category_id: categoryId, transaction_id: txId }, e);
         }
     }
 
@@ -285,7 +288,7 @@ export class TransactionService {
                 actor
             });
         } catch (e: any) {
-            console.error(`[Ledger] Financial event emit failed for ${eventType}/${aggregateId}: ${e.message}`);
+            ledgerLogger.error('ledger.financial_event_emit_failed', { event_type: eventType, aggregate_id: aggregateId }, e);
         }
     }
 
@@ -447,12 +450,12 @@ export class TransactionService {
         });
 
         if (rpcError) {
-            console.error(`[Ledger] Atomic commit failed for TX ${txId}:
-                Error=${rpcError.message}
-                Details=${JSON.stringify(rpcError)}
-                Reference_ID=${referenceId}
-                User_ID=${t.user_id}
-            `);
+            ledgerLogger.error('ledger.atomic_commit_failed', {
+                transaction_id: txId,
+                reference_id: referenceId,
+                actor_id: t.user_id,
+                error_message: rpcError.message,
+            }, rpcError);
             throw this.normalizeFinancialAuthorityError(rpcError, 'LEDGER_COMMIT_FAULT');
         }
 
@@ -489,7 +492,7 @@ export class TransactionService {
             };
             await RiskComplianceEngine.monitorTransaction(txForMonitor);
         } catch (e) {
-            console.error(`[Ledger] AML Monitoring failed for ${txId}:`, e);
+            ledgerLogger.error('ledger.aml_monitoring_failed', { transaction_id: txId }, e);
             // Non-blocking error
         }
     }
@@ -551,7 +554,7 @@ export class TransactionService {
         });
 
         if (rpcError) {
-            console.error(`[Ledger] Append legs failed for TX ${txId}: ${rpcError.message}`);
+            ledgerLogger.error('ledger.append_legs_failed', { transaction_id: txId, error_message: rpcError.message }, rpcError);
             throw this.normalizeFinancialAuthorityError(rpcError, 'LEDGER_APPEND_FAULT');
         }
     }
@@ -577,7 +580,7 @@ export class TransactionService {
             const isValid = Math.abs(drift) < 0.0001;
 
             if (!isValid) {
-                console.warn(`[Ledger] BALANCE_DRIFT_DETECTED for ${walletId}: Cached=${cachedBalance}, Ledger=${ledgerBalance}, Drift=${drift}`);
+                ledgerLogger.warn('ledger.balance_drift_verified', { wallet_id: walletId, cached_balance: cachedBalance, ledger_balance: ledgerBalance, drift });
                 
                 // Log reconciliation event
                 await sb.from('reconciliation_reports').insert({
@@ -592,7 +595,7 @@ export class TransactionService {
 
             return { valid: isValid, drift };
         } catch (e: any) {
-            console.error(`[Ledger] Balance verification failed for ${walletId}: ${e.message}`);
+            ledgerLogger.error('ledger.balance_verification_failed', { wallet_id: walletId }, e);
             return { valid: false, drift: 0 };
         }
     }
@@ -609,7 +612,7 @@ export class TransactionService {
 
         // 2. Validate transition
         if (!TransactionStateMachine.isValidTransition(oldStatus, status)) {
-            console.warn(`[Ledger] Invalid state transition attempted: ${oldStatus} -> ${status} for TX ${id}`);
+            ledgerLogger.warn('ledger.invalid_state_transition', { transaction_id: id, old_status: oldStatus, next_status: status });
             return;
         }
 
@@ -621,6 +624,12 @@ export class TransactionService {
 
         // 4. Log the event for audit trail
         await this.logTransactionEvent(id, oldStatus, status, 'system', { notes });
+        await Audit.log('FINANCIAL', tx.user_id || 'SYSTEM', 'TRANSACTION_STATUS_CHANGED', {
+            transactionId: id,
+            oldStatus,
+            newStatus: status,
+            notes: notes || null,
+        }, id);
 
         // 5. Notify the user via the Nexus Stream (WebSocket)
         SocketRegistry.notifyTransactionUpdate(tx.user_id, { ...tx, status, status_notes: notes });
@@ -635,7 +644,7 @@ export class TransactionService {
                     const { BankingEngine } = await import('../backend/ledger/transactionEngine.js');
                     await BankingEngine.sendTransferNotifications(id, { ...tx, status, status_notes: notes });
                 } catch (e: any) {
-                    console.error(`[Ledger] Participant notification dispatch failed for ${id}: ${e.message}`);
+                    ledgerLogger.error('ledger.participant_notification_failed', { transaction_id: id }, e);
                 }
             }
         }
@@ -644,7 +653,7 @@ export class TransactionService {
             const { ServiceActorOps } = await import('../backend/features/ServiceActorOps.js');
             await ServiceActorOps.handleTransactionStatusChange(id, status);
         } catch (e: any) {
-            console.error(`[Ledger] Service actor post-status sync failed for ${id}: ${e.message}`);
+            ledgerLogger.error('ledger.service_actor_post_status_sync_failed', { transaction_id: id }, e);
         }
     }
 
@@ -665,7 +674,7 @@ export class TransactionService {
                 metadata
             });
         } catch (e: any) {
-            console.error(`[Ledger] Failed to log transaction event for ${transactionId}: ${e.message}`);
+            ledgerLogger.error('ledger.transaction_event_log_failed', { transaction_id: transactionId }, e);
         }
     }
 
@@ -673,7 +682,7 @@ export class TransactionService {
         // Use Admin Client to bypass RLS policies for aggregated views (Incoming + Outgoing)
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) {
-            console.error("[Ledger] API Connection required for transaction retrieval.");
+            ledgerLogger.error('ledger.transaction_retrieval_db_offline');
             return [];
         }
 
@@ -690,7 +699,7 @@ export class TransactionService {
                 ...(vaults?.map(v => v.id) || [])
             ];
 
-            console.log(`[Ledger] Fetching transactions for user ${userId}. Wallets: ${walletIds.length}`);
+            ledgerLogger.info('ledger.transactions_fetch_started', { actor_id: userId, wallet_count: walletIds.length });
 
             // 2. Query Transactions (Outgoing OR Incoming)
             let query = sb
@@ -709,7 +718,7 @@ export class TransactionService {
             const { data, error } = await query;
 
             if (error) {
-                console.error(`[Ledger] Query Error: ${error.message}`);
+                ledgerLogger.error('ledger.transactions_query_failed', { actor_id: userId, error_message: error.message }, error);
                 throw error;
             }
             
@@ -874,7 +883,7 @@ export class TransactionService {
             });
             return combined;
             } catch (e: any) {
-                console.error(`[Ledger] Forensic fetch failed: ${e.message}`);
+                ledgerLogger.error('ledger.forensic_fetch_failed', undefined, e);
                 return [];
             }
         });
@@ -887,7 +896,7 @@ export class TransactionService {
     public async getAllTransactions(limit: number = 100, offset: number = 0): Promise<any[]> {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) {
-            console.error("[Ledger] API Connection required for global transaction retrieval.");
+            ledgerLogger.error('ledger.global_transaction_retrieval_db_offline');
             return [];
         }
 
@@ -962,7 +971,7 @@ export class TransactionService {
                 };
                 });
             } catch (e: any) {
-                console.error(`[Ledger] Global Forensic fetch failed: ${e.message}`);
+                ledgerLogger.error('ledger.global_forensic_fetch_failed', undefined, e);
                 return [];
             }
         });
@@ -996,7 +1005,7 @@ export class TransactionService {
                 };
             }));
         } catch (e: any) {
-            console.error(`[Ledger] Forensic leg fetch failed: ${e.message}`);
+            ledgerLogger.error('ledger.forensic_leg_fetch_failed', { transaction_id: transactionId }, e);
             return [];
         }
     }
@@ -1047,7 +1056,7 @@ export class TransactionService {
                 categories
             }));
         } catch (e: any) {
-            console.error(`[Ledger] Daily movements failed: ${e.message}`);
+            ledgerLogger.error('ledger.daily_movements_failed', undefined, e);
             return [];
         }
     }
@@ -1079,7 +1088,7 @@ export class TransactionService {
 
             return aggregation;
         } catch (e: any) {
-            console.error(`[Ledger] Aggregation failed: ${e.message}`);
+            ledgerLogger.error('ledger.aggregation_failed', undefined, e);
             return {};
         }
     }
@@ -1115,7 +1124,7 @@ export class TransactionService {
                 };
             }));
         } catch (e: any) {
-            console.error(`[Ledger] Wallet history fetch failed for ${walletId}: ${e.message}`);
+            ledgerLogger.error('ledger.wallet_history_failed', { wallet_id: walletId }, e);
             return [];
         }
     }
@@ -1150,7 +1159,7 @@ export class TransactionService {
      * Forces the cached balance to match the independently verified ledger sum.
      * Never call this from customer-facing or normal financial flow.
      */
-    public async fixWalletBalance(walletId: string, actorId: string): Promise<void> {
+    public async fixWalletBalance(walletId: string, actorId: string, repairReason?: string, incidentReference?: string): Promise<void> {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) throw new Error("VAULT_OFFLINE");
 
@@ -1162,10 +1171,16 @@ export class TransactionService {
             new_balance: ledgerBalance,
             new_encrypted: encryptedBalance,
             repair_actor_id: actorId,
-            repair_reason: `Ledger reconciliation repair for wallet ${walletId}`
+            repair_reason: repairReason || `Ledger reconciliation repair for wallet ${walletId}`
         });
 
-        Audit.log('SECURITY', actorId, 'WALLET_BALANCE_FIXED', { walletId, newBalance: ledgerBalance });
+        await Audit.log('SECURITY', actorId, 'PRIVILEGED_WALLET_BALANCE_REPAIR_EXECUTED', {
+            walletId,
+            authoritativeBalance: ledgerBalance,
+            repairReason: repairReason || `Ledger reconciliation repair for wallet ${walletId}`,
+            incidentReference: incidentReference || null,
+            tool: 'repair_wallet_balance_emergency',
+        });
     }
 
     public async getSystemBalance(): Promise<{ total: number, breakdown: Record<string, number> }> {
@@ -1237,7 +1252,7 @@ export class TransactionService {
                 balance_after: await DataProtection.decryptAmount(leg.balance_after_encrypted || leg.balance_after)
             })));
         } catch (e: any) {
-            console.error(`[Ledger] Fee transaction fetch failed: ${e.message}`);
+            ledgerLogger.error('ledger.fee_transaction_fetch_failed', undefined, e);
             return [];
         }
     }
@@ -1599,7 +1614,7 @@ export class TransactionService {
                 );
                 reversedCount++;
             } catch (e: any) {
-                console.error(`[Ledger] Held transaction auto-reversal failed for ${tx.id}: ${e.message}`);
+                ledgerLogger.error('ledger.held_transaction_auto_reversal_failed', { transaction_id: tx.id }, e);
             }
         }
 
@@ -1643,7 +1658,7 @@ export class TransactionService {
             try {
                 await Messaging.dispatch(member.id, 'security', subject, body, { push: true, sms: false, email: true });
             } catch (e: any) {
-                console.error(`[Ledger] Staff issue notification failed for ${member.id}: ${e.message}`);
+                ledgerLogger.error('ledger.staff_issue_notification_failed', { actor_id: member.id, transaction_id: tx.id }, e);
             }
         }));
 
@@ -1656,7 +1671,7 @@ export class TransactionService {
                 { push: true, sms: true, email: true }
             );
         } catch (e: any) {
-            console.error(`[Ledger] User issue notification failed for ${tx.user_id}: ${e.message}`);
+            ledgerLogger.error('ledger.user_issue_notification_failed', { actor_id: tx.user_id, transaction_id: tx.id }, e);
         }
 
         await Audit.log('SECURITY', details.actorId, details.issueType, {

@@ -1,5 +1,8 @@
 import { WebSocket } from 'ws';
 import { getAdminSupabase } from '../../services/supabaseClient.js';
+import { logger } from './logger.js';
+
+const socketLogger = logger.child({ component: 'socket_registry' });
 
 class SocketRegistryService {
     private clients: Map<string, Set<WebSocket>> = new Map();
@@ -15,7 +18,7 @@ class SocketRegistryService {
         if (this.broadcastChannelReady) return;
         const sb = getAdminSupabase();
         if (!sb) {
-            console.warn("[SocketRegistry] Supabase client not available. Cross-node broadcast disabled.");
+            socketLogger.warn('socket_registry.supabase_unavailable');
             return;
         }
 
@@ -30,7 +33,7 @@ class SocketRegistryService {
             .subscribe((status) => {
                 if (status === 'SUBSCRIBED') {
                     this.isListening = true;
-                    console.info("[SocketRegistry] Subscribed to Supabase Realtime for cross-node broadcasts.");
+                    socketLogger.info('socket_registry.realtime_subscribed');
                     resolve();
                 }
             });
@@ -41,7 +44,7 @@ class SocketRegistryService {
         const existing = this.clients.get(userId) || new Set<WebSocket>();
         existing.add(ws);
         this.clients.set(userId, existing);
-        console.info(`[SocketRegistry] Registered client for user: ${userId} (connections=${existing.size})`);
+        socketLogger.info('socket_registry.client_registered', { actor_id: userId, connection_count: existing.size });
     }
 
     public remove(userId: string, ws?: WebSocket) {
@@ -51,13 +54,13 @@ class SocketRegistryService {
         if (ws) {
             existing.delete(ws);
             if (existing.size > 0) {
-                console.info(`[SocketRegistry] Removed one client for user: ${userId} (connections=${existing.size})`);
+                socketLogger.info('socket_registry.client_removed', { actor_id: userId, connection_count: existing.size });
                 return;
             }
         }
 
         this.clients.delete(userId);
-        console.info(`[SocketRegistry] Removed client registry for user: ${userId}`);
+        socketLogger.info('socket_registry.client_registry_removed', { actor_id: userId });
     }
 
     /**
@@ -81,7 +84,7 @@ class SocketRegistryService {
                 });
                 return true;
             } catch (e) {
-                console.error(`[SocketRegistry] Failed to broadcast to ${userId} via Realtime`, e);
+                socketLogger.error('socket_registry.realtime_broadcast_failed', { actor_id: userId }, e);
             }
         }
         return false;
@@ -104,7 +107,7 @@ class SocketRegistryService {
                 client.send(JSON.stringify(payload));
                 delivered = true;
             } catch (e) {
-                console.error(`[SocketRegistry] Failed to send locally to ${userId}`, e);
+                socketLogger.error('socket_registry.local_send_failed', { actor_id: userId }, e);
                 clients.delete(client);
             }
         }

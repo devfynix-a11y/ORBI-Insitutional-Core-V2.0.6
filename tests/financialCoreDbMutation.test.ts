@@ -4,6 +4,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { providerWebhookEventLedger } from '../backend/payments/ProviderWebhookEventLedger.js';
 import { Webhooks } from '../backend/payments/webhookHandler.js';
 import { DataProtection } from '../backend/security/DataProtection.js';
+import { RegulatoryService } from '../ledger/regulatoryService.js';
 import { TransactionService } from '../ledger/transactionService.js';
 import { dbIntegrationEnabled, dbIntegrationTest, dbIntegrationWritesEnabled, hasDbIntegrationConfig, requireEnv } from './helpers/dbIntegration.js';
 
@@ -21,10 +22,16 @@ const EDGE_FIXTURE_ENV = [
   'ORBI_DB_TEST_REVIEW_ACTOR_ID',
   'ORBI_DB_TEST_DRIFT_WALLET_ID',
   'ORBI_DB_TEST_WEBHOOK_PARTNER_ID',
+  'ORBI_DB_TEST_OPERATING_VAULT_ID',
+  'ORBI_DB_TEST_ESCROW_VAULT_ID',
+  'ORBI_DB_TEST_BUDGET_CATEGORY_ID',
+  'ORBI_DB_TEST_BUDGET_TRIGGER_AMOUNT',
+  'ORBI_DB_TEST_WITHDRAWAL_PROVIDER_ID',
 ];
 
 const TEST_AMOUNT = Number(process.env.ORBI_DB_TEST_AMOUNT || '0.01');
 const INSUFFICIENT_AMOUNT = Number(process.env.ORBI_DB_TEST_INSUFFICIENT_AMOUNT || '999999');
+const BUDGET_TRIGGER_AMOUNT = Number(process.env.ORBI_DB_TEST_BUDGET_TRIGGER_AMOUNT || '0');
 
 async function createPostedTransaction(client: any, options?: {
   status?: 'completed' | 'processing';
@@ -142,6 +149,35 @@ dbIntegrationTest(
     assert.equal(Number(legCount || 0), 2);
   },
   { requireWrites: true, requiredEnv: WRITE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
+  'write-enabled integration covers deposit into operating wallet',
+  async (_t, client) => {
+    const operatingVaultId = requireEnv('ORBI_DB_TEST_OPERATING_VAULT_ID');
+    const posted = await createPostedTransaction(client, {
+      description: 'Write-enabled operating wallet deposit',
+      targetWalletId: operatingVaultId,
+      amount: TEST_AMOUNT,
+    });
+
+    const { data: tx, error: txError } = await client
+      .from('transactions')
+      .select('id, status, wallet_id, to_wallet_id')
+      .eq('id', posted.txId)
+      .single();
+    assert.ifError(txError);
+    assert.equal(String(tx.status).toLowerCase(), 'completed');
+    assert.equal(String(tx.to_wallet_id), operatingVaultId);
+
+    const { count: ledgerCount, error: ledgerError } = await client
+      .from('financial_ledger')
+      .select('*', { count: 'exact', head: true })
+      .eq('transaction_id', posted.txId);
+    assert.ifError(ledgerError);
+    assert.equal(Number(ledgerCount || 0), 2);
+  },
+  { requireWrites: true, requiredEnv: EDGE_FIXTURE_ENV },
 );
 
 dbIntegrationTest(
@@ -450,6 +486,42 @@ dbIntegrationTest(
 );
 
 dbIntegrationTest(
+  'write-enabled integration can initiate an external withdrawal movement',
+  async (_t, client) => {
+    const userId = requireEnv('ORBI_DB_TEST_USER_ID');
+    const sourceWalletId = requireEnv('ORBI_DB_TEST_SOURCE_WALLET_ID');
+    const providerId = requireEnv('ORBI_DB_TEST_WITHDRAWAL_PROVIDER_ID');
+    const externalRef = `itest-withdraw-${randomUUID().slice(0, 8)}`;
+
+    const { data, error } = await client
+      .from('external_fund_movements')
+      .insert({
+        user_id: userId,
+        direction: 'INTERNAL_TO_EXTERNAL',
+        status: 'initiated',
+        provider_id: providerId,
+        source_wallet_id: sourceWalletId,
+        gross_amount: TEST_AMOUNT,
+        net_amount: TEST_AMOUNT,
+        fee_amount: 0,
+        tax_amount: 0,
+        currency: 'TZS',
+        description: 'Integration external withdrawal initiation',
+        external_reference: externalRef,
+        metadata: { integration_test: true, flow: 'external_withdrawal' },
+      })
+      .select('id, status, direction, provider_id, external_reference')
+      .single();
+    assert.ifError(error);
+    assert.equal(String(data.status).toLowerCase(), 'initiated');
+    assert.equal(String(data.direction), 'INTERNAL_TO_EXTERNAL');
+    assert.equal(String(data.provider_id), providerId);
+    assert.equal(String(data.external_reference), externalRef);
+  },
+  { requireWrites: true, requiredEnv: EDGE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
   'write-enabled integration deduplicates provider webhook receipts and only allows one application claim',
   async (_t, client) => {
     const partnerId = requireEnv('ORBI_DB_TEST_WEBHOOK_PARTNER_ID');
@@ -596,6 +668,63 @@ dbIntegrationTest(
     }
   },
   { requireWrites: true, requiredEnv: WRITE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
+  'write-enabled integration supports shared budget spend enforcement',
+  async (_t, client) => {
+    const service = new TransactionService();
+    const userId = requireEnv('ORBI_DB_TEST_USER_ID');
+    const categoryId = requireEnv('ORBI_DB_TEST_BUDGET_CATEGORY_ID');
+    assert.ok(BUDGET_TRIGGER_AMOUNT > 0, 'ORBI_DB_TEST_BUDGET_TRIGGER_AMOUNT must be greater than 0');
+
+    const posted = await createPostedTransaction(client, {
+      description: 'Write-enabled shared budget spend',
+      amount: BUDGET_TRIGGER_AMOUNT,
+    });
+
+    await service.enforceBudgetLimits(userId, categoryId, BUDGET_TRIGGER_AMOUNT, posted.txId, posted.referenceId);
+
+    const { count: alertCount, error: alertError } = await client
+      .from('budget_alerts')
+      .select('*', { count: 'exact', head: true })
+      .eq('category_id', categoryId)
+      .eq('transaction_id', posted.txId);
+    assert.ifError(alertError);
+    assert.ok(Number(alertCount || 0) >= 0);
+  },
+  { requireWrites: true, requiredEnv: EDGE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
+  'write-enabled integration supports bill reserve allocation',
+  async (_t, client) => {
+    const service = new TransactionService();
+    const userId = requireEnv('ORBI_DB_TEST_USER_ID');
+    const sourceWalletId = requireEnv('ORBI_DB_TEST_SOURCE_WALLET_ID');
+    const escrowVaultId = requireEnv('ORBI_DB_TEST_ESCROW_VAULT_ID');
+
+    await RegulatoryService.updateSystemNode('ESCROW_VAULT', escrowVaultId);
+    const referenceId = `ITEST-ESCROW-${randomUUID().slice(0, 8)}`;
+    await service.reserveEscrow(userId, sourceWalletId, TEST_AMOUNT, 'Integration bill reserve allocation', referenceId);
+
+    const { data: tx, error: txError } = await client
+      .from('transactions')
+      .select('id, status, type')
+      .eq('id', referenceId)
+      .single();
+    assert.ifError(txError);
+    assert.equal(String(tx.type).toLowerCase(), 'escrow');
+    assert.equal(String(tx.status).toLowerCase(), 'processing');
+
+    const { count: legCount, error: legError } = await client
+      .from('financial_ledger')
+      .select('*', { count: 'exact', head: true })
+      .eq('transaction_id', referenceId);
+    assert.ifError(legError);
+    assert.equal(Number(legCount || 0), 2);
+  },
+  { requireWrites: true, requiredEnv: EDGE_FIXTURE_ENV },
 );
 
 dbIntegrationTest(

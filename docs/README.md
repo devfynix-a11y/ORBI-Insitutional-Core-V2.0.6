@@ -11,6 +11,7 @@ This is the **Sovereign Financial Operating System** powering the ORBI ecosystem
 *   **[Enterprise B2B Architecture](./ENTERPRISE_B2B_ARCHITECTURE.md)**: Multi-Tenancy, Corporate Goals, and Hard Budgets.
 *   **[Multi-Tenant Merchant Architecture](./MERCHANT_ARCHITECTURE.md)**: Marketplaces, Payment Gateways, and Business Accounts.
 *   **[Reconciliation Engine](./RECONCILIATION_ENGINE.md)**: Financial Integrity & Forensic Auditing.
+*   **[Production Deployment](./PRODUCTION_DEPLOYMENT.md)**: Production readiness checks, env requirements, and rollout guidance.
 *   **[Master Integration Manual](./INTEGRATION_MANUAL.md)**: The definitive technical specification.
 *   **[Provider Registry Contract](./PROVIDER_REGISTRY_CONTRACT.md)**: Admin/UI and backend contract for registry-driven providers.
 *   **[Universal Provider And Offline Gateway Status](./UNIVERSAL_PROVIDER_AND_OFFLINE_GATEWAY_STATUS.md)**: Current implementation status for routing, institutional settlements, deposit intents, and offline bridge flows.

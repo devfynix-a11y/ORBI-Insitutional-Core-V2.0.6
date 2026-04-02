@@ -1,6 +1,7 @@
 import { FinancialPartner } from '../../../types.js';
 import { normalizeProviderError, toProviderDomainError } from './ProviderErrorNormalizer.js';
 import { RetryHooks, RetryOperation } from './types.js';
+import { logger } from '../../infrastructure/logger.js';
 
 type RetryOptions = {
     maxAttempts?: number;
@@ -11,6 +12,8 @@ type RetryOptions = {
 const sleep = async (ms: number): Promise<void> => {
     await new Promise((resolve) => setTimeout(resolve, ms));
 };
+
+const retryLogger = logger.child({ component: 'provider_retry_policy' });
 
 export class ProviderRetryPolicy {
     private readonly defaultMaxAttempts = Number(process.env.ORBI_PROVIDER_MAX_ATTEMPTS || 3);
@@ -50,9 +53,7 @@ export class ProviderRetryPolicy {
                 await hooks?.onRetry?.(hookContext);
                 await hooks?.onFailoverCandidate?.(hookContext);
                 const delayMs = baseDelayMs * attempt;
-                console.warn(
-                    `[ProviderRetryPolicy] Retrying ${operation} for ${partner.name} after ${normalized.category} failure (attempt ${attempt}/${maxAttempts})`,
-                );
+                retryLogger.warn('provider.retry_scheduled', { operation, partner_id: partner.id, partner_name: partner.name, category: normalized.category, attempt, max_attempts: maxAttempts });
                 if (delayMs > 0) {
                     await sleep(delayMs);
                 }

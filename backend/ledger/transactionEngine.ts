@@ -2,9 +2,9 @@
 import { User, Transaction, LedgerEntry, Wallet, TransactionStatus } from '../../types.js';
 import { UUID } from '../../services/utils.js';
 import { getSupabase, getAdminSupabase } from '../supabaseClient.js';
-import { DataVault } from '../security/encryption.js';
 import { Audit } from '../security/audit.js';
 import { DataProtection } from '../security/DataProtection.js';
+import { logger } from '../infrastructure/logger.js';
 
 import { RegulatoryService } from './regulatoryService.js';
 import { TransactionService } from '../../ledger/transactionService.js';
@@ -28,13 +28,15 @@ import { SocketRegistry } from '../infrastructure/SocketRegistry.js';
  * Orchestrates multi-leg transactions with ACID-like consistency
  * in a distributed cloud environment.
  */
+const bankingLogger = logger.child({ component: 'banking_engine' });
+
 export class BankingEngineService {
     
     public async process(user: User, intent: any): Promise<{ success: boolean, transaction?: Transaction, error?: string }> {
         const { amount, currency, description, type, sourceWalletId, targetWalletId, categoryId, isSimulation, statusOverride } = intent;
         const txService = new TransactionService();
         
-        console.info(`[BankingEngine] Processing ${type} for user ${user.id} [Simulation: ${isSimulation}]`);
+        bankingLogger.info('banking.process_started', { actor_id: user.id, transaction_type: type, simulation: isSimulation, source_wallet_id: sourceWalletId, target_wallet_id: targetWalletId, reference_id: intent.referenceId || intent.reference_id });
 
         try {
             const txId = UUID.generate();
@@ -141,12 +143,12 @@ export class BankingEngineService {
                 if (initialStatus === 'processing' && statusOverride !== 'held_for_review') {
                     // Fire and forget settlement to avoid blocking the response
                     this.completeSettlement(txId, undefined, `engine:auto:${txId}`).catch(err => 
-                        console.error(`[BankingEngine] Background Settlement Failed for ${txId}:`, err)
+                        bankingLogger.error('banking.background_settlement_failed', { transaction_id: txId, actor_id: user.id }, err)
                     );
                 } else if (initialStatus === 'completed') {
                     // Direct settlement - send participant notifications in background
                     this.sendTransferNotifications(txId).catch(err => 
-                        console.error(`[BankingEngine] Background Notification Failed for ${txId}:`, err)
+                        bankingLogger.error('banking.background_notification_failed', { transaction_id: txId, actor_id: user.id }, err)
                     );
                 }
                 
@@ -154,9 +156,9 @@ export class BankingEngineService {
                 this.verifyLedgerIntegrity(txId).then(integrity => {
                     if (!integrity.valid) {
                         Audit.log('SECURITY', user.id, 'LEDGER_INTEGRITY_VIOLATION', { txId, failures: integrity.failures });
-                        console.error(`[BankingEngine] Integrity Violation detected for TX ${txId}`);
+                        bankingLogger.error('banking.integrity_violation_detected', { transaction_id: txId, actor_id: user.id, failures: integrity.failures });
                     }
-                }).catch(err => console.error(`[BankingEngine] Integrity Check Failed for ${txId}:`, err));
+                }).catch(err => bankingLogger.error('banking.integrity_check_failed', { transaction_id: txId, actor_id: user.id }, err));
             } else {
                 await this.commitToLocal(user.id, txId, intent, legs);
             }
@@ -211,7 +213,7 @@ export class BankingEngineService {
 
         } catch (e: any) {
             const mappedError = normalizeFinancialAuthorityError(e, 'BANKING_ENGINE_PROCESS');
-            console.error(`[BankingEngine] Critical Failure: ${mappedError.message}`);
+            bankingLogger.error('banking.process_failed', { actor_id: user.id, transaction_type: type, source_wallet_id: sourceWalletId, target_wallet_id: targetWalletId, error_message: mappedError.message }, mappedError);
             return { success: false, error: mappedError.message };
         }
     }
@@ -326,7 +328,7 @@ export class BankingEngineService {
             };
 
             if (balanceHint < totalDebit && !intent.isSimulation) {
-                console.warn(`[BankingEngine] Preview indicates insufficient funds for ${sourceWalletId}, but SQL will enforce the final balance decision.`);
+                bankingLogger.warn('banking.balance_preview_insufficient', { actor_id: userId, wallet_id: sourceWalletId, required_amount: totalDebit, available_preview_balance: balanceHint, sql_authority: true });
             }
         } else {
             balanceHint = Number.MAX_SAFE_INTEGER;
@@ -689,7 +691,7 @@ export class BankingEngineService {
 
             const claim = await this.claimInternalTransferSettlement(txId, settlementWorkerId);
             if (claim.alreadyCompleted) {
-                console.info(`[BankingEngine] Settlement already completed for ${txId}.`);
+                bankingLogger.info('banking.settlement_already_completed', { transaction_id: txId, worker_id: settlementWorkerId });
                 return true;
             }
             assertSettlementEligible({ txId, txExists: !!tx, status: claim.transactionStatus || tx?.status });
@@ -742,13 +744,13 @@ export class BankingEngineService {
                 } catch (e: any) {
                     const mappedAppendError = normalizeFinancialAuthorityError(e, 'SETTLEMENT_APPEND');
                     if (mappedAppendError.message.startsWith('IDEMPOTENCY_VIOLATION')) {
-                        console.info(`[BankingEngine] Settlement append already applied for ${txId}. Finalizing status.`);
+                        bankingLogger.info('banking.settlement_append_already_applied', { transaction_id: txId, append_key: claim.appendKey, worker_id: settlementWorkerId });
                     } else {
                         throw mappedAppendError;
                     }
                 }
             } else {
-                console.info(`[BankingEngine] Settlement append marker already exists for ${txId}; skipping duplicate append.`);
+                bankingLogger.info('banking.settlement_append_marker_exists', { transaction_id: txId, append_key: claim.appendKey, worker_id: settlementWorkerId });
             }
             
             // 5. FORENSIC VERIFICATION (Zero-Sum Check)
@@ -757,7 +759,7 @@ export class BankingEngineService {
             const sum = reconResult.sum || 0;
             
             if (!isValid) {
-                console.error(`[BankingEngine] CRITICAL: Zero-sum violation detected for TX ${txId}. Residual: ${sum}`);
+                bankingLogger.error('banking.zero_sum_violation_detected', { transaction_id: txId, residual: sum, actor_id: tx.user_id });
                 
                 // Trigger Real-time Alert
                 await MonitoringService.notifyCritical('ZERO_SUM_VIOLATION', {
@@ -796,7 +798,7 @@ export class BankingEngineService {
             return true;
         } catch (e: any) {
             const mappedError = normalizeFinancialAuthorityError(e, 'SETTLEMENT');
-            console.error(`[BankingEngine] Settlement Failed for ${txId}: ${mappedError.message}`);
+            bankingLogger.error('banking.settlement_failed', { transaction_id: txId, worker_id: workerId, error_message: mappedError.message }, mappedError);
             
             // Determine if error is transient
             const isTransient = mappedError.message.includes('CONCURRENCY_CONFLICT') ||
@@ -874,7 +876,7 @@ export class BankingEngineService {
             const timestamp = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
             const refId = tx.reference_id || tx.referenceId || txId;
 
-            console.log(`[BankingEngine] Resolving notifications for tx ${txId}. Sender: ${senderName}, Recipient: ${recipientName}`);
+            bankingLogger.info('banking.transfer_notifications_resolved', { transaction_id: txId, actor_id: senderId, recipient_id: recipientId, reference_id: refId });
 
             const promises = [];
             
@@ -972,13 +974,13 @@ export class BankingEngineService {
             await Promise.all(promises);
 
         } catch (e: any) {
-            console.warn(`[BankingEngine] Notification dispatch failed for ${txId}: ${e.message}`);
+            bankingLogger.warn('banking.notification_dispatch_failed', { transaction_id: txId, error_message: e.message });
         }
     }
 
     private async commitToLocal(userId: string, txId: string, intent: any, legs: LedgerEntry[]) {
         // Local storage simulation
-        console.info("[BankingEngine] Committing to local volatile vault.");
+        bankingLogger.warn('banking.local_commit_fallback', { actor_id: userId, transaction_id: txId });
     }
 
     private async verifyLedgerIntegrity(txId: string): Promise<{ valid: boolean, failures: string[] }> {

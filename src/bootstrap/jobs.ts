@@ -5,6 +5,7 @@ import { RecoveryService } from '../../services/security/recoveryService.js';
 import { ReconEngine as LegacyRecon } from '../../backend/ledger/reconciliationService.js';
 import { EntProcessor } from '../../backend/enterprise/wealth/EnterprisePaymentProcessor.js';
 import { RedisClusterFactory } from '../../backend/infrastructure/RedisClusterFactory.js';
+import { logger } from '../../backend/infrastructure/logger.js';
 
 export const bootstrapJobs = async ({
   gatewayBackgroundJobsEnabled,
@@ -18,11 +19,11 @@ export const bootstrapJobs = async ({
   }
 
   try {
-    console.log('[System] Initializing Fintech Security Core...');
+    logger.info('jobs.wal_recovery_started');
     await RecoveryService.recover();
-    console.log('[System] WAL Recovery Complete.');
+    logger.info('jobs.wal_recovery_completed');
   } catch (e) {
-    console.error('[System] WAL Recovery Failed:', e);
+    logger.error('jobs.wal_recovery_failed', undefined, e);
   }
 
   const backgroundInterval = gatewayBackgroundJobsEnabled
@@ -37,7 +38,7 @@ export const bootstrapJobs = async ({
             await LegacyRecon.reapStuckTransactions();
             await EntProcessor.settleProcessingTransactions();
           } catch (e) {
-            console.error('[System] Background Cycle Error:', e);
+            logger.error('jobs.background_cycle_failed', undefined, e);
           } finally {
             backgroundJobRunning = false;
           }
@@ -50,7 +51,7 @@ export const bootstrapJobs = async ({
       if (backgroundInterval) clearInterval(backgroundInterval);
       settlementScheduler.stop();
       await RedisClusterFactory.shutdownAll().catch((e) => {
-        console.error('[System] Error closing Redis connections:', e);
+        logger.error('jobs.redis_shutdown_failed', undefined, e);
       });
     },
   };

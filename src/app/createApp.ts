@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { validateStartupEnvironment } from '../bootstrap/validation.js';
+import { validateStartupDependencies, validateStartupEnvironment } from '../bootstrap/validation.js';
 import { createAppContext } from './context.js';
 import { buildPublicRouteDeps } from './publicRouteDeps.js';
 import { registerAppPublicRoutes } from './registerPublicRoutes.js';
@@ -9,8 +9,10 @@ import { authenticate, adminOnly, resolveSessionRole, resolveSessionRegistryType
 import { ALLOWED_ORIGINS } from '../middleware/security/setup.js';
 import { createRuntime } from './runtime.js';
 import { continuousSessionMonitor } from '../../backend/src/middleware/session-monitor.middleware.js';
+import { tracingMiddleware } from '../../backend/middleware/tracing.js';
 
 validateStartupEnvironment();
+await validateStartupDependencies();
 
 const { app, httpServer, upload, port: PORT } = createRuntime();
 
@@ -29,7 +31,8 @@ const {
     globalIpLimiter,
 } = createAppContext(app);
 
-// Continuous Session Monitoring Middleware
+// Request correlation + session monitoring middleware
+app.use('/api/v1', tracingMiddleware);
 app.use('/api/v1', continuousSessionMonitor);
 
 registerSystemRoutes({
