@@ -1977,14 +1977,37 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
 
-CREATE OR REPLACE FUNCTION public.update_wallet_balance(target_wallet_id UUID, new_balance NUMERIC, new_encrypted TEXT)
-RETURNS void AS $$
+CREATE OR REPLACE FUNCTION public.repair_wallet_balance_emergency(
+    target_wallet_id UUID,
+    new_balance NUMERIC,
+    new_encrypted TEXT,
+    repair_actor_id TEXT,
+    repair_reason TEXT
+)
+RETURNS TABLE(entity_type TEXT, previous_balance NUMERIC, repaired_balance NUMERIC) AS $$
+DECLARE
+    resolved_role TEXT;
+    previous_amount NUMERIC;
 BEGIN
     IF new_balance IS NULL THEN
-        RAISE EXCEPTION 'BALANCE_REQUIRED: update_wallet_balance requires a numeric balance';
+        RAISE EXCEPTION 'BALANCE_REQUIRED: repair_wallet_balance_emergency requires a numeric balance';
     END IF;
 
-    PERFORM 1
+    IF NULLIF(BTRIM(COALESCE(repair_actor_id, '')), '') IS NULL THEN
+        RAISE EXCEPTION 'REPAIR_ACTOR_REQUIRED: repair_wallet_balance_emergency requires an actor id';
+    END IF;
+
+    IF NULLIF(BTRIM(COALESCE(repair_reason, '')), '') IS NULL THEN
+        RAISE EXCEPTION 'REPAIR_REASON_REQUIRED: repair_wallet_balance_emergency requires a human-readable reason';
+    END IF;
+
+    SELECT COALESCE(NULLIF(auth.role(), ''), public.get_auth_role()) INTO resolved_role;
+    IF resolved_role IS NULL OR resolved_role NOT IN ('service_role', 'SUPER_ADMIN', 'ADMIN', 'AUDIT') THEN
+        RAISE EXCEPTION 'PRIVILEGED_REPAIR_ONLY: repair_wallet_balance_emergency is restricted to emergency reconciliation and incident repair';
+    END IF;
+
+    SELECT w.balance
+      INTO previous_amount
       FROM public.wallets w
      WHERE w.id = target_wallet_id
        AND NOT (
@@ -1997,10 +2020,40 @@ BEGIN
         UPDATE public.wallets
            SET balance = new_balance
          WHERE id = target_wallet_id;
+
+        INSERT INTO public.audit_trail (
+            event_type,
+            actor_id,
+            transaction_id,
+            action,
+            metadata,
+            hash,
+            signature
+        )
+        VALUES (
+            'FINANCIAL',
+            repair_actor_id,
+            target_wallet_id::TEXT,
+            'EMERGENCY_BALANCE_REPAIR',
+            jsonb_build_object(
+                'tool', 'repair_wallet_balance_emergency',
+                'entity_type', 'wallet',
+                'target_wallet_id', target_wallet_id,
+                'previous_balance', previous_amount,
+                'new_balance', new_balance,
+                'reason', repair_reason,
+                'warning', 'Privileged repair-only reconciliation. Never call from normal financial flow.'
+            ),
+            md5(gen_random_uuid()::TEXT || clock_timestamp()::TEXT),
+            'repair_tool'
+        );
+
+        RETURN QUERY SELECT 'wallet'::TEXT, previous_amount, new_balance;
         RETURN;
     END IF;
 
-    PERFORM 1
+    SELECT pv.balance
+      INTO previous_amount
       FROM public.platform_vaults pv
      WHERE pv.id = target_wallet_id
        AND NOT (
@@ -2014,10 +2067,40 @@ BEGIN
            SET balance = new_balance,
                encrypted_balance = COALESCE(new_encrypted, encrypted_balance)
          WHERE id = target_wallet_id;
+
+        INSERT INTO public.audit_trail (
+            event_type,
+            actor_id,
+            transaction_id,
+            action,
+            metadata,
+            hash,
+            signature
+        )
+        VALUES (
+            'FINANCIAL',
+            repair_actor_id,
+            target_wallet_id::TEXT,
+            'EMERGENCY_BALANCE_REPAIR',
+            jsonb_build_object(
+                'tool', 'repair_wallet_balance_emergency',
+                'entity_type', 'platform_vault',
+                'target_wallet_id', target_wallet_id,
+                'previous_balance', previous_amount,
+                'new_balance', new_balance,
+                'reason', repair_reason,
+                'warning', 'Privileged repair-only reconciliation. Never call from normal financial flow.'
+            ),
+            md5(gen_random_uuid()::TEXT || clock_timestamp()::TEXT),
+            'repair_tool'
+        );
+
+        RETURN QUERY SELECT 'platform_vault'::TEXT, previous_amount, new_balance;
         RETURN;
     END IF;
 
-    PERFORM 1
+    SELECT g.current
+      INTO previous_amount
       FROM public.goals g
      WHERE g.id = target_wallet_id
      FOR UPDATE;
@@ -2027,12 +2110,44 @@ BEGIN
            SET current = new_balance,
                updated_at = NOW()
          WHERE id = target_wallet_id;
+
+        INSERT INTO public.audit_trail (
+            event_type,
+            actor_id,
+            transaction_id,
+            action,
+            metadata,
+            hash,
+            signature
+        )
+        VALUES (
+            'FINANCIAL',
+            repair_actor_id,
+            target_wallet_id::TEXT,
+            'EMERGENCY_BALANCE_REPAIR',
+            jsonb_build_object(
+                'tool', 'repair_wallet_balance_emergency',
+                'entity_type', 'goal',
+                'target_wallet_id', target_wallet_id,
+                'previous_balance', previous_amount,
+                'new_balance', new_balance,
+                'reason', repair_reason,
+                'warning', 'Privileged repair-only reconciliation. Never call from normal financial flow.'
+            ),
+            md5(gen_random_uuid()::TEXT || clock_timestamp()::TEXT),
+            'repair_tool'
+        );
+
+        RETURN QUERY SELECT 'goal'::TEXT, previous_amount, new_balance;
         RETURN;
     END IF;
 
     RAISE EXCEPTION 'LEDGER_ENTITY_MISSING: Internal entity % was not found or is locked', target_wallet_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+COMMENT ON FUNCTION public.repair_wallet_balance_emergency(UUID, NUMERIC, TEXT, TEXT, TEXT)
+IS 'EMERGENCY REPAIR TOOL ONLY. Allowed only for privileged reconciliation, incident repair, or auditor-approved cache repair after ledger truth is independently verified. Requires actor id and human-readable reason. Must never be called from normal payment, transfer, settlement, wealth, or wallet mutation flows.';
 
 CREATE OR REPLACE FUNCTION public.delete_old_activity()
 RETURNS void AS $$

@@ -85,7 +85,7 @@ This checklist validates the deterministic SQL ledger rewrite now in place for:
 - `goals.current` must match ledger sum for goal-backed flows.
 
 ## Legacy Helper Safety
-17. Exercise `update_wallet_balance(...)` only in controlled admin/test flow.
+17. Exercise `repair_wallet_balance_emergency(...)` only in controlled admin/test flow.
 - Confirm locked entities are rejected.
 - Confirm goal updates route through the function safely.
 - Do not use it as a normal financial mutation primitive.

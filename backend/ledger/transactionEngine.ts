@@ -24,6 +24,7 @@ export class BankingEngineService {
     
     public async process(user: User, intent: any): Promise<{ success: boolean, transaction?: Transaction, error?: string }> {
         const { amount, currency, description, type, sourceWalletId, targetWalletId, categoryId, isSimulation, statusOverride } = intent;
+        const txService = new TransactionService();
         
         console.info(`[BankingEngine] Processing ${type} for user ${user.id} [Simulation: ${isSimulation}]`);
 
@@ -50,10 +51,10 @@ export class BankingEngineService {
             // STATE: PENDING (Resolving legs and checking balance)
             TransactionStateMachine.transition(txId, currentStatus, 'pending', { fees });
             currentStatus = 'pending';
-            const { legs, balance } = shouldSkipLegs ? { legs: [], balance: 0 } : await this.deriveLegs(user.id, intent, txId, fees);
+            const { legs, balanceHint } = shouldSkipLegs ? { legs: [], balanceHint: 0 } : await this.deriveLegs(user.id, intent, txId, fees);
 
-            // STATE: AUTHORIZED (Balance verified in deriveLegs)
-            TransactionStateMachine.transition(txId, currentStatus, 'authorized', { balance });
+            // STATE: AUTHORIZED (legs resolved; SQL remains final balance authority)
+            TransactionStateMachine.transition(txId, currentStatus, 'authorized', { balance_hint: balanceHint });
             currentStatus = 'authorized';
 
             // Re-extract potentially auto-resolved fields from intent
@@ -73,7 +74,6 @@ export class BankingEngineService {
 
             // --- ENTERPRISE BUDGET ENFORCEMENT ---
             if (categoryId && !isSimulation) {
-                const txService = new TransactionService();
                 await txService.enforceBudgetLimits(user.id, categoryId, amount, txId, referenceId);
             }
 
@@ -104,7 +104,8 @@ export class BankingEngineService {
                         categoryId: categoryId,
                         metadata: {
                             ...intent.metadata,
-                            available_balance: balance
+                            available_balance: balanceHint,
+                            available_balance_authoritative: false
                         },
                         tax_info: { 
                             vat: fees.vat, 
@@ -188,8 +189,8 @@ export class BankingEngineService {
 
             // REAL-TIME: Notify user about the new transaction and balance update
             SocketRegistry.notifyTransactionUpdate(user.id, transaction);
-            if (balance !== undefined && intent.sourceWalletId) {
-                SocketRegistry.notifyBalanceUpdate(user.id, intent.sourceWalletId, balance);
+            if (intent.sourceWalletId) {
+                SocketRegistry.send(user.id, { type: 'REFRESH_WALLETS', payload: { walletId: intent.sourceWalletId } });
             }
 
             // Verify transaction integrity against intent
@@ -201,12 +202,13 @@ export class BankingEngineService {
             };
 
         } catch (e: any) {
-            console.error(`[BankingEngine] Critical Failure: ${e.message}`);
-            return { success: false, error: e.message };
+            const mappedError = txService.normalizeFinancialAuthorityError(e, 'BANKING_ENGINE_PROCESS');
+            console.error(`[BankingEngine] Critical Failure: ${mappedError.message}`);
+            return { success: false, error: mappedError.message };
         }
     }
 
-    private async deriveLegs(userId: string, intent: any, txId: string, fees: any): Promise<{ legs: LedgerEntry[], balance: number }> {
+    private async deriveLegs(userId: string, intent: any, txId: string, fees: any): Promise<{ legs: LedgerEntry[], balanceHint: number }> {
         let { amount, sourceWalletId, targetWalletId, type, recipientId, recipient_customer_id } = intent;
         const legs: LedgerEntry[] = [];
 
@@ -277,11 +279,12 @@ export class BankingEngineService {
             }
         }
 
-        // --- BALANCE HARDENING ---
+        // --- BALANCE PREVIEW ---
+        // App-side balance checks are UX hints only; SQL/ledger remain the final authority.
         const totalDebit = amount + fees.total;
         const txService = new TransactionService();
         
-        let currentBalance = 0;
+        let balanceHint = 0;
         let walletName = intent.metadata?.sub_wallet_type || 'Operating Wallet';
 
         const sourceCurrency = intent.metadata?.source_currency || intent.currency;
@@ -289,10 +292,9 @@ export class BankingEngineService {
         const isCrossCurrency = intent.metadata?.cross_currency === true;
         const fxDetails = intent.metadata?.fx_details;
 
-        // Skip balance check for DEPOSIT type (Faucet/External Source)
+        // Skip preview balance lookup for DEPOSIT type (Faucet/External Source)
         if (type !== 'DEPOSIT') {
-            // If it's a sub-wallet transfer, we check the sub-wallet balance
-            currentBalance = await txService.getLatestBalance(userId, sourceWalletId);
+            balanceHint = await txService.getLatestBalance(userId, sourceWalletId);
             
             // Try to get wallet name for better error message
             const sb = getAdminSupabase() || getSupabase();
@@ -305,12 +307,23 @@ export class BankingEngineService {
                 }
             }
 
-            // Allow simulation to proceed even with insufficient funds to show fees
-            if (currentBalance < totalDebit && !intent.isSimulation) {
-                throw new Error(`INSUFFICIENT_FUNDS: Required ${totalDebit} ${sourceCurrency} (incl. fees), but only ${currentBalance} available in ${walletName} (${sourceWalletId.substring(0,8)}...).`);
+            intent.metadata = {
+                ...(intent.metadata || {}),
+                balance_preview: {
+                    available: balanceHint,
+                    required: totalDebit,
+                    sufficient: balanceHint >= totalDebit,
+                    wallet_name: walletName,
+                    wallet_id: sourceWalletId,
+                    authoritative: false
+                }
+            };
+
+            if (balanceHint < totalDebit && !intent.isSimulation) {
+                console.warn(`[BankingEngine] Preview indicates insufficient funds for ${sourceWalletId}, but SQL will enforce the final balance decision.`);
             }
         } else {
-            currentBalance = Number.MAX_SAFE_INTEGER;
+            balanceHint = Number.MAX_SAFE_INTEGER;
         }
 
         // --- SUB-WALLET SHIFT (Goal/Budget -> Operating) ---
@@ -441,7 +454,7 @@ export class BankingEngineService {
                     timestamp: new Date().toISOString()
                 });
 
-                return { legs, balance: currentBalance };
+                return { legs, balanceHint };
             } else {
                 // If no internal vault, we MUST fail if it's an internal transfer 
                 // to prevent direct settlement which the user said is unsafe.
@@ -533,7 +546,7 @@ export class BankingEngineService {
             timestamp: new Date().toISOString()
         });
 
-        return { legs, balance: currentBalance };
+        return { legs, balanceHint };
     }
 
     private async commitToCloud(userId: string, txId: string, intent: any, legs: LedgerEntry[], status: TransactionStatus = 'completed') {
@@ -577,9 +590,17 @@ export class BankingEngineService {
                 tx = data;
             }
 
-            if (!tx || tx.status !== 'processing') {
-                console.warn(`[BankingEngine] Settlement aborted for ${txId}: Transaction not in processing state.`);
-                return false;
+            if (!tx) {
+                throw new Error(`INVALID_SETTLEMENT_STATE: Transaction ${txId} was not found for settlement.`);
+            }
+
+            if (tx.status === 'completed') {
+                console.info(`[BankingEngine] Settlement already completed for ${txId}.`);
+                return true;
+            }
+
+            if (tx.status !== 'processing') {
+                throw new Error(`INVALID_SETTLEMENT_STATE: Transaction ${txId} is ${tx.status}, expected processing.`);
             }
 
             // CHECK IF ALREADY SETTLED LEGS EXIST TO PREVENT DOUBLE SETTLEMENT
@@ -605,8 +626,7 @@ export class BankingEngineService {
                 .maybeSingle();
 
             if (!internalVault) {
-                console.warn(`[BankingEngine] Settlement aborted for ${txId}: Missing internal vault.`);
-                return false;
+                throw new Error(`INVALID_SETTLEMENT_STATE: Transaction ${txId} is missing its internal settlement vault.`);
             }
 
             if (!targetWalletId) throw new Error("SETTLEMENT_ERROR: Missing target wallet.");
@@ -633,10 +653,19 @@ export class BankingEngineService {
             ];
 
             // Post the remaining legs with a strong append marker so settlement cannot be applied twice.
-            await txService.addLedgerEntries(txId, legs, {
-                appendKey: `settlement:${txId}:paysafe_release:v1`,
-                appendPhase: 'PAYSAFE_SETTLEMENT',
-            });
+            try {
+                await txService.addLedgerEntries(txId, legs, {
+                    appendKey: `settlement:${txId}:paysafe_release:v1`,
+                    appendPhase: 'PAYSAFE_SETTLEMENT',
+                });
+            } catch (e: any) {
+                const mappedAppendError = txService.normalizeFinancialAuthorityError(e, 'SETTLEMENT_APPEND');
+                if (mappedAppendError.message.startsWith('IDEMPOTENCY_VIOLATION')) {
+                    console.info(`[BankingEngine] Settlement append already applied for ${txId}. Finalizing status.`);
+                } else {
+                    throw mappedAppendError;
+                }
+            }
             
             // 5. FORENSIC VERIFICATION (Zero-Sum Check)
             const reconResult = await ReconciliationEngine.verifyZeroSum(txId);
@@ -665,18 +694,26 @@ export class BankingEngineService {
             Audit.log('FINANCIAL', tx.user_id, 'TRANSACTION_SETTLED', { txId }).catch(() => {});
             return true;
         } catch (e: any) {
-            console.error(`[BankingEngine] Settlement Failed for ${txId}: ${e.message}`);
+            const txService = new TransactionService();
+            const mappedError = txService.normalizeFinancialAuthorityError(e, 'SETTLEMENT');
+            console.error(`[BankingEngine] Settlement Failed for ${txId}: ${mappedError.message}`);
             
             // Determine if error is transient
-            const isTransient = e.message.includes('LEDGER_FAULT') || 
-                                e.message.includes('LEDGER_COMMIT_FAULT') ||
-                                e.message.includes('timeout') ||
-                                e.message.includes('fetch failed');
+            const isTransient = mappedError.message.includes('CONCURRENCY_CONFLICT') ||
+                                mappedError.message.includes('LEDGER_FAULT') || 
+                                mappedError.message.includes('LEDGER_COMMIT_FAULT') ||
+                                mappedError.message.includes('LEDGER_APPEND_FAULT') ||
+                                mappedError.message.includes('timeout') ||
+                                mappedError.message.includes('fetch failed');
             
             if (isTransient) {
-                throw e; // Throw transient errors so the reaper doesn't incorrectly reverse the transaction
+                throw mappedError; // Throw transient errors so the reaper doesn't incorrectly reverse the transaction
             }
-            
+
+            if (mappedError.message.startsWith('INVALID_SETTLEMENT_STATE')) {
+                throw mappedError;
+            }
+
             return false;
         }
     }

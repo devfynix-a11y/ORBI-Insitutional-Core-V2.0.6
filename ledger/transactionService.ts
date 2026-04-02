@@ -17,6 +17,70 @@ import { PerfMonitor } from '../backend/infrastructure/PerfMonitor.js';
  * The source of truth for the Sovereign Cluster.
  */
 export class TransactionService {
+    public normalizeFinancialAuthorityError(error: any, context: string = 'FINANCIAL_AUTHORITY'): Error {
+        const rawMessage = String(error?.message || error?.details || error || 'UNKNOWN_ERROR');
+        const normalized = rawMessage.toUpperCase();
+        const dbCode = String(error?.code || '');
+
+        if (normalized.includes('INSUFFICIENT_FUNDS')) {
+            return new Error(`INSUFFICIENT_FUNDS: ${context} rejected the request because the authoritative SQL balance check found insufficient funds.`);
+        }
+
+        if (normalized.includes('APPEND_ALREADY_APPLIED') || normalized.includes('IDEMPOTENCY_VIOLATION') || dbCode === '23505') {
+            return new Error(`IDEMPOTENCY_VIOLATION: ${context} rejected a duplicate financial mutation.`);
+        }
+
+        if (normalized.includes('WALLET_LOCKED') || normalized.includes('GOAL_MISSING')) {
+            return new Error(`LOCKED_WALLET: ${context} could not proceed because one of the financial containers is locked or unavailable.`);
+        }
+
+        if (normalized.includes('INVALID_SETTLEMENT_STATE') || normalized.includes('SETTLEMENT_ABORTED') || normalized.includes('SETTLEMENT_ERROR')) {
+            return new Error(`INVALID_SETTLEMENT_STATE: ${context} cannot continue because the settlement is no longer in a valid state.`);
+        }
+
+        if (
+            dbCode === '40001' ||
+            dbCode === '40P01' ||
+            normalized.includes('COULD NOT SERIALIZE ACCESS') ||
+            normalized.includes('DEADLOCK DETECTED') ||
+            normalized.includes('CONCURRENT')
+        ) {
+            return new Error(`CONCURRENCY_CONFLICT: ${context} conflicted with another financial update. Retry with the same idempotency key.`);
+        }
+
+        return new Error(`${context}: ${rawMessage}`);
+    }
+
+    private async getCachedBalanceSnapshot(walletId: string): Promise<number | null> {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return null;
+
+        const { data: wallet } = await sb.from('wallets').select('balance').eq('id', walletId).maybeSingle();
+        if (wallet?.balance !== null && wallet?.balance !== undefined) {
+            return Number(wallet.balance) || 0;
+        }
+
+        const { data: vault } = await sb.from('platform_vaults').select('balance').eq('id', walletId).maybeSingle();
+        if (vault?.balance !== null && vault?.balance !== undefined) {
+            return Number(vault.balance) || 0;
+        }
+
+        const { data: goal } = await sb.from('goals').select('current').eq('id', walletId).maybeSingle();
+        if (goal?.current !== null && goal?.current !== undefined) {
+            const numericGoalBalance = Number(goal.current);
+            if (!Number.isNaN(numericGoalBalance)) {
+                return numericGoalBalance;
+            }
+
+            try {
+                return Number(await DataVault.decrypt(goal.current)) || 0;
+            } catch {
+                return null;
+            }
+        }
+
+        return null;
+    }
     
     /**
      * CALCULATE BALANCE FROM LEDGER
@@ -55,58 +119,28 @@ export class TransactionService {
 
     public async getLatestBalance(userId: string, walletId: string | null): Promise<number> {
         if (!walletId) return 0;
-        
-        const sb = getAdminSupabase() || getSupabase();
-        if (!sb) return 0;
 
         try {
             const ledgerBalance = await this.calculateBalanceFromLedger(walletId);
-
-            // Compare cached balances vs ledger (source of truth)
-            const { data: wallet } = await sb
-                .from('wallets')
-                .select('balance')
-                .eq('id', walletId)
-                .maybeSingle();
-            if (wallet && wallet.balance !== null && wallet.balance !== undefined) {
-                const cached = Number(wallet.balance) || 0;
-                if (Math.abs(cached - ledgerBalance) > 0.01) {
-                    throw new Error('INTERNAL_BALANCE_MISMATCH');
-                }
-            }
-
-            const { data: vault } = await sb
-                .from('platform_vaults')
-                .select('balance')
-                .eq('id', walletId)
-                .maybeSingle();
-            if (vault && vault.balance !== null && vault.balance !== undefined) {
-                const cached = Number(vault.balance) || 0;
-                if (Math.abs(cached - ledgerBalance) > 0.01) {
-                    throw new Error('INTERNAL_BALANCE_MISMATCH');
-                }
-            }
-
-            const { data: goal } = await sb
-                .from('goals')
-                .select('current')
-                .eq('id', walletId)
-                .maybeSingle();
-            if (goal && goal.current !== null && goal.current !== undefined) {
-                const cached = Number(await DataVault.decrypt(goal.current)) || 0;
-                if (Math.abs(cached - ledgerBalance) > 0.01) {
-                    throw new Error('INTERNAL_BALANCE_MISMATCH');
-                }
+            const cachedBalance = await this.getCachedBalanceSnapshot(walletId);
+            if (cachedBalance !== null && Math.abs(cachedBalance - ledgerBalance) > 0.01) {
+                console.warn(`[Ledger] BALANCE_DRIFT_DETECTED for ${walletId}: cached=${cachedBalance}, ledger=${ledgerBalance}`);
             }
 
             return ledgerBalance;
         } catch (e) {
             console.error(`[Ledger] Failed to fetch latest balance for ${walletId}:`, e);
         }
-        
+
+        const cachedBalance = await this.getCachedBalanceSnapshot(walletId);
+        if (cachedBalance !== null) {
+            return cachedBalance;
+        }
+
         const ledgerBalance = await this.calculateBalanceFromLedger(walletId);
         if (ledgerBalance === null || ledgerBalance === undefined || isNaN(ledgerBalance)) {
             console.error(`[Ledger] Debug: getLatestBalance returned invalid balance: ${ledgerBalance} for wallet: ${walletId}`);
+            return 0;
         }
         return ledgerBalance;
     }
@@ -364,32 +398,14 @@ export class TransactionService {
         const txId = t.id ? String(t.id) : UUID.generate();
         const referenceId = t.referenceId || `REF-${UUID.generateShortCode(12)}`;
 
-        // EXACTLY-ONCE PROTECTION: Check if reference_id already exists
-        const { data: existingTx } = await sb.from('transactions')
-            .select('id, status')
-            .eq('reference_id', referenceId)
-            .maybeSingle();
-
-        if (existingTx) {
-            console.warn(`[Ledger] IDEMPOTENCY_VIOLATION: Duplicate transaction attempt for reference: ${referenceId}. Existing ID: ${existingTx.id}, Status: ${existingTx.status}`);
-            throw new Error(`IDEMPOTENCY_VIOLATION: Transaction with reference ${referenceId} already exists with status ${existingTx.status}`);
-        }
-        
         // 1. Encrypt PII Metadata
         const [encAmt, encDesc] = await Promise.all([
             DataVault.encrypt(t.amount || 0), 
             DataVault.encrypt(t.description || 'Sovereign Transaction')
         ]);
 
-        // 2. Prepare Legs with balances (Parallelize balance fetching)
+        // 2. Prepare legs for SQL-authoritative posting.
         const walletIds = Array.from(new Set((ledgerEntries || []).map(l => l.walletId).filter((id): id is string => !!id)));
-        const initialBalances = await Promise.all(
-            walletIds.map(async id => ({ id, balance: await this.getLatestBalance(t.user_id || 'system', id) }))
-        );
-        
-        const balanceCache: Record<string, number> = {};
-        initialBalances.forEach(b => balanceCache[b.id] = b.balance);
-
         const preparedLegs = [];
         const internalWalletIds = new Set<string>();
         if (walletIds.length > 0) {
@@ -408,30 +424,17 @@ export class TransactionService {
         for (const leg of ledgerEntries) {
             const walletId = leg.walletId;
             if (!walletId) continue;
-            
-            const current = balanceCache[walletId];
-            const after = leg.type === 'CREDIT' ? (current + leg.amount) : (current - leg.amount);
-            const finalAfter = Math.round(after * 10000) / 10000;
-
-            if (finalAfter < 0 && internalWalletIds.has(String(walletId))) {
-                throw new Error(`INSUFFICIENT_FUNDS: Wallet ${walletId} would go negative.`);
+            if (!Number.isFinite(Number(leg.amount)) || Number(leg.amount) <= 0) {
+                throw new Error(`LEG_AMOUNT_INVALID: Leg for ${walletId} must have a positive numeric amount.`);
             }
-            
-            balanceCache[walletId] = finalAfter;
 
-            const [eAmt, eAft] = await Promise.all([
-                DataVault.encrypt(leg.amount), 
-                DataVault.encrypt(finalAfter)
-            ]);
+            const eAmt = await DataVault.encrypt(leg.amount);
 
             preparedLegs.push({
                 wallet_id: walletId,
                 entry_type: leg.type,
                 amount: eAmt,
                 amount_plain: leg.amount,
-                balance_before: current,
-                balance_after: finalAfter,
-                balance_after_encrypted: eAft,
                 description: leg.description
             });
         }
@@ -462,7 +465,7 @@ export class TransactionService {
                 Reference_ID=${referenceId}
                 User_ID=${t.user_id}
             `);
-            throw new Error(`LEDGER_COMMIT_FAULT: ${rpcError.message}`);
+            throw this.normalizeFinancialAuthorityError(rpcError, 'LEDGER_COMMIT_FAULT');
         }
 
         // 3.5 Log initial 'created' event
@@ -515,7 +518,7 @@ export class TransactionService {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) throw new Error("LEDGER_FAULT: Cloud connectivity required.");
 
-        // 1. Prepare Legs with balances
+        // 1. Prepare legs for SQL-authoritative append
         const preparedLegs = [];
         const internalWalletIds = new Set<string>();
         const walletIds = Array.from(new Set((ledgerEntries || []).map(l => l.walletId).filter((id): id is string => !!id)));
@@ -532,36 +535,13 @@ export class TransactionService {
         if (walletIds.length > 0 && internalWalletIds.size === 0) {
             throw new Error('INTERNAL_WALLET_REQUIRED: Ledger updates must involve ORBI internal wallets.');
         }
-        const balanceCache: Record<string, number> = {};
-        const finalBalances: Record<string, number> = {};
-
         for (const leg of ledgerEntries) {
             const walletId = leg.walletId;
             if (!walletId) continue;
-            
-            if (balanceCache[walletId] === undefined) {
-                balanceCache[walletId] = await this.getLatestBalance('system', walletId);
+            if (!Number.isFinite(Number(leg.amount)) || Number(leg.amount) <= 0) {
+                throw new Error(`LEG_AMOUNT_INVALID: Leg for ${walletId} must have a positive numeric amount.`);
             }
-            
-            const current = balanceCache[walletId];
-            const after = leg.type === 'CREDIT' ? (current + leg.amount) : (current - leg.amount);
-            const finalAfter = Math.round(after * 10000) / 10000;
-            
-            if (finalAfter === null || finalAfter === undefined || isNaN(finalAfter)) {
-                console.error(`[Ledger] Debug: Settlement Fault - Invalid balance_after calculation. Wallet: ${walletId}, Current: ${current}, Amount: ${leg.amount}, Type: ${leg.type}, After: ${after}, FinalAfter: ${finalAfter}`);
-            }
-
-            if (finalAfter < 0 && internalWalletIds.has(String(walletId))) {
-                throw new Error(`INSUFFICIENT_FUNDS: Wallet ${walletId} would go negative.`);
-            }
-            
-            balanceCache[walletId] = finalAfter;
-            finalBalances[walletId] = finalAfter;
-
-            const [eAmt, eAft] = await Promise.all([
-                DataVault.encrypt(leg.amount), 
-                DataVault.encrypt(finalAfter)
-            ]);
+            const eAmt = await DataVault.encrypt(leg.amount);
 
             preparedLegs.push({
                 transaction_id: txId,
@@ -569,9 +549,6 @@ export class TransactionService {
                 entry_type: leg.type,
                 amount: eAmt,
                 amount_plain: leg.amount,
-                balance_before: current,
-                balance_after: finalAfter,
-                balance_after_encrypted: eAft,
                 description: leg.description,
                 created_at: new Date().toISOString()
             });
@@ -587,7 +564,7 @@ export class TransactionService {
 
         if (rpcError) {
             console.error(`[Ledger] Append legs failed for TX ${txId}: ${rpcError.message}`);
-            throw new Error(`LEDGER_APPEND_FAULT: ${rpcError.message}`);
+            throw this.normalizeFinancialAuthorityError(rpcError, 'LEDGER_APPEND_FAULT');
         }
     }
 
@@ -1181,9 +1158,9 @@ export class TransactionService {
     }
 
     /**
-     * FIX WALLET BALANCE
-     * Forces the cached balance to match the ledger sum.
-     * WARNING: Use only after manual audit.
+     * EMERGENCY REPAIR ONLY
+     * Forces the cached balance to match the independently verified ledger sum.
+     * Never call this from customer-facing or normal financial flow.
      */
     public async fixWalletBalance(walletId: string, actorId: string): Promise<void> {
         const sb = getAdminSupabase() || getSupabase();
@@ -1192,10 +1169,12 @@ export class TransactionService {
         const ledgerBalance = await this.calculateBalanceFromLedger(walletId);
         const encryptedBalance = await DataVault.encrypt(ledgerBalance);
 
-        await sb.rpc('update_wallet_balance', {
+        await sb.rpc('repair_wallet_balance_emergency', {
             target_wallet_id: walletId,
             new_balance: ledgerBalance,
-            new_encrypted: encryptedBalance
+            new_encrypted: encryptedBalance,
+            repair_actor_id: actorId,
+            repair_reason: `Ledger reconciliation repair for wallet ${walletId}`
         });
 
         Audit.log('SECURITY', actorId, 'WALLET_BALANCE_FIXED', { walletId, newBalance: ledgerBalance });
