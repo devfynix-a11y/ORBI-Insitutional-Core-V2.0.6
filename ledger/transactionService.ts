@@ -507,7 +507,11 @@ export class TransactionService {
      * ADD LEDGER ENTRIES (APPEND-ONLY)
      * Adds new legs to an existing transaction and updates wallet balances.
      */
-    async addLedgerEntries(txId: string, ledgerEntries: LedgerEntry[]) {
+    async addLedgerEntries(
+        txId: string,
+        ledgerEntries: LedgerEntry[],
+        options?: { appendKey?: string; appendPhase?: string },
+    ) {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) throw new Error("LEDGER_FAULT: Cloud connectivity required.");
 
@@ -576,7 +580,9 @@ export class TransactionService {
         // 2. Atomic Commit via RPC
         const { error: rpcError } = await sb.rpc('append_ledger_entries_v1', {
             p_tx_id: txId,
-            p_legs: preparedLegs
+            p_legs: preparedLegs,
+            p_append_key: options?.appendKey || null,
+            p_append_phase: options?.appendPhase || null,
         });
 
         if (rpcError) {

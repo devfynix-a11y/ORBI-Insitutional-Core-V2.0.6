@@ -632,8 +632,11 @@ export class BankingEngineService {
                 }
             ];
 
-            // Post the remaining legs
-            await txService.addLedgerEntries(txId, legs);
+            // Post the remaining legs with a strong append marker so settlement cannot be applied twice.
+            await txService.addLedgerEntries(txId, legs, {
+                appendKey: `settlement:${txId}:paysafe_release:v1`,
+                appendPhase: 'PAYSAFE_SETTLEMENT',
+            });
             
             // 5. FORENSIC VERIFICATION (Zero-Sum Check)
             const reconResult = await ReconciliationEngine.verifyZeroSum(txId);

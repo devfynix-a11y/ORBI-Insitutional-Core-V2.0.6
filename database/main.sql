@@ -354,6 +354,24 @@ BEGIN
     END IF;
 END $$;
 
+
+CREATE TABLE IF NOT EXISTS public.ledger_append_markers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID NOT NULL REFERENCES public.transactions(id) ON DELETE CASCADE,
+    append_key TEXT,
+    append_phase TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_append_markers_append_key
+    ON public.ledger_append_markers(append_key)
+    WHERE append_key IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_append_markers_tx_phase
+    ON public.ledger_append_markers(transaction_id, append_phase)
+    WHERE append_phase IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS public.goals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
     user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
@@ -2364,7 +2382,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 -- Atomic Append Ledger Legs RPC
 CREATE OR REPLACE FUNCTION public.append_ledger_entries_v1(
     p_tx_id UUID,
-    p_legs JSONB
+    p_legs JSONB,
+    p_append_key TEXT DEFAULT NULL,
+    p_append_phase TEXT DEFAULT NULL
 )
 RETURNS void AS $$
 DECLARE
@@ -2394,6 +2414,34 @@ BEGIN
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'TRANSACTION_MISSING: Transaction % was not found', p_tx_id;
+    END IF;
+
+    IF NULLIF(BTRIM(COALESCE(p_append_key, '')), '') IS NOT NULL
+       OR NULLIF(BTRIM(COALESCE(p_append_phase, '')), '') IS NOT NULL THEN
+        BEGIN
+            INSERT INTO public.ledger_append_markers (
+                transaction_id,
+                append_key,
+                append_phase,
+                metadata
+            ) VALUES (
+                p_tx_id,
+                NULLIF(BTRIM(p_append_key), ''),
+                NULLIF(BTRIM(p_append_phase), ''),
+                jsonb_build_object(
+                    'leg_count', jsonb_array_length(p_legs),
+                    'registered_at', NOW(),
+                    'append_phase', NULLIF(BTRIM(p_append_phase), ''),
+                    'append_key', NULLIF(BTRIM(p_append_key), '')
+                )
+            );
+        EXCEPTION
+            WHEN unique_violation THEN
+                RAISE EXCEPTION 'APPEND_ALREADY_APPLIED: transaction %, append_key %, append_phase %',
+                    p_tx_id,
+                    COALESCE(NULLIF(BTRIM(p_append_key), ''), '<null>'),
+                    COALESCE(NULLIF(BTRIM(p_append_phase), ''), '<null>');
+        END;
     END IF;
 
     FOR v_lock_target IN

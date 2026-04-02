@@ -6,6 +6,7 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 DROP FUNCTION IF EXISTS public.handle_new_user() CASCADE;
 DROP FUNCTION IF EXISTS public.post_transaction_v2(UUID, UUID, UUID, UUID, TEXT, TEXT, TEXT, TEXT, DATE, JSONB, UUID, JSONB, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.append_ledger_entries_v1(UUID, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS public.append_ledger_entries_v1(UUID, JSONB, TEXT, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.shared_pot_contribute_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS public.shared_pot_withdraw_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB, TEXT, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS public.card_settle_v1(TEXT, UUID, UUID, NUMERIC) CASCADE;
@@ -23,6 +24,7 @@ DROP TABLE IF EXISTS public.background_jobs CASCADE;
 DROP TABLE IF EXISTS public.outbox_events CASCADE;
 DROP TABLE IF EXISTS public.merchant_card_settings CASCADE;
 DROP TABLE IF EXISTS public.settlement_lifecycle CASCADE;
+DROP TABLE IF EXISTS public.ledger_append_markers CASCADE;
 DROP TABLE IF EXISTS public.reconciliation_reports CASCADE;
 DROP TABLE IF EXISTS public.item_reconciliation_audit CASCADE;
 DROP TABLE IF EXISTS public.fee_correction_logs CASCADE;
@@ -449,6 +451,24 @@ BEGIN
         ALTER TABLE public.financial_ledger ADD COLUMN entry_side TEXT;
     END IF;
 END $$;
+
+
+CREATE TABLE IF NOT EXISTS public.ledger_append_markers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID NOT NULL REFERENCES public.transactions(id) ON DELETE CASCADE,
+    append_key TEXT,
+    append_phase TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_append_markers_append_key
+    ON public.ledger_append_markers(append_key)
+    WHERE append_key IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_append_markers_tx_phase
+    ON public.ledger_append_markers(transaction_id, append_phase)
+    WHERE append_phase IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.goals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
@@ -2449,7 +2469,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 -- Atomic Append Ledger Legs RPC
 CREATE OR REPLACE FUNCTION public.append_ledger_entries_v1(
     p_tx_id UUID,
-    p_legs JSONB
+    p_legs JSONB,
+    p_append_key TEXT DEFAULT NULL,
+    p_append_phase TEXT DEFAULT NULL
 )
 RETURNS void AS $$
 DECLARE
@@ -2479,6 +2501,34 @@ BEGIN
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'TRANSACTION_MISSING: Transaction % was not found', p_tx_id;
+    END IF;
+
+    IF NULLIF(BTRIM(COALESCE(p_append_key, '')), '') IS NOT NULL
+       OR NULLIF(BTRIM(COALESCE(p_append_phase, '')), '') IS NOT NULL THEN
+        BEGIN
+            INSERT INTO public.ledger_append_markers (
+                transaction_id,
+                append_key,
+                append_phase,
+                metadata
+            ) VALUES (
+                p_tx_id,
+                NULLIF(BTRIM(p_append_key), ''),
+                NULLIF(BTRIM(p_append_phase), ''),
+                jsonb_build_object(
+                    'leg_count', jsonb_array_length(p_legs),
+                    'registered_at', NOW(),
+                    'append_phase', NULLIF(BTRIM(p_append_phase), ''),
+                    'append_key', NULLIF(BTRIM(p_append_key), '')
+                )
+            );
+        EXCEPTION
+            WHEN unique_violation THEN
+                RAISE EXCEPTION 'APPEND_ALREADY_APPLIED: transaction %, append_key %, append_phase %',
+                    p_tx_id,
+                    COALESCE(NULLIF(BTRIM(p_append_key), ''), '<null>'),
+                    COALESCE(NULLIF(BTRIM(p_append_phase), ''), '<null>');
+        END;
     END IF;
 
     FOR v_lock_target IN
