@@ -125,6 +125,64 @@ async function createDisposableWebhookPartner(client: any, options?: {
 }
 
 dbIntegrationTest(
+  'write-enabled integration rejects double debit on the same wallet',
+  async (_t, client) => {
+    const txId = randomUUID();
+    const referenceId = `ITEST-DOUBLE-${txId.slice(0, 8)}`;
+    const userId = requireEnv('ORBI_DB_TEST_USER_ID');
+    const sourceWalletId = requireEnv('ORBI_DB_TEST_SOURCE_WALLET_ID');
+    const targetWalletId = requireEnv('ORBI_DB_TEST_TARGET_WALLET_ID');
+    const amount = TEST_AMOUNT;
+    const [encAmt, encDesc] = await Promise.all([
+      DataProtection.encryptAmount(amount),
+      DataProtection.encryptDescription('Integration double debit probe'),
+    ]);
+
+    const result = await client.rpc('post_transaction_v2', {
+      p_tx_id: txId,
+      p_user_id: userId,
+      p_wallet_id: sourceWalletId,
+      p_to_wallet_id: targetWalletId,
+      p_amount: encAmt,
+      p_description: encDesc,
+      p_type: 'transfer',
+      p_status: 'completed',
+      p_date: new Date().toISOString().slice(0, 10),
+      p_metadata: { integration_test: true, scenario: 'double_debit' },
+      p_category_id: null,
+      p_reference_id: referenceId,
+      p_legs: [
+        {
+          wallet_id: sourceWalletId,
+          entry_type: 'DEBIT',
+          amount: encAmt,
+          amount_plain: amount,
+          description: 'Integration debit leg 1',
+        },
+        {
+          wallet_id: sourceWalletId,
+          entry_type: 'DEBIT',
+          amount: encAmt,
+          amount_plain: amount,
+          description: 'Integration debit leg 2',
+        },
+        {
+          wallet_id: targetWalletId,
+          entry_type: 'CREDIT',
+          amount: encAmt,
+          amount_plain: amount,
+          description: 'Integration credit leg',
+        },
+      ],
+    });
+
+    assert.ok(result.error, 'Expected double debit to be rejected');
+    assert.match(String(result.error?.message || ''), /LEDGER_OUT_OF_BALANCE|INSUFFICIENT_FUNDS/i);
+  },
+  { requireWrites: true, requiredEnv: WRITE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
   'write-enabled integration can post a financial transaction through post_transaction_v2',
   async (_t, client) => {
     const posted = await createPostedTransaction(client, {
@@ -147,6 +205,88 @@ dbIntegrationTest(
       .eq('transaction_id', posted.txId);
     assert.ifError(legError);
     assert.equal(Number(legCount || 0), 2);
+  },
+  { requireWrites: true, requiredEnv: WRITE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
+  'write-enabled integration rejects duplicate transaction reference_id',
+  async (_t, client) => {
+    const txId = randomUUID();
+    const referenceId = `ITEST-DUP-${txId.slice(0, 8)}`;
+    const userId = requireEnv('ORBI_DB_TEST_USER_ID');
+    const sourceWalletId = requireEnv('ORBI_DB_TEST_SOURCE_WALLET_ID');
+    const targetWalletId = requireEnv('ORBI_DB_TEST_TARGET_WALLET_ID');
+    const [encAmt, encDesc] = await Promise.all([
+      DataProtection.encryptAmount(TEST_AMOUNT),
+      DataProtection.encryptDescription('Integration duplicate reference probe'),
+    ]);
+
+    const first = await client.rpc('post_transaction_v2', {
+      p_tx_id: txId,
+      p_user_id: userId,
+      p_wallet_id: sourceWalletId,
+      p_to_wallet_id: targetWalletId,
+      p_amount: encAmt,
+      p_description: encDesc,
+      p_type: 'transfer',
+      p_status: 'completed',
+      p_date: new Date().toISOString().slice(0, 10),
+      p_metadata: { integration_test: true, scenario: 'duplicate_reference' },
+      p_category_id: null,
+      p_reference_id: referenceId,
+      p_legs: [
+        {
+          wallet_id: sourceWalletId,
+          entry_type: 'DEBIT',
+          amount: encAmt,
+          amount_plain: TEST_AMOUNT,
+          description: 'Integration debit leg',
+        },
+        {
+          wallet_id: targetWalletId,
+          entry_type: 'CREDIT',
+          amount: encAmt,
+          amount_plain: TEST_AMOUNT,
+          description: 'Integration credit leg',
+        },
+      ],
+    });
+    assert.ifError(first.error);
+
+    const duplicate = await client.rpc('post_transaction_v2', {
+      p_tx_id: randomUUID(),
+      p_user_id: userId,
+      p_wallet_id: sourceWalletId,
+      p_to_wallet_id: targetWalletId,
+      p_amount: encAmt,
+      p_description: encDesc,
+      p_type: 'transfer',
+      p_status: 'completed',
+      p_date: new Date().toISOString().slice(0, 10),
+      p_metadata: { integration_test: true, scenario: 'duplicate_reference' },
+      p_category_id: null,
+      p_reference_id: referenceId,
+      p_legs: [
+        {
+          wallet_id: sourceWalletId,
+          entry_type: 'DEBIT',
+          amount: encAmt,
+          amount_plain: TEST_AMOUNT,
+          description: 'Integration debit leg',
+        },
+        {
+          wallet_id: targetWalletId,
+          entry_type: 'CREDIT',
+          amount: encAmt,
+          amount_plain: TEST_AMOUNT,
+          description: 'Integration credit leg',
+        },
+      ],
+    });
+
+    assert.ok(duplicate.error, 'Expected duplicate reference_id to be rejected');
+    assert.match(String(duplicate.error?.message || ''), /IDEMPOTENCY_VIOLATION/i);
   },
   { requireWrites: true, requiredEnv: WRITE_FIXTURE_ENV },
 );
@@ -473,6 +613,18 @@ dbIntegrationTest(
     assert.equal(String(completionRow.final_status).toLowerCase(), 'completed');
     assert.equal(String(completionRow.lifecycle_status).toUpperCase(), 'COMPLETED');
 
+    const duplicateCompletion = await client.rpc('complete_internal_transfer_settlement', {
+      p_tx_id: staging.txId,
+      p_worker_claim_id: claimRow.worker_claim_id,
+      p_result: 'COMPLETED',
+      p_result_note: 'Integration duplicate settlement completion',
+      p_zero_sum_valid: true,
+    });
+    assert.ifError(duplicateCompletion.error);
+    const duplicateCompletionRow = Array.isArray(duplicateCompletion.data) ? duplicateCompletion.data[0] : duplicateCompletion.data;
+    assert.ok(duplicateCompletionRow);
+    assert.equal(Boolean(duplicateCompletionRow.already_finalized), true);
+
     const duplicateClaim = await client.rpc('claim_internal_transfer_settlement', {
       p_tx_id: staging.txId,
       p_worker_id: `${workerId}:duplicate`,
@@ -483,6 +635,49 @@ dbIntegrationTest(
     assert.equal(Boolean(duplicateRow.already_completed), true);
   },
   { requireWrites: true, requiredEnv: WRITE_FIXTURE_ENV },
+);
+
+dbIntegrationTest(
+  'write-enabled integration guards against concurrent append execution',
+  async (_t, client) => {
+    const staging = await createPostedTransaction(client, {
+      status: 'processing',
+      description: 'Write-enabled concurrent append staging transaction',
+    });
+    const appendKey = `ITEST-APPEND-${staging.txId}`;
+    const encAmt = await DataProtection.encryptAmount(staging.amount);
+
+    const runAppend = () => client.rpc('append_ledger_entries_v1', {
+      p_tx_id: staging.txId,
+      p_append_key: appendKey,
+      p_append_phase: 'CONCURRENT_TEST',
+      p_legs: [
+        {
+          wallet_id: staging.sourceWalletId,
+          entry_type: 'DEBIT',
+          amount: encAmt,
+          amount_plain: staging.amount,
+          description: `Integration concurrent debit ${staging.txId}`,
+        },
+        {
+          wallet_id: staging.targetWalletId,
+          entry_type: 'CREDIT',
+          amount: encAmt,
+          amount_plain: staging.amount,
+          description: `Integration concurrent credit ${staging.txId}`,
+        },
+      ],
+    });
+
+    const [first, second] = await Promise.allSettled([runAppend(), runAppend()]);
+    const errors = [first, second]
+      .filter((result) => result.status === 'fulfilled' && (result as any).value?.error)
+      .map((result: any) => result.value.error);
+
+    assert.ok(errors.length >= 1, 'Expected at least one append attempt to fail due to idempotency');
+    assert.match(String(errors[0]?.message || ''), /APPEND_ALREADY_APPLIED/i);
+  },
+  { requireWrites: true, requiredEnv: EDGE_FIXTURE_ENV },
 );
 
 dbIntegrationTest(
