@@ -3,23 +3,29 @@ import { getAdminSupabase, getSupabase } from '../../../backend/supabaseClient.j
 import { BankingEngineService } from '../../../backend/ledger/transactionEngine.js';
 import { Audit } from '../../../backend/security/audit.js';
 import { Server as LogicCore } from '../../../backend/server.js';
+import {
+  createInternalWorkerMiddleware,
+  getInternalAuditMetadata,
+  workerHasRequiredScopes,
+} from '../../middleware/auth/authorization.js';
 
-export const registerInternalRoutes = (internal: Router) => {
-  const workerAuth = (req: Request, res: Response, next: NextFunction) => {
-    const secret = req.headers['x-worker-secret'];
-    const expected = process.env.WORKER_SECRET;
-
-    if (secret && expected && secret === expected) {
-      next();
-    } else {
-      console.warn(`[Internal] Unauthorized worker access attempt from ${req.ip}`);
-      res.status(401).json({ success: false, error: 'UNAUTHORIZED_WORKER' });
+const requireWorkerScope = (requiredScopes: string[]) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    const worker = (req as any).internalWorker || null;
+    if (!workerHasRequiredScopes(worker, requiredScopes)) {
+      return res.status(403).json({
+        success: false,
+        error: 'WORKER_SCOPE_REQUIRED',
+        message: `Missing required worker scope: ${requiredScopes.join(', ')}`,
+      });
     }
+    return next();
   };
 
-  internal.use(workerAuth);
+export const registerInternalRoutes = (internal: Router) => {
+  internal.use(createInternalWorkerMiddleware());
 
-  internal.post('/transactions/claim', async (req, res) => {
+  internal.post('/transactions/claim', requireWorkerScope(['transactions:claim']), async (req, res) => {
     const limit = req.body.limit || 100;
     const sb = getAdminSupabase() || getSupabase();
     if (!sb) return res.status(500).json({ success: false, error: 'DB_OFFLINE' });
@@ -40,14 +46,15 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.put('/transactions/:id/resolve', async (req, res) => {
-    const { id } = req.params;
+  internal.put('/transactions/:id/resolve', requireWorkerScope(['transactions:resolve']), async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const { status } = req.body;
+    const workerId = String((req as any).internalWorker?.id || req.get('x-worker-id') || `internal-route:${id}`);
 
     try {
       const engine = new BankingEngineService();
       if (status === 'completed') {
-        const success = await engine.completeSettlement(id);
+        const success = await engine.completeSettlement(id, undefined, workerId);
         res.json({ success });
       } else {
         const sb = getAdminSupabase() || getSupabase();
@@ -55,11 +62,17 @@ export const registerInternalRoutes = (internal: Router) => {
         res.json({ success: !error });
       }
     } catch (e: any) {
-      res.status(500).json({ success: false, error: e.message });
+      const message = String(e?.message || e || '');
+      const statusCode = message.includes('CONCURRENCY_CONFLICT')
+        ? 409
+        : message.includes('INVALID_SETTLEMENT_STATE')
+          ? 409
+          : 500;
+      res.status(statusCode).json({ success: false, error: message });
     }
   });
 
-  internal.get('/transactions/reversible', async (_req, res) => {
+  internal.get('/transactions/reversible', requireWorkerScope(['transactions:read']), async (_req, res) => {
     const sb = getAdminSupabase() || getSupabase();
     if (!sb) return res.status(500).json({ success: false, error: 'DB_OFFLINE' });
 
@@ -78,8 +91,8 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.post('/transactions/:id/reverse', async (req, res) => {
-    const { id } = req.params;
+  internal.post('/transactions/:id/reverse', requireWorkerScope(['transactions:reverse']), async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const { reason } = req.body;
 
     try {
@@ -97,14 +110,18 @@ export const registerInternalRoutes = (internal: Router) => {
 
       if (error) throw error;
 
-      await Audit.log('FINANCIAL', tx.user_id, 'TRANSACTION_REVERSED', { txId: id, reason });
+      await Audit.log('FINANCIAL', tx.user_id, 'TRANSACTION_REVERSED', {
+        txId: id,
+        reason,
+        ...getInternalAuditMetadata(req),
+      });
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
     }
   });
 
-  internal.get('/transactions/recent', async (req, res) => {
+  internal.get('/transactions/recent', requireWorkerScope(['transactions:read']), async (req, res) => {
     const minutes = parseInt(req.query.minutes as string) || 5;
     const sb = getAdminSupabase() || getSupabase();
     const startTime = new Date(Date.now() - minutes * 60 * 1000).toISOString();
@@ -118,7 +135,7 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.post('/security/anomalies', async (req, res) => {
+  internal.post('/security/anomalies', requireWorkerScope(['security:anomalies:write']), async (req, res) => {
     const { transactionId, severity, description } = req.body;
     try {
       const sb = getAdminSupabase() || getSupabase();
@@ -128,6 +145,7 @@ export const registerInternalRoutes = (internal: Router) => {
         transactionId,
         severity,
         description,
+        ...getInternalAuditMetadata(req),
       });
 
       if (sb) {
@@ -145,7 +163,7 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.get('/tasks/pending', async (_req, res) => {
+  internal.get('/tasks/pending', requireWorkerScope(['tasks:read']), async (_req, res) => {
     const sb = getAdminSupabase() || getSupabase();
     try {
       const { data, error } = await sb!.from('tasks').select('*').eq('status', 'pending');
@@ -156,8 +174,8 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.put('/tasks/:id/status', async (req, res) => {
-    const { id } = req.params;
+  internal.put('/tasks/:id/status', requireWorkerScope(['tasks:write']), async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const { status, result } = req.body;
     try {
       const sb = getAdminSupabase() || getSupabase();
@@ -176,7 +194,7 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.get('/messages/queued', async (_req, res) => {
+  internal.get('/messages/queued', requireWorkerScope(['messages:read']), async (_req, res) => {
     const sb = getAdminSupabase() || getSupabase();
     try {
       const { data, error } = await sb!.from('user_messages').select('*').eq('status', 'queued');
@@ -187,7 +205,7 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.post('/offline/requests', async (req, res) => {
+  internal.post('/offline/requests', requireWorkerScope(['offline:requests:write']), async (req, res) => {
     try {
       const result = await LogicCore.processOfflineGatewayRequest(req.body);
       res.json({ success: true, data: result });
@@ -196,7 +214,7 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.post('/offline/confirmations', async (req, res) => {
+  internal.post('/offline/confirmations', requireWorkerScope(['offline:confirmations:write']), async (req, res) => {
     try {
       const result = await LogicCore.processOfflineGatewayConfirmation(req.body);
       res.json({ success: true, data: result });
@@ -205,8 +223,8 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.put('/messages/:id/status', async (req, res) => {
-    const { id } = req.params;
+  internal.put('/messages/:id/status', requireWorkerScope(['messages:write']), async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const { status } = req.body;
     try {
       const sb = getAdminSupabase() || getSupabase();
@@ -224,11 +242,11 @@ export const registerInternalRoutes = (internal: Router) => {
     }
   });
 
-  internal.post('/email/test', async (_req, res) => {
+  internal.post('/email/test', requireWorkerScope(['email:test']), async (_req, res) => {
     res.status(403).json({ success: false, error: 'EMAIL_SERVICE_DISABLED' });
   });
 
-  internal.get('/email/verify', async (_req, res) => {
+  internal.get('/email/verify', requireWorkerScope(['email:verify']), async (_req, res) => {
     res.status(403).json({ success: false, error: 'EMAIL_SERVICE_DISABLED' });
   });
 };

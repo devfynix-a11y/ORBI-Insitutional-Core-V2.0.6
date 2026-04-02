@@ -4,6 +4,7 @@ import { Sessions } from '../../../backend/src/modules/session/session.service.j
 import { Audit } from '../../../backend/security/audit.js';
 import { getAdminSupabase, getSupabase } from '../../../backend/supabaseClient.js';
 import { isInstitutionalAppIdentity } from '../../../backend/config/appIdentity.js';
+import { extractBearerToken } from '../../middleware/auth/authorization.js';
 
 function getDeviceNameFromUA(userAgent?: string): string {
   if (!userAgent) return 'Unknown Device';
@@ -188,9 +189,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
     try {
       const result = await LogicCore.verifySensitiveAction(requestId, code, session.sub);
       if (result?.success === true) {
-        const accessToken = req.headers.authorization?.startsWith('Bearer ')
-          ? req.headers.authorization.substring(7)
-          : null;
+        const accessToken = ((req as any).authToken as string | null) || extractBearerToken(req);
         let effectiveAccessToken = accessToken;
         let effectiveRefreshToken: string | null = null;
         let effectiveUser = {
@@ -400,7 +399,7 @@ export const registerAuthUserRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/auth/logout', authenticate, async (req, res) => {
     try {
-      const accessToken = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : undefined;
+      const accessToken = ((req as any).authToken as string | null) || extractBearerToken(req) || undefined;
       const refreshToken = typeof req.body?.refresh_token === 'string' ? req.body.refresh_token : undefined;
 
       await LogicCore.logout(accessToken, refreshToken);

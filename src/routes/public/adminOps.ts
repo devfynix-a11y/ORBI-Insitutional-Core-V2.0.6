@@ -4,6 +4,7 @@ import { getAdminSupabase, getSupabase } from '../../../backend/supabaseClient.j
 import { ServiceActorOps } from '../../../backend/features/ServiceActorOps.js';
 import { Messaging } from '../../../backend/features/MessagingService.js';
 import { AuthService } from '../../../iam/authService.js';
+import { sessionHasAnyRole } from '../../middleware/auth/authorization.js';
 
 type Deps = {
   authenticate: RequestHandler;
@@ -25,11 +26,6 @@ type Deps = {
   AccountStatusUpdateSchema: any;
   UserProfileUpdateSchema: any;
   messagingTestRoutesEnabled: boolean;
-};
-
-const hasAnyRole = (session: any, roles: string[]) => {
-  const role = session.role || session.user?.role;
-  return roles.includes(role);
 };
 
 export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
@@ -57,7 +53,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/transactions', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE', 'ACCOUNTANT'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE', 'ACCOUNTANT'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -80,7 +76,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/transactions/summary', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE', 'ACCOUNTANT'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE', 'ACCOUNTANT'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -101,7 +97,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/transactions/:id/ledger', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -115,7 +111,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/transactions/:id/lock', authenticate, validate(TransactionIssueSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT', 'CUSTOMER_CARE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -130,7 +126,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/transactions/:id/audit', authenticate, validate(TransactionAuditDecisionSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -145,7 +141,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/transactions/:id/approve', authenticate, validate(TransactionIssueSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -160,7 +156,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/transactions/approve-audited', authenticate, validate(TransactionIssueSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -174,7 +170,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/transactions/:id/reverse', authenticate, validate(TransactionIssueSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -189,7 +185,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.patch('/admin/documents/:id/verify', authenticate, validate(DocumentVerifySchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -203,7 +199,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/staff', authenticate, requireSessionPermission(['staff.write'], ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE']), validate(StaffCreateSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -218,7 +214,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/staff', authenticate, requireSessionPermission(['staff.read', 'staff.write'], ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE', 'AUDIT']), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE', 'AUDIT'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE', 'AUDIT'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -232,7 +228,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.patch('/admin/staff/:id', authenticate, requireSessionPermission(['staff.write'], ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE']), validate(StaffAdminUpdateSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -279,7 +275,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/users/register', authenticate, validate(ManagedIdentityCreateSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -294,7 +290,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/service-access/requests', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'AUDIT', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'AUDIT', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -321,7 +317,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/service-access/requests/:id/review', authenticate, validate(ServiceAccessRequestReviewSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -410,7 +406,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.patch('/admin/users/:id/status', authenticate, validate(AccountStatusUpdateSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -424,7 +420,7 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.patch('/admin/users/:id/profile', authenticate, validate(UserProfileUpdateSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!hasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 

@@ -8,11 +8,18 @@ import {
   TRUSTED_MOBILE_APP_ORIGINS,
   isInstitutionalAppIdentity,
 } from '../../../backend/config/appIdentity.js';
+import {
+  createAuthorizationMiddleware,
+  extractBearerToken,
+  resolveAuthorizationScope,
+  resolveSessionRegistryType,
+  resolveSessionRole,
+  sessionHasAnyPermission,
+  sessionHasAnyRole,
+} from './authorization.js';
 
 export const authenticate = async (req: Request, res: Response, next: NextFunction) => {
-  const token = req.headers.authorization?.startsWith('Bearer ')
-    ? req.headers.authorization.substring(7)
-    : null;
+  const token = extractBearerToken(req);
   try {
     const session = await LogicCore.getSession(token || undefined);
     if (!session) throw new Error('IDENTITY_REQUIRED');
@@ -21,22 +28,13 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     const appOriginHeader = String(req.get('x-orbi-app-origin') || '');
     const roleHeader = String(req.get('x-orbi-user-role') || '').trim().toUpperCase();
     const registryTypeHeader = String(req.get('x-orbi-registry-type') || '').trim().toUpperCase();
-    const sessionRole = String(
-      session.role ||
-      session.user?.role ||
-      session.user?.user_metadata?.role ||
-      'USER',
-    ).trim().toUpperCase();
+    const sessionRole = resolveSessionRole(session);
     const sessionOrigin = String(
       session.user?.app_origin ||
       session.user?.user_metadata?.app_origin ||
       '',
     ).trim();
-    const registryType = String(
-      session.user?.registry_type ||
-      session.user?.user_metadata?.registry_type ||
-      'CONSUMER',
-    ).trim().toUpperCase();
+    const registryType = resolveSessionRegistryType(session);
 
     const isInstitutionalNode = isInstitutionalAppIdentity(appIdHeader, appOriginHeader);
     const isMobileNode =
@@ -98,7 +96,7 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
       return res.status(403).json({
         success: false,
         error: 'IDENTITY_LOCKED',
-        message: `Your account has been ${status.toUpperCase()} by Cluster Governance.`,
+        message: `Your account has been ${String(status).toUpperCase()} by Cluster Governance.`,
       });
     }
 
@@ -108,6 +106,7 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     (req as any).session = session;
     (req as any).authToken = token || session.access_token || null;
     (req as any).resolvedRole = sessionRole;
+    (req as any).authorizationScope = resolveAuthorizationScope(session);
     next();
   } catch (err: any) {
     if (String(err.message || '').startsWith('RATE_LIMIT_EXCEEDED')) {
@@ -121,46 +120,27 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
-export const resolveSessionRole = (session: any): string =>
-  String(
-    session?.role ||
-    session?.user?.role ||
-    session?.user?.user_metadata?.role ||
-    'USER',
-  ).trim().toUpperCase();
+export { resolveSessionRole, resolveSessionRegistryType } from './authorization.js';
 
 export const requireRole = (session: any, roles: string[]): boolean =>
-  roles.includes(resolveSessionRole(session));
-
-export const resolveSessionRegistryType = (session: any): string =>
-  String(
-    session?.user?.registry_type ||
-    session?.user?.user_metadata?.registry_type ||
-    'CONSUMER',
-  ).trim().toUpperCase();
+  sessionHasAnyRole(session, roles);
 
 export const mapServiceRoleToRegistryType = (role: string): 'MERCHANT' | 'AGENT' => {
   if (String(role).trim().toUpperCase() === 'AGENT') return 'AGENT';
   return 'MERCHANT';
 };
 
-export const adminOnly = async (req: Request, res: Response, next: NextFunction) => {
-  const session = (req as any).session;
-  if (!session) return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
-
-  const role = session.user.user_metadata?.role;
-  const orgRole = session.user.user_metadata?.org_role;
-
-  if (role === 'ADMIN' || role === 'STAFF' || orgRole === 'ADMIN') {
-    return next();
-  }
-  res.status(403).json({ success: false, error: 'ADMIN_ACCESS_REQUIRED' });
-};
-
-const hasSessionPermission = (session: any, permission: string) => {
-  const permissions = Array.isArray(session?.permissions) ? session.permissions : [];
-  return permissions.includes(permission);
-};
+export const adminOnly = createAuthorizationMiddleware(
+  {
+    allowedScopes: ['ADMIN'],
+    allowedRoles: ['ADMIN', 'STAFF', 'SUPER_ADMIN'],
+    allowedOrgRoles: ['ADMIN'],
+  },
+  {
+    code: 'ADMIN_ACCESS_REQUIRED',
+    message: 'Admin authorization is required.',
+  },
+);
 
 export const requireSessionPermission =
   (permissions: string[], allowedRoles: string[] = []) =>
@@ -169,13 +149,11 @@ export const requireSessionPermission =
     if (!session) {
       return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
     }
-    const role = String(session.role || session.user?.role || '').toUpperCase();
-    if (
-      allowedRoles.includes(role) ||
-      permissions.some((permission) => hasSessionPermission(session, permission))
-    ) {
+
+    if (sessionHasAnyRole(session, allowedRoles) || sessionHasAnyPermission(session, permissions)) {
       return next();
     }
+
     return res
       .status(403)
       .json({ success: false, error: 'ACCESS_DENIED', message: 'Missing required permission.' });

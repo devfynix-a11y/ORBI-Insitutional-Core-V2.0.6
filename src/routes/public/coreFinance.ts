@@ -182,7 +182,7 @@ export const registerCoreFinanceRoutes = (v1: Router, deps: Deps) => {
   });
 
   v1.get('/user/dashboard', authenticate as any, async (req, res) => {
-    const token = req.headers.authorization?.substring(7);
+    const token = (req as any).authToken as string | null;
     try {
       const result = await LogicCore.getBootstrapData(token);
       res.json({ success: true, data: result });
@@ -192,7 +192,7 @@ export const registerCoreFinanceRoutes = (v1: Router, deps: Deps) => {
   });
 
   v1.get('/dashboard', authenticate as any, async (req, res) => {
-    const token = req.headers.authorization?.substring(7);
+    const token = (req as any).authToken as string | null;
     try {
       const result = await LogicCore.getBootstrapData(token);
       res.json({ success: true, data: result });

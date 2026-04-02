@@ -1,4 +1,5 @@
 import express, { type RequestHandler, type Router } from 'express';
+import { sessionHasAnyRole } from '../../middleware/auth/authorization.js';
 
 type Deps = {
   authenticate: RequestHandler;
@@ -9,11 +10,6 @@ type Deps = {
   DeviceRegisterSchema: any;
   DeviceTrustSchema: any;
   DocumentUploadSchema: any;
-};
-
-const requireAnyRole = (session: any, roles: string[]) => {
-  const role = session.role || session.user?.role;
-  return roles.includes(role);
 };
 
 const parseMaybeJson = (value: any) => {
@@ -68,7 +64,7 @@ export const registerSupportOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/kyc/requests', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!requireAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -86,7 +82,7 @@ export const registerSupportOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.post('/admin/kyc/review', authenticate, validate(KYCReviewSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!requireAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'HUMAN_RESOURCE'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -131,7 +127,7 @@ export const registerSupportOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/devices', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!requireAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'IT', 'FRAUD'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'IT', 'FRAUD'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -148,7 +144,7 @@ export const registerSupportOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.patch('/admin/devices/:id/status', authenticate, validate(DeviceTrustSchema), async (req, res) => {
     const session = (req as any).session;
-    if (!requireAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'IT'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'IT'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 
@@ -263,7 +259,7 @@ export const registerSupportOpsRoutes = (v1: Router, deps: Deps) => {
 
   v1.get('/admin/documents', authenticate, async (req, res) => {
     const session = (req as any).session;
-    if (!requireAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'AUDIT'])) {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'AUDIT'])) {
       return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
     }
 

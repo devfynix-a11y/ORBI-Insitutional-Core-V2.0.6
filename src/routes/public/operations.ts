@@ -1,4 +1,5 @@
 import { type RequestHandler, type Router } from 'express';
+import { sessionHasAnyRole } from '../../middleware/auth/authorization.js';
 
 type Deps = {
   authenticate: RequestHandler;
@@ -7,7 +8,7 @@ type Deps = {
   LogicCore: any;
   ConfigClient: any;
   KMS: any;
-  DataVault: any;
+  DataProtection: any;
   TransactionSigning: any;
   SandboxController: any;
   sandboxRoutesEnabled: boolean;
@@ -21,7 +22,7 @@ export const registerOperationsRoutes = (v1: Router, deps: Deps) => {
     LogicCore,
     ConfigClient,
     KMS,
-    DataVault,
+    DataProtection,
     TransactionSigning,
     SandboxController,
     sandboxRoutesEnabled,
@@ -34,8 +35,7 @@ export const registerOperationsRoutes = (v1: Router, deps: Deps) => {
       if (!req.body.userId) req.body.userId = session.sub;
 
       if (req.body.userId !== session.sub) {
-        const role = session.role || session.user?.role;
-        if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
+        if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
           return res.status(403).json({ success: false, error: 'ACCESS_DENIED: You can only activate your own account.' });
         }
       }
@@ -197,11 +197,11 @@ export const registerOperationsRoutes = (v1: Router, deps: Deps) => {
   });
 
   v1.post('/escrow/refund', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
     const { referenceId } = req.body;
     const userId = (req as any).user.id;
-    const role = (req as any).user.role;
 
-    if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN'])) {
       return res.status(403).json({ success: false, error: 'UNAUTHORIZED_ADMIN_ONLY' });
     }
 
@@ -357,8 +357,8 @@ export const registerOperationsRoutes = (v1: Router, deps: Deps) => {
   v1.get('/admin/kms/health', authenticate as any, adminOnly as any, async (_req, res) => {
     try {
       const probe = { ping: 'pong', ts: Date.now() };
-      const cipher = await DataVault.encrypt(probe);
-      const decoded = await DataVault.decrypt(cipher);
+      const cipher = await DataProtection.encryptValue(probe, { route: 'public_operations_probe' });
+      const decoded = await DataProtection.decryptValue(cipher);
       const ok = decoded && typeof decoded === 'object' && (decoded as any).ping === 'pong';
       res.json({
         success: ok,
@@ -405,7 +405,7 @@ export const registerOperationsRoutes = (v1: Router, deps: Deps) => {
   });
 
   v1.get('/sys/bootstrap', authenticate as any, async (req, res) => {
-    const token = req.headers.authorization?.substring(7);
+    const token = (req as any).authToken as string | null;
     try {
       const result = await LogicCore.getBootstrapData(token);
       res.json({ success: true, data: result });

@@ -1,4 +1,9 @@
 import type { Express, NextFunction, Request, Response, Router } from 'express';
+import {
+  createInternalWorkerMiddleware,
+  extractBearerToken,
+  getInternalAuditMetadata,
+} from '../../middleware/auth/authorization.js';
 
 let lastBrokerHeartbeat: any = null;
 
@@ -110,14 +115,11 @@ export const registerTopLevelPublicRoutes = (app: Express, deps: TopLevelDeps) =
     });
   });
 
-  app.post('/api/broker/heartbeat', (req, res) => {
-    const providedSecret = req.get('x-worker-secret') || req.get('x-orbi-worker-secret');
-    if (!providedSecret || providedSecret !== process.env.WORKER_SECRET) {
-      return res.status(403).json({ success: false, error: 'UNAUTHORIZED_WORKER' });
-    }
+  app.post('/api/broker/heartbeat', createInternalWorkerMiddleware({ requiredScopes: ['broker:heartbeat'] }), (req, res) => {
     lastBrokerHeartbeat = {
       ...req.body,
       receivedAt: new Date().toISOString(),
+      requestIdentity: getInternalAuditMetadata(req),
     };
     res.json({ success: true });
   });
@@ -161,7 +163,7 @@ export const registerLegacyGatewayRoute = (app: Express, deps: LegacyGatewayDeps
   app.post('/api', globalIpLimiter, async (req: any, res: any) => {
     const operation = String(req.query.operation || '');
     const payload = req.body || {};
-    const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null;
+    const token = extractBearerToken(req);
     const appId = String(req.headers['x-orbi-app-id'] || 'anonymous');
 
     try {
