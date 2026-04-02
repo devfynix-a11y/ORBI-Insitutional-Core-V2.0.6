@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { validateStartupEnvironment } from '../bootstrap/validation.js';
+import { createAppContext } from './context.js';
 import { registerInternalRoutes, mountInternalRoutes } from '../routes/internal/index.js';
 import { registerAdminRoutes, mountAdminRoutes } from '../routes/admin/index.js';
 import { mountPublicRoutes, registerLegacyGatewayRoute, registerMonitoringRoutes, registerTerminalHandlers, registerTopLevelPublicRoutes } from '../routes/public/index.js';
@@ -16,14 +17,13 @@ import { wealthNumber, resolveWealthSourceWallet, assertBillPaymentSourceAllowed
 import { registerProviderRoutes, mountProviderRoutes } from '../routes/providers/index.js';
 import { validate } from '../middleware/validation/validate.js';
 import { authenticate, adminOnly, resolveSessionRole, requireRole, resolveSessionRegistryType, mapServiceRoleToRegistryType, requireSessionPermission } from '../middleware/auth/sessionAuth.js';
-import { ALLOWED_ORIGINS, configureCoreSecurityMiddleware, createGlobalIpLimiter } from '../middleware/security/setup.js';
+import { ALLOWED_ORIGINS } from '../middleware/security/setup.js';
 import express from 'express';
 import { createRuntime } from './runtime.js';
 import { Server as LogicCore } from '../../backend/server.js';
 import { Sentinel } from '../../backend/security/sentinel.js';
 import { WAF } from '../../backend/security/waf.js';
 import { getSupabase, getAdminSupabase } from '../../backend/supabaseClient.js';
-import { ResilienceEngine } from '../../backend/infrastructure/ResilienceEngine.js';
 import { Webhooks } from '../../backend/payments/webhookHandler.js';
 import { PolicyEngine } from '../../backend/ledger/PolicyEngine.js';
 import { ConfigClient } from '../../backend/infrastructure/RulesConfigClient.js';
@@ -35,10 +35,8 @@ import {
     ServiceAccessRequestCreateSchema, ServiceAccessRequestReviewSchema
 } from '../../backend/security/schemas.js';
 import { z } from 'zod';
-import { RedisClusterFactory } from '../../backend/infrastructure/RedisClusterFactory.js';
 // emailService removed as per user request
 import { Auth as NewAuth } from '../../backend/src/modules/auth/auth.controller.js';
-import { ReconciliationEngine as ReconEngine } from '../../backend/ledger/reconciliationEngine.js';
 import { authenticateApiKey } from '../../backend/middleware/apiKeyAuth.js';
 import { TransactionService } from '../../ledger/transactionService.js';
 import { FXEngine } from '../../backend/ledger/FXEngine.js';
@@ -62,45 +60,14 @@ const { app, httpServer, upload, port: PORT } = createRuntime();
  * Production-hardened RESTful API with Zod validation and Sentinel AI.
  */
 
-// 1. INFRASTRUCTURE SECURITY GATES
-const redisAvailable = RedisClusterFactory.isAvailable();
-const redisClient = redisAvailable ? RedisClusterFactory.getClient('monitor') : null;
-const allowProcessLocalIdempotency =
-    process.env.ORBI_ALLOW_PROCESS_LOCAL_IDEMPOTENCY === 'true';
-const gatewayBackgroundJobsEnabled =
-    process.env.ORBI_ENABLE_GATEWAY_BACKGROUND_JOBS !== 'false';
-const legacyApiGatewayEnabled =
-    process.env.ORBI_ENABLE_LEGACY_API_GATEWAY === 'true';
-const legacyBiometricAliasesEnabled =
-    process.env.ORBI_ENABLE_LEGACY_BIOMETRIC_ROUTES === 'true';
-const sandboxRoutesEnabled =
-    process.env.ORBI_ENABLE_SANDBOX_ROUTES === 'true';
-const messagingTestRoutesEnabled =
-    process.env.ORBI_ENABLE_MESSAGING_TEST_ROUTES === 'true';
-const idempotencyTtlSeconds = Number(process.env.ORBI_IDEMPOTENCY_TTL_SECONDS || 60 * 60);
-
-// IDEMPOTENCY CACHE
-// Redis is authoritative. Process-local fallback is disabled by default because
-// it is unsafe in horizontally scaled runtimes.
-configureCoreSecurityMiddleware(app, {
-    redisAvailable,
-    redisClient,
-    allowProcessLocalIdempotency,
-    idempotencyTtlSeconds,
-});
-
-// --- FORENSIC MONITORING API ---
-registerMonitoringRoutes(app, {
-    authenticateApiKey,
-    ReconEngine,
-});
-
-const globalIpLimiter = createGlobalIpLimiter(redisAvailable, redisClient);
-
-registerTopLevelPublicRoutes(app, {
-    ResilienceEngine,
-    LogicCore,
-});
+const {
+    gatewayBackgroundJobsEnabled,
+    legacyApiGatewayEnabled,
+    legacyBiometricAliasesEnabled,
+    sandboxRoutesEnabled,
+    messagingTestRoutesEnabled,
+    globalIpLimiter,
+} = createAppContext(app);
 
 const syncUserIdentityClassification = async (
     userId: string,
