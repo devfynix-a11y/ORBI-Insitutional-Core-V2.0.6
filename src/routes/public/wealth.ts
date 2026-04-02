@@ -17,8 +17,8 @@ import {
   canReviewSharedBudgetSpend,
   resolveUserBySharedBudgetIdentifier,
   expireSharedBudgetInvitationIfNeeded,
-  createSharedBudgetSpendExecutor,
 } from './wealthCollab.js';
+import { createSharedBudgetSpendExecutor } from './wealthSharedBudgetFinance.js';
 import {
   updateWealthSourceBalance,
   createWealthTransaction,
