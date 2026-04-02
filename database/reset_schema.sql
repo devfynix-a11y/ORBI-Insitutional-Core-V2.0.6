@@ -2079,6 +2079,8 @@ RETURNS void AS $$
 DECLARE
     leg JSONB;
     v_leg_wallet_id UUID;
+    v_expected_before NUMERIC;
+    v_current_balance NUMERIC;
 BEGIN
     IF p_wallet_id IS NOT NULL AND (
         EXISTS (
@@ -2124,6 +2126,8 @@ BEGIN
     FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
     LOOP
         v_leg_wallet_id := (leg->>'wallet_id')::UUID;
+        v_expected_before := NULLIF(leg->>'balance_before', '')::NUMERIC;
+        v_current_balance := NULL;
 
         IF EXISTS (
             SELECT 1 FROM public.wallets w
@@ -2146,11 +2150,27 @@ BEGIN
          WHERE id = v_leg_wallet_id
          FOR UPDATE;
 
-        IF NOT FOUND THEN
+        IF FOUND THEN
+            SELECT balance INTO v_current_balance
+              FROM public.wallets
+             WHERE id = v_leg_wallet_id;
+        ELSE
             PERFORM 1
               FROM public.platform_vaults
              WHERE id = v_leg_wallet_id
              FOR UPDATE;
+
+            IF FOUND THEN
+                SELECT balance INTO v_current_balance
+                  FROM public.platform_vaults
+                 WHERE id = v_leg_wallet_id;
+            END IF;
+        END IF;
+
+        IF v_expected_before IS NOT NULL
+           AND v_current_balance IS NOT NULL
+           AND abs(COALESCE(v_current_balance, 0) - v_expected_before) > 0.0001 THEN
+            RAISE EXCEPTION 'BALANCE_STALE: Wallet % expected %, found %', v_leg_wallet_id, v_expected_before, v_current_balance;
         END IF;
 
         INSERT INTO public.financial_ledger (
@@ -2186,10 +2206,14 @@ RETURNS void AS $$
 DECLARE
     leg JSONB;
     v_leg_wallet_id UUID;
+    v_expected_before NUMERIC;
+    v_current_balance NUMERIC;
 BEGIN
     FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
     LOOP
         v_leg_wallet_id := (leg->>'wallet_id')::UUID;
+        v_expected_before := NULLIF(leg->>'balance_before', '')::NUMERIC;
+        v_current_balance := NULL;
 
         IF EXISTS (
             SELECT 1 FROM public.wallets w
@@ -2211,11 +2235,27 @@ BEGIN
          WHERE id = v_leg_wallet_id
          FOR UPDATE;
 
-        IF NOT FOUND THEN
+        IF FOUND THEN
+            SELECT balance INTO v_current_balance
+              FROM public.wallets
+             WHERE id = v_leg_wallet_id;
+        ELSE
             PERFORM 1
               FROM public.platform_vaults
              WHERE id = v_leg_wallet_id
              FOR UPDATE;
+
+            IF FOUND THEN
+                SELECT balance INTO v_current_balance
+                  FROM public.platform_vaults
+                 WHERE id = v_leg_wallet_id;
+            END IF;
+        END IF;
+
+        IF v_expected_before IS NOT NULL
+           AND v_current_balance IS NOT NULL
+           AND abs(COALESCE(v_current_balance, 0) - v_expected_before) > 0.0001 THEN
+            RAISE EXCEPTION 'BALANCE_STALE: Wallet % expected %, found %', v_leg_wallet_id, v_expected_before, v_current_balance;
         END IF;
 
         INSERT INTO public.financial_ledger (

@@ -428,6 +428,7 @@ export class TransactionService {
                 wallet_id: walletId,
                 entry_type: leg.type,
                 amount: eAmt,
+                balance_before: current,
                 balance_after: finalAfter,
                 balance_after_encrypted: eAft,
                 description: leg.description
@@ -562,6 +563,7 @@ export class TransactionService {
                 wallet_id: walletId,
                 entry_type: leg.type,
                 amount: eAmt,
+                balance_before: current,
                 balance_after: finalAfter,
                 balance_after_encrypted: eAft,
                 description: leg.description,
