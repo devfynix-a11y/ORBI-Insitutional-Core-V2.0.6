@@ -18,7 +18,13 @@ type WithdrawInput = {
   resolveWealthSourceWallet: (sb: any, userId: string, sourceWalletId?: string) => Promise<any>;
 };
 
-export const contributeToSharedPot = async ({
+const isMissingRpc = (error: any, fnName: string) => {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return code === 'PGRST202' || code === '42883' || message.includes(fnName);
+};
+
+const contributeViaLegacyPath = async ({
   sb,
   sessionUserId,
   pot,
@@ -129,7 +135,7 @@ export const contributeToSharedPot = async ({
   };
 };
 
-export const withdrawFromSharedPot = async ({
+const withdrawViaLegacyPath = async ({
   sb,
   sessionUserId,
   pot,
@@ -256,5 +262,121 @@ export const withdrawFromSharedPot = async ({
     transaction: tx,
     shared_pot: { ...pot, current_amount: newPotBalance },
     target_balance: newTargetBalance,
+  };
+};
+
+export const contributeToSharedPot = async (input: ContributeInput) => {
+  const { sb, sessionUserId, pot, membership, payload, wealthNumber, resolveWealthSourceWallet } = input;
+  const { sourceRecord, sourceTable } = await resolveWealthSourceWallet(
+    sb,
+    sessionUserId,
+    payload.source_wallet_id,
+  );
+  const currentBalance = wealthNumber(sourceRecord.balance);
+  if (currentBalance < payload.amount) {
+    throw new Error('INSUFFICIENT_FUNDS');
+  }
+
+  const reference = `pot_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  const metadata = {
+    shared_pot_id: pot.id,
+    member_role: membership.role,
+    source_table: sourceTable,
+    source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
+  };
+
+  const { data, error } = await sb.rpc('shared_pot_contribute_v1', {
+    p_user_id: sessionUserId,
+    p_pot_id: pot.id,
+    p_source_wallet_id: sourceRecord.id,
+    p_amount: payload.amount,
+    p_currency: String(pot.currency || sourceRecord.currency || 'TZS').toUpperCase(),
+    p_description: `Shared pot contribution: ${pot.name}`,
+    p_reference_id: reference,
+    p_metadata: metadata,
+  });
+
+  if (error) {
+    if (!isMissingRpc(error, 'shared_pot_contribute_v1')) {
+      throw new Error(error.message);
+    }
+    return contributeViaLegacyPath(input);
+  }
+
+  const txId = data?.transaction_id || null;
+  let transaction = null;
+  if (txId) {
+    const { data: tx } = await sb
+      .from('transactions')
+      .select('*')
+      .eq('id', txId)
+      .maybeSingle();
+    transaction = tx || null;
+  }
+
+  return {
+    transaction,
+    shared_pot: { ...pot, current_amount: Number(data?.pot_balance_after ?? pot.current_amount) },
+    source_balance: Number(data?.source_balance_after ?? currentBalance),
+    atomic_commit: true,
+  };
+};
+
+export const withdrawFromSharedPot = async (input: WithdrawInput) => {
+  const { sb, sessionUserId, pot, membership, payload, wealthNumber, resolveWealthSourceWallet } = input;
+  const currentPotBalance = wealthNumber(pot.current_amount);
+  if (currentPotBalance < payload.amount) {
+    throw new Error('INSUFFICIENT_POT_FUNDS');
+  }
+
+  const { sourceRecord: targetRecord, sourceTable: targetTable } = await resolveWealthSourceWallet(
+    sb,
+    sessionUserId,
+    payload.target_wallet_id,
+  );
+  const reference = `pot_w_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  const metadata = {
+    shared_pot_id: pot.id,
+    actor_role: membership.role,
+    target_table: targetTable,
+    target_wallet_role: targetRecord.vault_role || targetRecord.type || null,
+  };
+
+  const { data, error } = await sb.rpc('shared_pot_withdraw_v1', {
+    p_user_id: sessionUserId,
+    p_pot_id: pot.id,
+    p_target_wallet_id: targetRecord.id,
+    p_amount: payload.amount,
+    p_currency: String(pot.currency || targetRecord.currency || 'TZS').toUpperCase(),
+    p_description: `Shared pot withdrawal: ${pot.name}`,
+    p_reference_id: reference,
+    p_metadata: metadata,
+    p_member_role: membership.role || 'CONTRIBUTOR',
+    p_member_metadata: membership.metadata || {},
+  });
+
+  if (error) {
+    if (!isMissingRpc(error, 'shared_pot_withdraw_v1')) {
+      throw new Error(error.message);
+    }
+    return withdrawViaLegacyPath(input);
+  }
+
+  const txId = data?.transaction_id || null;
+  let transaction = null;
+  if (txId) {
+    const { data: tx } = await sb
+      .from('transactions')
+      .select('*')
+      .eq('id', txId)
+      .maybeSingle();
+    transaction = tx || null;
+  }
+
+  return {
+    transaction,
+    shared_pot: { ...pot, current_amount: Number(data?.pot_balance_after ?? pot.current_amount) },
+    target_balance: Number(data?.target_balance_after ?? targetRecord.balance),
+    atomic_commit: true,
   };
 };

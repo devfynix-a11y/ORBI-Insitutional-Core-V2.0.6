@@ -6,6 +6,8 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 DROP FUNCTION IF EXISTS public.handle_new_user() CASCADE;
 DROP FUNCTION IF EXISTS public.post_transaction_v2(UUID, UUID, UUID, UUID, TEXT, TEXT, TEXT, TEXT, DATE, JSONB, UUID, JSONB, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.append_ledger_entries_v1(UUID, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS public.shared_pot_contribute_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS public.shared_pot_withdraw_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB, TEXT, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS public.settle_bill_payment_from_reserve_v1(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.update_wallet_balance(UUID, NUMERIC, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.delete_old_activity() CASCADE;
@@ -2205,6 +2207,338 @@ BEGIN
             encrypted_balance = leg->>'balance_after_encrypted' 
         WHERE id = (leg->>'wallet_id')::UUID;
     END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.shared_pot_contribute_v1(
+    p_user_id UUID,
+    p_pot_id UUID,
+    p_source_wallet_id UUID,
+    p_amount NUMERIC,
+    p_currency TEXT DEFAULT 'TZS',
+    p_description TEXT DEFAULT NULL,
+    p_reference_id TEXT DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_pot public.shared_pots%ROWTYPE;
+    v_source_wallet public.wallets%ROWTYPE;
+    v_source_vault public.platform_vaults%ROWTYPE;
+    v_source_table TEXT;
+    v_source_balance NUMERIC;
+    v_source_role TEXT;
+    v_source_balance_after NUMERIC;
+    v_pot_balance_after NUMERIC;
+    v_tx_id UUID := gen_random_uuid();
+    v_reference_id TEXT := COALESCE(p_reference_id, 'pot_' || extract(epoch from now())::bigint || '_' || substr(md5(random()::text), 1, 8));
+    v_description TEXT := COALESCE(p_description, 'Shared pot contribution');
+BEGIN
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        RAISE EXCEPTION 'INVALID_AMOUNT';
+    END IF;
+
+    SELECT *
+      INTO v_pot
+      FROM public.shared_pots
+     WHERE id = p_pot_id
+       AND status = 'ACTIVE'
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'SHARED_POT_NOT_FOUND';
+    END IF;
+
+    SELECT *
+      INTO v_source_vault
+      FROM public.platform_vaults
+     WHERE id = p_source_wallet_id
+       AND user_id = p_user_id
+     FOR UPDATE;
+
+    IF FOUND THEN
+        v_source_table := 'platform_vaults';
+        v_source_balance := COALESCE(v_source_vault.balance, 0);
+        v_source_role := COALESCE(v_source_vault.vault_role, v_source_vault.type, 'OPERATING');
+    ELSE
+        SELECT *
+          INTO v_source_wallet
+          FROM public.wallets
+         WHERE id = p_source_wallet_id
+           AND user_id = p_user_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'NO_OPERATING_WALLET';
+        END IF;
+
+        v_source_table := 'wallets';
+        v_source_balance := COALESCE(v_source_wallet.balance, 0);
+        v_source_role := COALESCE(v_source_wallet.type, 'wallet');
+    END IF;
+
+    IF v_source_balance < p_amount THEN
+        RAISE EXCEPTION 'INSUFFICIENT_FUNDS';
+    END IF;
+
+    v_source_balance_after := v_source_balance - p_amount;
+    v_pot_balance_after := COALESCE(v_pot.current_amount, 0) + p_amount;
+
+    INSERT INTO public.transactions (
+        id, reference_id, user_id, wallet_id, amount, currency, description,
+        type, status, date, wealth_impact_type, protection_state, allocation_source, metadata
+    ) VALUES (
+        v_tx_id,
+        v_reference_id,
+        p_user_id,
+        p_source_wallet_id,
+        p_amount::TEXT,
+        COALESCE(NULLIF(trim(p_currency), ''), v_pot.currency, 'TZS'),
+        v_description,
+        'internal_transfer',
+        'completed',
+        CURRENT_DATE,
+        'GROWING',
+        'OPEN',
+        'SHARED_POT_CONTRIBUTION',
+        COALESCE(p_metadata, '{}'::jsonb)
+    );
+
+    IF v_source_table = 'wallets' THEN
+        UPDATE public.wallets
+           SET balance = v_source_balance_after,
+               updated_at = NOW()
+         WHERE id = p_source_wallet_id
+           AND user_id = p_user_id;
+    ELSE
+        UPDATE public.platform_vaults
+           SET balance = v_source_balance_after,
+               updated_at = NOW()
+         WHERE id = p_source_wallet_id
+           AND user_id = p_user_id;
+    END IF;
+
+    UPDATE public.shared_pots
+       SET current_amount = v_pot_balance_after,
+           updated_at = NOW()
+     WHERE id = p_pot_id;
+
+    INSERT INTO public.financial_ledger (
+        id, transaction_id, user_id, wallet_id, shared_pot_id, bucket_type, entry_side, entry_type, amount, balance_after, description
+    ) VALUES
+    (
+        gen_random_uuid(),
+        v_tx_id,
+        p_user_id,
+        p_source_wallet_id,
+        p_pot_id,
+        'OPERATING',
+        'DEBIT',
+        'DEBIT',
+        p_amount::TEXT,
+        v_source_balance_after::TEXT,
+        'Shared pot contribution debit: ' || v_pot.name
+    ),
+    (
+        gen_random_uuid(),
+        v_tx_id,
+        p_user_id,
+        p_source_wallet_id,
+        p_pot_id,
+        'GROWING',
+        'CREDIT',
+        'CREDIT',
+        p_amount::TEXT,
+        v_pot_balance_after::TEXT,
+        'Shared pot contribution credit: ' || v_pot.name
+    );
+
+    RETURN jsonb_build_object(
+        'transaction_id', v_tx_id,
+        'reference_id', v_reference_id,
+        'source_balance_after', v_source_balance_after,
+        'pot_balance_after', v_pot_balance_after,
+        'source_table', v_source_table,
+        'source_wallet_role', v_source_role
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.shared_pot_withdraw_v1(
+    p_user_id UUID,
+    p_pot_id UUID,
+    p_target_wallet_id UUID,
+    p_amount NUMERIC,
+    p_currency TEXT DEFAULT 'TZS',
+    p_description TEXT DEFAULT NULL,
+    p_reference_id TEXT DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb,
+    p_member_role TEXT DEFAULT 'CONTRIBUTOR',
+    p_member_metadata JSONB DEFAULT '{}'::jsonb
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_pot public.shared_pots%ROWTYPE;
+    v_target_wallet public.wallets%ROWTYPE;
+    v_target_vault public.platform_vaults%ROWTYPE;
+    v_member public.shared_pot_members%ROWTYPE;
+    v_target_table TEXT;
+    v_target_balance NUMERIC;
+    v_target_role TEXT;
+    v_target_balance_after NUMERIC;
+    v_pot_balance_after NUMERIC;
+    v_new_contributed_amount NUMERIC;
+    v_tx_id UUID := gen_random_uuid();
+    v_reference_id TEXT := COALESCE(p_reference_id, 'pot_w_' || extract(epoch from now())::bigint || '_' || substr(md5(random()::text), 1, 8));
+    v_description TEXT := COALESCE(p_description, 'Shared pot withdrawal');
+BEGIN
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        RAISE EXCEPTION 'INVALID_AMOUNT';
+    END IF;
+
+    SELECT *
+      INTO v_pot
+      FROM public.shared_pots
+     WHERE id = p_pot_id
+       AND status = 'ACTIVE'
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'SHARED_POT_NOT_FOUND';
+    END IF;
+
+    IF COALESCE(v_pot.current_amount, 0) < p_amount THEN
+        RAISE EXCEPTION 'INSUFFICIENT_POT_FUNDS';
+    END IF;
+
+    SELECT *
+      INTO v_target_vault
+      FROM public.platform_vaults
+     WHERE id = p_target_wallet_id
+       AND user_id = p_user_id
+     FOR UPDATE;
+
+    IF FOUND THEN
+        v_target_table := 'platform_vaults';
+        v_target_balance := COALESCE(v_target_vault.balance, 0);
+        v_target_role := COALESCE(v_target_vault.vault_role, v_target_vault.type, 'OPERATING');
+    ELSE
+        SELECT *
+          INTO v_target_wallet
+          FROM public.wallets
+         WHERE id = p_target_wallet_id
+           AND user_id = p_user_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'NO_OPERATING_WALLET';
+        END IF;
+
+        v_target_table := 'wallets';
+        v_target_balance := COALESCE(v_target_wallet.balance, 0);
+        v_target_role := COALESCE(v_target_wallet.type, 'wallet');
+    END IF;
+
+    SELECT *
+      INTO v_member
+      FROM public.shared_pot_members
+     WHERE pot_id = p_pot_id
+       AND user_id = p_user_id
+     FOR UPDATE;
+
+    v_target_balance_after := v_target_balance + p_amount;
+    v_pot_balance_after := COALESCE(v_pot.current_amount, 0) - p_amount;
+    v_new_contributed_amount := COALESCE(v_member.contributed_amount, 0) + p_amount;
+
+    INSERT INTO public.transactions (
+        id, reference_id, user_id, wallet_id, amount, currency, description,
+        type, status, date, wealth_impact_type, protection_state, allocation_source, metadata
+    ) VALUES (
+        v_tx_id,
+        v_reference_id,
+        p_user_id,
+        p_target_wallet_id,
+        p_amount::TEXT,
+        COALESCE(NULLIF(trim(p_currency), ''), v_pot.currency, 'TZS'),
+        v_description,
+        'internal_transfer',
+        'completed',
+        CURRENT_DATE,
+        'GROWING',
+        'OPEN',
+        'SHARED_POT_WITHDRAWAL',
+        COALESCE(p_metadata, '{}'::jsonb)
+    );
+
+    IF v_target_table = 'wallets' THEN
+        UPDATE public.wallets
+           SET balance = v_target_balance_after,
+               updated_at = NOW()
+         WHERE id = p_target_wallet_id
+           AND user_id = p_user_id;
+    ELSE
+        UPDATE public.platform_vaults
+           SET balance = v_target_balance_after,
+               updated_at = NOW()
+         WHERE id = p_target_wallet_id
+           AND user_id = p_user_id;
+    END IF;
+
+    UPDATE public.shared_pots
+       SET current_amount = v_pot_balance_after,
+           updated_at = NOW()
+     WHERE id = p_pot_id;
+
+    INSERT INTO public.financial_ledger (
+        id, transaction_id, user_id, wallet_id, shared_pot_id, bucket_type, entry_side, entry_type, amount, balance_after, description
+    ) VALUES
+    (
+        gen_random_uuid(),
+        v_tx_id,
+        p_user_id,
+        p_target_wallet_id,
+        p_pot_id,
+        'GROWING',
+        'DEBIT',
+        'DEBIT',
+        p_amount::TEXT,
+        v_pot_balance_after::TEXT,
+        'Shared pot withdrawal debit: ' || v_pot.name
+    ),
+    (
+        gen_random_uuid(),
+        v_tx_id,
+        p_user_id,
+        p_target_wallet_id,
+        p_pot_id,
+        'OPERATING',
+        'CREDIT',
+        'CREDIT',
+        p_amount::TEXT,
+        v_target_balance_after::TEXT,
+        'Shared pot withdrawal credit: ' || v_pot.name
+    );
+
+    INSERT INTO public.shared_pot_members (
+        pot_id, user_id, role, contributed_amount, metadata
+    ) VALUES (
+        p_pot_id, p_user_id, COALESCE(NULLIF(trim(p_member_role), ''), 'CONTRIBUTOR'), v_new_contributed_amount, COALESCE(p_member_metadata, '{}'::jsonb)
+    )
+    ON CONFLICT (pot_id, user_id)
+    DO UPDATE SET
+        role = EXCLUDED.role,
+        contributed_amount = v_new_contributed_amount,
+        metadata = EXCLUDED.metadata;
+
+    RETURN jsonb_build_object(
+        'transaction_id', v_tx_id,
+        'reference_id', v_reference_id,
+        'target_balance_after', v_target_balance_after,
+        'pot_balance_after', v_pot_balance_after,
+        'target_table', v_target_table,
+        'target_wallet_role', v_target_role,
+        'member_contributed_amount', v_new_contributed_amount
+    );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
