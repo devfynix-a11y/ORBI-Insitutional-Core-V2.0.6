@@ -6,7 +6,7 @@ import { registerAppPublicRoutes } from './registerPublicRoutes.js';
 import { registerSystemRoutes } from './registerSystemRoutes.js';
 import { wealthNumber, resolveWealthSourceWallet, assertBillPaymentSourceAllowed, billReserveValuesMatch, resolveBillReserveReference, BillReservePaymentSchema } from '../routes/public/wealthShared.js';
 import { validate } from '../middleware/validation/validate.js';
-import { authenticate, adminOnly, resolveSessionRole, requireRole, resolveSessionRegistryType, mapServiceRoleToRegistryType, requireSessionPermission } from '../middleware/auth/sessionAuth.js';
+import { authenticate, adminOnly, resolveSessionRole, resolveSessionRegistryType, mapServiceRoleToRegistryType, requireSessionPermission } from '../middleware/auth/sessionAuth.js';
 import { ALLOWED_ORIGINS } from '../middleware/security/setup.js';
 import { createRuntime } from './runtime.js';
 import { Server as LogicCore } from '../../backend/server.js';
@@ -29,9 +29,6 @@ import { FXEngine } from '../../backend/ledger/FXEngine.js';
 import { continuousSessionMonitor } from '../../backend/src/middleware/session-monitor.middleware.js';
 import { TransactionSigning } from '../../backend/src/modules/transaction/signing.service.js';
 import { OTPService } from '../../backend/security/otpService.js';
-import { ServiceActorOps } from '../../backend/features/ServiceActorOps.js';
-import gatewayRoutes from '../../backend/payments/gatewayRoutes.js';
-import { settlementScheduler } from '../../backend/payments/settlementScheduler.js';
 import { KMS } from '../../backend/security/kms.js';
 import { DataVault } from '../../backend/security/encryption.js';
 import { SandboxController } from '../../backend/sandbox/sandboxController.js';
@@ -73,7 +70,6 @@ registerAppPublicRoutes({
     authenticate: authenticate as any,
     adminOnly: adminOnly as any,
     validate,
-    requireRole,
     requireSessionPermission,
     authenticateApiKey: authenticateApiKey as any,
     upload,

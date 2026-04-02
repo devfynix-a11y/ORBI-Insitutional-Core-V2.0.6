@@ -26,7 +26,6 @@ type Deps = {
   authenticate: RequestHandler;
   adminOnly: RequestHandler;
   validate: (schema: any) => RequestHandler;
-  requireRole: any;
   requireSessionPermission: (permissions: string[], roles?: string[]) => RequestHandler;
   authenticateApiKey: RequestHandler;
   upload: any;
@@ -96,7 +95,6 @@ export const registerAppPublicRoutes = (deps: Deps) => {
     authenticate,
     adminOnly,
     validate,
-    requireRole,
     requireSessionPermission,
     authenticateApiKey,
     upload,
