@@ -2454,80 +2454,251 @@ CREATE OR REPLACE FUNCTION public.append_ledger_entries_v1(
 RETURNS void AS $$
 DECLARE
     leg JSONB;
+    v_lock_target RECORD;
+    v_update_target RECORD;
     v_leg_wallet_id UUID;
-    v_expected_before NUMERIC;
+    v_leg_entity_type TEXT;
+    v_leg_amount NUMERIC;
     v_current_balance NUMERIC;
+    v_next_balance NUMERIC;
+    v_total_credits NUMERIC := 0;
+    v_total_debits NUMERIC := 0;
+    v_balance_map JSONB := '{}'::jsonb;
+    v_entity_type_map JSONB := '{}'::jsonb;
+    v_tx_user_id UUID;
 BEGIN
+    IF p_legs IS NULL OR jsonb_typeof(p_legs) <> 'array' OR jsonb_array_length(p_legs) = 0 THEN
+        RAISE EXCEPTION 'LEDGER_LEGS_REQUIRED: append_ledger_entries_v1 requires at least one ledger leg';
+    END IF;
+
+    SELECT t.user_id
+      INTO v_tx_user_id
+      FROM public.transactions t
+     WHERE t.id = p_tx_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'TRANSACTION_MISSING: Transaction % was not found', p_tx_id;
+    END IF;
+
+    FOR v_lock_target IN
+        WITH leg_ids AS (
+            SELECT DISTINCT (leg_item->>'wallet_id')::UUID AS entity_id
+            FROM jsonb_array_elements(p_legs) AS leg_item
+            WHERE NULLIF(leg_item->>'wallet_id', '') IS NOT NULL
+        ),
+        resolved AS (
+            SELECT
+                r.entity_id,
+                CASE
+                    WHEN w.id IS NOT NULL THEN 'wallet'
+                    WHEN pv.id IS NOT NULL THEN 'vault'
+                    WHEN g.id IS NOT NULL THEN 'goal'
+                    ELSE NULL
+                END AS entity_type,
+                (CASE WHEN w.id IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN pv.id IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN g.id IS NOT NULL THEN 1 ELSE 0 END) AS match_count
+            FROM leg_ids r
+            LEFT JOIN public.wallets w ON w.id = r.entity_id
+            LEFT JOIN public.platform_vaults pv ON pv.id = r.entity_id
+            LEFT JOIN public.goals g ON g.id = r.entity_id
+        )
+        SELECT entity_id, entity_type, match_count
+        FROM resolved
+        ORDER BY entity_type, entity_id
+    LOOP
+        IF v_lock_target.match_count = 0 THEN
+            RAISE EXCEPTION 'LEDGER_ENTITY_MISSING: Internal entity % was not found', v_lock_target.entity_id;
+        END IF;
+
+        IF v_lock_target.match_count > 1 THEN
+            RAISE EXCEPTION 'LEDGER_ENTITY_AMBIGUOUS: Internal entity % resolves to multiple tables', v_lock_target.entity_id;
+        END IF;
+
+        IF v_lock_target.entity_type = 'wallet' THEN
+            SELECT balance
+              INTO v_current_balance
+              FROM public.wallets w
+             WHERE w.id = v_lock_target.entity_id
+               AND NOT (
+                    COALESCE(w.is_locked, FALSE)
+                    OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended')
+               )
+             FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'WALLET_LOCKED: Wallet % is locked or unavailable', v_lock_target.entity_id;
+            END IF;
+        ELSIF v_lock_target.entity_type = 'vault' THEN
+            SELECT balance
+              INTO v_current_balance
+              FROM public.platform_vaults pv
+             WHERE pv.id = v_lock_target.entity_id
+               AND NOT (
+                    COALESCE(pv.is_locked, FALSE)
+                    OR lower(COALESCE(pv.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended')
+               )
+             FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'WALLET_LOCKED: Vault % is locked or unavailable', v_lock_target.entity_id;
+            END IF;
+        ELSIF v_lock_target.entity_type = 'goal' THEN
+            SELECT current
+              INTO v_current_balance
+              FROM public.goals g
+             WHERE g.id = v_lock_target.entity_id
+             FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'GOAL_MISSING: Goal % is unavailable', v_lock_target.entity_id;
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'LEDGER_ENTITY_MISSING: Internal entity % was not found', v_lock_target.entity_id;
+        END IF;
+
+        v_balance_map := jsonb_set(
+            v_balance_map,
+            ARRAY[v_lock_target.entity_id::TEXT],
+            to_jsonb(COALESCE(v_current_balance, 0)),
+            TRUE
+        );
+        v_entity_type_map := jsonb_set(
+            v_entity_type_map,
+            ARRAY[v_lock_target.entity_id::TEXT],
+            to_jsonb(v_lock_target.entity_type),
+            TRUE
+        );
+    END LOOP;
+
+    -- Compatibility note:
+    --   * leg.balance_before is ignored as authoritative; SQL re-reads the locked row state.
+    --   * leg.balance_after is ignored; SQL computes the next balance internally.
+    --   * leg.balance_after_encrypted is ignored; SQL writes SQL-computed plaintext balance_after.
+    --   * leg.amount remains the stored payload for financial_ledger.amount.
+    --   * leg.amount_plain is the authoritative arithmetic input when supplied. If absent,
+    --     SQL only accepts leg.amount when it is already a numeric plaintext value.
     FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
     LOOP
         v_leg_wallet_id := (leg->>'wallet_id')::UUID;
-        v_expected_before := NULLIF(leg->>'balance_before', '')::NUMERIC;
-        v_current_balance := NULL;
 
-        IF EXISTS (
-            SELECT 1 FROM public.wallets w
-            WHERE w.id = v_leg_wallet_id
-              AND (COALESCE(w.is_locked, FALSE)
-                   OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
-        )
-        OR EXISTS (
-            SELECT 1 FROM public.platform_vaults v
-            WHERE v.id = v_leg_wallet_id
-              AND (COALESCE(v.is_locked, FALSE)
-                   OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
-        ) THEN
-            RAISE EXCEPTION 'WALLET_LOCKED: Wallet % is locked', (leg->>'wallet_id');
+        IF v_leg_wallet_id IS NULL THEN
+            RAISE EXCEPTION 'LEDGER_LEG_WALLET_REQUIRED: Each leg must include wallet_id';
         END IF;
 
-        PERFORM 1
-          FROM public.wallets
-         WHERE id = v_leg_wallet_id
-         FOR UPDATE;
+        v_leg_entity_type := v_entity_type_map->>v_leg_wallet_id::TEXT;
+        IF v_leg_entity_type IS NULL THEN
+            RAISE EXCEPTION 'LEDGER_ENTITY_MISSING: Internal entity % was not locked for this append', v_leg_wallet_id;
+        END IF;
 
-        IF FOUND THEN
-            SELECT balance INTO v_current_balance
-              FROM public.wallets
-             WHERE id = v_leg_wallet_id;
+        IF NULLIF(BTRIM(leg->>'amount_plain'), '') IS NOT NULL THEN
+            v_leg_amount := (leg->>'amount_plain')::NUMERIC;
+        ELSIF NULLIF(BTRIM(leg->>'amount'), '') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN
+            v_leg_amount := (leg->>'amount')::NUMERIC;
         ELSE
-            PERFORM 1
-              FROM public.platform_vaults
-             WHERE id = v_leg_wallet_id
-             FOR UPDATE;
-
-            IF FOUND THEN
-                SELECT balance INTO v_current_balance
-                  FROM public.platform_vaults
-                 WHERE id = v_leg_wallet_id;
-            END IF;
+            RAISE EXCEPTION 'LEG_AMOUNT_REQUIRED: Leg for % must include numeric amount_plain when amount is encrypted', v_leg_wallet_id;
         END IF;
 
-        IF v_expected_before IS NOT NULL
-           AND v_current_balance IS NOT NULL
-           AND abs(COALESCE(v_current_balance, 0) - v_expected_before) > 0.0001 THEN
-            RAISE EXCEPTION 'BALANCE_STALE: Wallet % expected %, found %', v_leg_wallet_id, v_expected_before, v_current_balance;
+        IF v_leg_amount <= 0 THEN
+            RAISE EXCEPTION 'LEG_AMOUNT_INVALID: Leg for % must have a positive amount', v_leg_wallet_id;
         END IF;
+
+        v_current_balance := COALESCE((v_balance_map->>v_leg_wallet_id::TEXT)::NUMERIC, 0);
+
+        CASE UPPER(COALESCE(leg->>'entry_type', ''))
+            WHEN 'CREDIT' THEN
+                v_next_balance := ROUND((v_current_balance + v_leg_amount)::NUMERIC, 4);
+                v_total_credits := v_total_credits + v_leg_amount;
+            WHEN 'DEBIT' THEN
+                v_next_balance := ROUND((v_current_balance - v_leg_amount)::NUMERIC, 4);
+                v_total_debits := v_total_debits + v_leg_amount;
+                IF v_next_balance < 0 THEN
+                    RAISE EXCEPTION 'INSUFFICIENT_FUNDS: Internal entity % would go negative', v_leg_wallet_id;
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'LEDGER_ENTRY_TYPE_INVALID: Leg for % must be CREDIT or DEBIT', v_leg_wallet_id;
+        END CASE;
 
         INSERT INTO public.financial_ledger (
-            id, transaction_id, user_id, wallet_id, entry_type, amount, balance_after, balance_after_encrypted, description
+            id,
+            transaction_id,
+            user_id,
+            wallet_id,
+            entry_type,
+            amount,
+            balance_after,
+            balance_after_encrypted,
+            description
         ) VALUES (
-            gen_random_uuid(), p_tx_id, 
-            (SELECT user_id FROM public.transactions WHERE id = p_tx_id),
-            v_leg_wallet_id, 
-            leg->>'entry_type', 
-            leg->>'amount', 
-            (leg->>'balance_after')::TEXT, 
-            leg->>'balance_after_encrypted', 
+            gen_random_uuid(),
+            p_tx_id,
+            v_tx_user_id,
+            v_leg_wallet_id,
+            UPPER(leg->>'entry_type'),
+            leg->>'amount',
+            v_next_balance::TEXT,
+            NULL,
             leg->>'description'
         );
 
-        UPDATE public.wallets 
-        SET balance = (leg->>'balance_after')::NUMERIC 
-        WHERE id = v_leg_wallet_id;
+        v_balance_map := jsonb_set(
+            v_balance_map,
+            ARRAY[v_leg_wallet_id::TEXT],
+            to_jsonb(v_next_balance),
+            TRUE
+        );
+    END LOOP;
 
-        UPDATE public.platform_vaults 
-        SET balance = (leg->>'balance_after')::NUMERIC, 
-            encrypted_balance = leg->>'balance_after_encrypted' 
-        WHERE id = v_leg_wallet_id;
+    IF ROUND(ABS(v_total_credits - v_total_debits)::NUMERIC, 4) <> 0 THEN
+        RAISE EXCEPTION 'LEDGER_OUT_OF_BALANCE: credits % do not equal debits %', v_total_credits, v_total_debits;
+    END IF;
+
+    FOR v_update_target IN
+        WITH leg_ids AS (
+            SELECT DISTINCT (leg_item->>'wallet_id')::UUID AS entity_id
+            FROM jsonb_array_elements(p_legs) AS leg_item
+            WHERE NULLIF(leg_item->>'wallet_id', '') IS NOT NULL
+        ),
+        resolved AS (
+            SELECT
+                r.entity_id,
+                CASE
+                    WHEN w.id IS NOT NULL THEN 'wallet'
+                    WHEN pv.id IS NOT NULL THEN 'vault'
+                    WHEN g.id IS NOT NULL THEN 'goal'
+                    ELSE NULL
+                END AS entity_type,
+                (CASE WHEN w.id IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN pv.id IS NOT NULL THEN 1 ELSE 0 END
+                 + CASE WHEN g.id IS NOT NULL THEN 1 ELSE 0 END) AS match_count
+            FROM leg_ids r
+            LEFT JOIN public.wallets w ON w.id = r.entity_id
+            LEFT JOIN public.platform_vaults pv ON pv.id = r.entity_id
+            LEFT JOIN public.goals g ON g.id = r.entity_id
+        )
+        SELECT entity_id, entity_type, match_count
+        FROM resolved
+        ORDER BY entity_type, entity_id
+    LOOP
+        IF v_update_target.match_count <> 1 THEN
+            RAISE EXCEPTION 'LEDGER_ENTITY_AMBIGUOUS: Internal entity % resolves to % matches', v_update_target.entity_id, v_update_target.match_count;
+        END IF;
+
+        IF v_update_target.entity_type = 'wallet' THEN
+            UPDATE public.wallets
+               SET balance = COALESCE((v_balance_map->>v_update_target.entity_id::TEXT)::NUMERIC, balance)
+             WHERE id = v_update_target.entity_id;
+        ELSIF v_update_target.entity_type = 'vault' THEN
+            UPDATE public.platform_vaults
+               SET balance = COALESCE((v_balance_map->>v_update_target.entity_id::TEXT)::NUMERIC, balance)
+             WHERE id = v_update_target.entity_id;
+        ELSIF v_update_target.entity_type = 'goal' THEN
+            UPDATE public.goals
+               SET current = COALESCE((v_balance_map->>v_update_target.entity_id::TEXT)::NUMERIC, current),
+                   updated_at = NOW()
+             WHERE id = v_update_target.entity_id;
+        END IF;
     END LOOP;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
