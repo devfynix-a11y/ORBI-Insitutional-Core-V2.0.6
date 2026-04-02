@@ -1,10 +1,13 @@
 
 import { FinancialPartner } from '../../../types.js';
 import { getSupabase } from '../../../services/supabaseClient.js';
-import { DataVault } from '../../security/encryption.js';
 import { UUID } from '../../../services/utils.js';
 import { secureProviderRegistryPayload } from './RegistryPayloadSecurity.js';
-import { normalizeFinancialPartnerInput } from './ProviderRegistryValidator.js';
+import { providerSecretVault } from './ProviderSecretVault.js';
+import {
+    assertPartnerActivationReady,
+    normalizeFinancialPartnerInput,
+} from './ProviderRegistryValidator.js';
 
 /**
  * ORBI MERCHANT FABRIC (V2.1)
@@ -32,14 +35,15 @@ class MerchantFabricService {
             client_id: payload.client_id,
             client_secret: payload.client_secret,
             api_base_url: normalized.api_base_url,
-            status: 'ACTIVE',
+            status: (normalized.status as FinancialPartner['status']) || 'INACTIVE',
             created_at: new Date().toISOString(),
             logic_type: normalized.logic_type || 'REGISTRY',
             mapping_config: normalized.mapping_config,
-            provider_metadata: payload.provider_metadata,
+            provider_metadata: normalized.provider_metadata,
             connection_secret: payload.connection_secret,
             webhook_secret: payload.webhook_secret,
         };
+        assertPartnerActivationReady(partner);
 
         const securedPartner = await secureProviderRegistryPayload(partner);
         const { error } = await sb.from('financial_partners').insert(securedPartner);
@@ -82,7 +86,9 @@ class MerchantFabricService {
         const expiry = Date.now() + (expiresIn * 1000);
         
         // Tokens are also encrypted at rest
-        const encryptedToken = await DataVault.encrypt(token);
+        const encryptedToken = await providerSecretVault.wrapSecret(token, 'token_cache', {
+            partnerId: id,
+        });
         
         await sb.from('financial_partners').update({
             token_cache: encryptedToken,

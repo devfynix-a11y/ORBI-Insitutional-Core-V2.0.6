@@ -321,6 +321,8 @@ export function normalizeProviderRegistryConfig(config: unknown): ProviderRegist
     };
 
     const hasOperations = Boolean(
+        normalized.operations && Object.keys(normalized.operations).length > 0,
+    ) || Boolean(
         normalized.stk_push ||
             normalized.disbursement ||
             normalized.balance ||
@@ -386,4 +388,66 @@ export function normalizeFinancialPartnerInput(
     }
 
     return normalized;
+}
+
+export function assertPartnerActivationReady(payload: Partial<FinancialPartner>): void {
+    const status = String(payload.status || '').trim().toUpperCase();
+    if (status !== 'ACTIVE') {
+        return;
+    }
+
+    const partnerName = String(payload.name || 'UNKNOWN_PROVIDER').trim();
+    const metadata = (payload.provider_metadata || {}) as FinancialPartnerMetadata;
+    const registry = payload.mapping_config as ProviderRegistryConfig | undefined;
+
+    if (!registry) {
+        throw new Error(`PROVIDER_ACTIVATION_MAPPING_CONFIG_REQUIRED:${partnerName}`);
+    }
+
+    const hasOperationEndpoint = Boolean(
+        registry.operations && Object.keys(registry.operations).length > 0,
+    ) || Boolean(
+        registry.stk_push ||
+        registry.disbursement ||
+        registry.balance ||
+        registry.check_status,
+    );
+
+    if (!hasOperationEndpoint) {
+        throw new Error(`PROVIDER_ACTIVATION_OPERATION_REQUIRED:${partnerName}`);
+    }
+
+    if (!registry.service_root && (!registry.service_roots || Object.keys(registry.service_roots).length === 0)) {
+        throw new Error(`PROVIDER_ACTIVATION_SERVICE_ROOT_REQUIRED:${partnerName}`);
+    }
+
+    if (!metadata.provider_code || !String(metadata.provider_code).trim()) {
+        throw new Error(`PROVIDER_ACTIVATION_PROVIDER_CODE_REQUIRED:${partnerName}`);
+    }
+
+    if (!metadata.rail || !String(metadata.rail).trim()) {
+        throw new Error(`PROVIDER_ACTIVATION_RAIL_REQUIRED:${partnerName}`);
+    }
+
+    const operations = Array.isArray(metadata.operations) ? metadata.operations : [];
+    if (operations.length === 0) {
+        throw new Error(`PROVIDER_ACTIVATION_OPERATIONS_METADATA_REQUIRED:${partnerName}`);
+    }
+
+    const supportsWebhook =
+        metadata.supports_webhooks === true ||
+        operations.map((operation) => String(operation).trim().toUpperCase()).includes('WEBHOOK_VERIFY') ||
+        Boolean(registry.callback);
+
+    if (supportsWebhook) {
+        if (!registry.callback) {
+            throw new Error(`PROVIDER_ACTIVATION_CALLBACK_REQUIRED:${partnerName}`);
+        }
+        if (!registry.callback.reference_field) {
+            throw new Error(`PROVIDER_ACTIVATION_CALLBACK_REFERENCE_REQUIRED:${partnerName}`);
+        }
+        if (!registry.callback.status_field) {
+            throw new Error(`PROVIDER_ACTIVATION_CALLBACK_STATUS_REQUIRED:${partnerName}`);
+        }
+    }
 }

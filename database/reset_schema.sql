@@ -15,6 +15,8 @@ DROP FUNCTION IF EXISTS public.settle_bill_payment_from_reserve_v1(UUID, UUID, N
 DROP FUNCTION IF EXISTS public.update_wallet_balance(UUID, NUMERIC, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.update_wallet_balance(UUID, NUMERIC, TEXT, TEXT, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.repair_wallet_balance_emergency(UUID, NUMERIC, TEXT, TEXT, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS public.claim_internal_transfer_settlement(UUID, TEXT, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS public.complete_internal_transfer_settlement(UUID, TEXT, TEXT, TEXT, BOOLEAN) CASCADE;
 DROP FUNCTION IF EXISTS public.delete_old_activity() CASCADE;
 DROP FUNCTION IF EXISTS public.get_auth_role() CASCADE;
 DROP FUNCTION IF EXISTS public.set_settlement_lifecycle_updated_at() CASCADE;
@@ -1082,6 +1084,8 @@ CREATE TABLE IF NOT EXISTS public.external_fund_movements (
     external_reference TEXT,
     source_external_ref TEXT,
     target_external_ref TEXT,
+    settlement_lifecycle_id UUID REFERENCES public.settlement_lifecycle(id) ON DELETE SET NULL,
+    provider_event_id TEXT,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -1377,6 +1381,80 @@ BEGIN
     END IF;
 END $$;
 
+CREATE OR REPLACE FUNCTION public.enforce_financial_partner_activation_readiness()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_status TEXT := UPPER(COALESCE(NEW.status, ''));
+    v_provider_code TEXT := BTRIM(COALESCE(NEW.provider_metadata->>'provider_code', ''));
+    v_rail TEXT := BTRIM(COALESCE(NEW.provider_metadata->>'rail', ''));
+    v_operations_count INTEGER := COALESCE(jsonb_array_length(COALESCE(NEW.provider_metadata->'operations', '[]'::jsonb)), 0);
+    v_mapping_operations_count INTEGER := COALESCE(jsonb_object_length(COALESCE(NEW.mapping_config->'operations', '{}'::jsonb)), 0);
+    v_supports_webhooks BOOLEAN := COALESCE((NEW.provider_metadata->>'supports_webhooks')::BOOLEAN, FALSE);
+    v_has_callback BOOLEAN := COALESCE(NEW.mapping_config ? 'callback', FALSE);
+    v_callback_reference TEXT := BTRIM(COALESCE(NEW.mapping_config->'callback'->>'reference_field', ''));
+    v_callback_status TEXT := BTRIM(COALESCE(NEW.mapping_config->'callback'->>'status_field', ''));
+BEGIN
+    IF v_status <> 'ACTIVE' THEN
+        RETURN NEW;
+    END IF;
+
+    IF COALESCE(NEW.mapping_config, '{}'::jsonb) = '{}'::jsonb THEN
+        RAISE EXCEPTION 'PROVIDER_ACTIVATION_MAPPING_CONFIG_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+    END IF;
+
+    IF BTRIM(COALESCE(NEW.mapping_config->>'service_root', '')) = ''
+       AND COALESCE(jsonb_object_length(COALESCE(NEW.mapping_config->'service_roots', '{}'::jsonb)), 0) = 0 THEN
+        RAISE EXCEPTION 'PROVIDER_ACTIVATION_SERVICE_ROOT_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+    END IF;
+
+    IF v_mapping_operations_count = 0
+       AND NOT (COALESCE(NEW.mapping_config ? 'stk_push', FALSE)
+             OR COALESCE(NEW.mapping_config ? 'disbursement', FALSE)
+             OR COALESCE(NEW.mapping_config ? 'balance', FALSE)
+             OR COALESCE(NEW.mapping_config ? 'check_status', FALSE)) THEN
+        RAISE EXCEPTION 'PROVIDER_ACTIVATION_OPERATION_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+    END IF;
+
+    IF v_provider_code = '' THEN
+        RAISE EXCEPTION 'PROVIDER_ACTIVATION_PROVIDER_CODE_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+    END IF;
+
+    IF v_rail = '' THEN
+        RAISE EXCEPTION 'PROVIDER_ACTIVATION_RAIL_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+    END IF;
+
+    IF v_operations_count = 0 THEN
+        RAISE EXCEPTION 'PROVIDER_ACTIVATION_OPERATIONS_METADATA_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+    END IF;
+
+    IF v_supports_webhooks OR v_has_callback OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements_text(COALESCE(NEW.provider_metadata->'operations', '[]'::jsonb)) AS operation_name
+        WHERE UPPER(operation_name) = 'WEBHOOK_VERIFY'
+    ) THEN
+        IF NOT v_has_callback THEN
+            RAISE EXCEPTION 'PROVIDER_ACTIVATION_CALLBACK_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+        END IF;
+        IF v_callback_reference = '' THEN
+            RAISE EXCEPTION 'PROVIDER_ACTIVATION_CALLBACK_REFERENCE_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+        END IF;
+        IF v_callback_status = '' THEN
+            RAISE EXCEPTION 'PROVIDER_ACTIVATION_CALLBACK_STATUS_REQUIRED:%', COALESCE(NEW.name, 'UNKNOWN_PROVIDER');
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_financial_partner_activation_readiness ON public.financial_partners;
+CREATE TRIGGER trg_financial_partner_activation_readiness
+BEFORE INSERT OR UPDATE ON public.financial_partners
+FOR EACH ROW
+EXECUTE FUNCTION public.enforce_financial_partner_activation_readiness();
+
 CREATE TABLE IF NOT EXISTS public.digital_merchants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
     name TEXT NOT NULL,
@@ -1427,6 +1505,42 @@ CREATE TABLE IF NOT EXISTS public.merchant_settlements (
 
 
 -- Settlement Lifecycle
+CREATE TABLE IF NOT EXISTS public.provider_webhook_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    partner_id UUID NOT NULL REFERENCES public.financial_partners(id) ON DELETE CASCADE,
+    provider_event_id TEXT,
+    dedupe_key TEXT NOT NULL,
+    replay_key TEXT NOT NULL,
+    reference TEXT,
+    normalized_status TEXT,
+    raw_status TEXT,
+    event_timestamp TIMESTAMP WITH TIME ZONE,
+    timestamp_source TEXT,
+    signature_status TEXT NOT NULL DEFAULT 'pending',
+    freshness_status TEXT NOT NULL DEFAULT 'missing',
+    verification_status TEXT NOT NULL DEFAULT 'pending',
+    application_status TEXT NOT NULL DEFAULT 'received',
+    payload_sha256 TEXT NOT NULL,
+    payload JSONB DEFAULT '{}'::jsonb,
+    raw_headers JSONB DEFAULT '{}'::jsonb,
+    source_ip TEXT,
+    failure_code TEXT,
+    failure_message TEXT,
+    applied_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    CONSTRAINT provider_webhook_events_status_check CHECK (
+        application_status IN ('received', 'processing', 'applied', 'rejected', 'failed')
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_webhook_events_partner_dedupe
+    ON public.provider_webhook_events(partner_id, dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_provider_webhook_events_provider_event
+    ON public.provider_webhook_events(provider_event_id);
+CREATE INDEX IF NOT EXISTS idx_provider_webhook_events_reference
+    ON public.provider_webhook_events(reference);
+
 CREATE TABLE IF NOT EXISTS public.settlement_lifecycle (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
@@ -1557,6 +1671,345 @@ CREATE TRIGGER trg_settlement_lifecycle_updated_at
 BEFORE UPDATE ON public.settlement_lifecycle
 FOR EACH ROW
 EXECUTE FUNCTION public.set_settlement_lifecycle_updated_at();
+
+CREATE OR REPLACE FUNCTION public.claim_internal_transfer_settlement(
+    p_tx_id UUID,
+    p_worker_id TEXT,
+    p_worker_claim_id TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+    transaction_id UUID,
+    lifecycle_id UUID,
+    append_key TEXT,
+    append_phase TEXT,
+    worker_claim_id TEXT,
+    transaction_status TEXT,
+    lifecycle_stage TEXT,
+    lifecycle_status TEXT,
+    append_already_applied BOOLEAN,
+    already_completed BOOLEAN
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_tx public.transactions%ROWTYPE;
+    v_lifecycle public.settlement_lifecycle%ROWTYPE;
+    v_now TIMESTAMP WITH TIME ZONE := NOW();
+    v_claim_id TEXT := COALESCE(NULLIF(BTRIM(p_worker_claim_id), ''), gen_random_uuid()::TEXT);
+    v_lifecycle_key TEXT := 'INTERNAL_TRANSFER:' || p_tx_id::TEXT || ':PAYSAFE_SETTLEMENT';
+    v_append_key TEXT := 'settlement:' || p_tx_id::TEXT || ':paysafe_release:v2';
+    v_append_phase TEXT := 'PAYSAFE_SETTLEMENT';
+    v_existing_claim_id TEXT;
+    v_append_applied BOOLEAN := FALSE;
+BEGIN
+    IF NULLIF(BTRIM(p_worker_id), '') IS NULL THEN
+        RAISE EXCEPTION 'WORKER_ID_REQUIRED: claim_internal_transfer_settlement requires a worker identifier';
+    END IF;
+
+    SELECT * INTO v_tx
+    FROM public.transactions
+    WHERE id = p_tx_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Transaction % was not found for settlement claim', p_tx_id;
+    END IF;
+
+    INSERT INTO public.settlement_lifecycle (
+        transaction_id,
+        lifecycle_key,
+        rail,
+        direction,
+        operation_type,
+        currency,
+        stage,
+        status,
+        initiated_at,
+        metadata
+    )
+    VALUES (
+        p_tx_id,
+        v_lifecycle_key,
+        'SOVEREIGN_LEDGER',
+        'INTERNAL',
+        'INTERNAL_TRANSFER',
+        COALESCE(v_tx.currency, 'TZS'),
+        'INITIATED',
+        'ACTIVE',
+        v_now,
+        jsonb_build_object(
+            'settlement_model', 'INTERNAL_PAYSAFE_VAULT',
+            'append_key', v_append_key,
+            'append_phase', v_append_phase
+        )
+    )
+    ON CONFLICT (lifecycle_key) DO NOTHING;
+
+    SELECT * INTO v_lifecycle
+    FROM public.settlement_lifecycle
+    WHERE lifecycle_key = v_lifecycle_key
+    FOR UPDATE;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.ledger_append_markers lam
+        WHERE lam.append_key = v_append_key
+           OR (lam.transaction_id = p_tx_id AND lam.append_phase = v_append_phase)
+    ) INTO v_append_applied;
+
+    IF LOWER(COALESCE(v_tx.status, '')) = 'completed'
+       OR COALESCE(v_lifecycle.status, '') = 'COMPLETED'
+       OR COALESCE(v_lifecycle.stage, '') = 'SETTLED' THEN
+        UPDATE public.settlement_lifecycle
+        SET
+            stage = 'SETTLED',
+            status = 'COMPLETED',
+            settled_at = COALESCE(settled_at, v_now),
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                'append_key', v_append_key,
+                'append_phase', v_append_phase,
+                'append_applied', v_append_applied,
+                'last_completion_check_at', v_now
+            )
+        WHERE id = v_lifecycle.id;
+
+        RETURN QUERY
+        SELECT
+            p_tx_id,
+            v_lifecycle.id,
+            v_append_key,
+            v_append_phase,
+            COALESCE(v_lifecycle.metadata->>'worker_claim_id', v_claim_id),
+            v_tx.status,
+            'SETTLED',
+            'COMPLETED',
+            v_append_applied,
+            TRUE;
+        RETURN;
+    END IF;
+
+    IF LOWER(COALESCE(v_tx.status, '')) <> 'processing' THEN
+        RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Transaction % is %, expected processing under settlement lock', p_tx_id, v_tx.status;
+    END IF;
+
+    v_existing_claim_id := NULLIF(v_lifecycle.metadata->>'worker_claim_id', '');
+    IF COALESCE(v_lifecycle.stage, '') = 'PROCESSING'
+       AND v_existing_claim_id IS NOT NULL
+       AND v_existing_claim_id <> v_claim_id
+       AND v_lifecycle.processing_at IS NOT NULL
+       AND v_lifecycle.processing_at > (v_now - INTERVAL '5 minutes') THEN
+        RAISE EXCEPTION 'CONCURRENCY_CONFLICT: Settlement % is already claimed by another worker', p_tx_id;
+    END IF;
+
+    UPDATE public.settlement_lifecycle
+    SET
+        transaction_id = p_tx_id,
+        rail = 'SOVEREIGN_LEDGER',
+        direction = 'INTERNAL',
+        operation_type = 'INTERNAL_TRANSFER',
+        currency = COALESCE(v_lifecycle.currency, v_tx.currency, 'TZS'),
+        stage = 'PROCESSING',
+        status = 'ACTIVE',
+        processing_at = v_now,
+        last_error = NULL,
+        metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+            'worker_id', p_worker_id,
+            'worker_claim_id', v_claim_id,
+            'worker_claimed_at', v_now,
+            'append_key', v_append_key,
+            'append_phase', v_append_phase,
+            'append_applied', v_append_applied,
+            'settlement_model', 'INTERNAL_PAYSAFE_VAULT',
+            'preconditions_verified_at', v_now,
+            'tx_status_verified_under_lock', v_tx.status
+        )
+    WHERE id = v_lifecycle.id;
+
+    RETURN QUERY
+    SELECT
+        p_tx_id,
+        v_lifecycle.id,
+        v_append_key,
+        v_append_phase,
+        v_claim_id,
+        v_tx.status,
+        'PROCESSING',
+        'ACTIVE',
+        v_append_applied,
+        FALSE;
+END;
+$$;
+
+COMMENT ON FUNCTION public.claim_internal_transfer_settlement(UUID, TEXT, TEXT)
+IS 'Claims an internal transfer settlement under a transaction row lock, records a durable worker claim/idempotency marker, verifies the transaction is still processing, and checks whether the settlement append marker was already applied. Enterprise repair/worker path only; not for client-facing flow.';
+
+CREATE OR REPLACE FUNCTION public.complete_internal_transfer_settlement(
+    p_tx_id UUID,
+    p_worker_claim_id TEXT,
+    p_result TEXT DEFAULT 'COMPLETED',
+    p_result_note TEXT DEFAULT NULL,
+    p_zero_sum_valid BOOLEAN DEFAULT TRUE
+)
+RETURNS TABLE (
+    transaction_id UUID,
+    previous_status TEXT,
+    final_status TEXT,
+    lifecycle_stage TEXT,
+    lifecycle_status TEXT,
+    already_finalized BOOLEAN
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_tx public.transactions%ROWTYPE;
+    v_lifecycle public.settlement_lifecycle%ROWTYPE;
+    v_now TIMESTAMP WITH TIME ZONE := NOW();
+    v_result TEXT := UPPER(COALESCE(NULLIF(BTRIM(p_result), ''), 'COMPLETED'));
+    v_lifecycle_key TEXT := 'INTERNAL_TRANSFER:' || p_tx_id::TEXT || ':PAYSAFE_SETTLEMENT';
+    v_append_key TEXT := 'settlement:' || p_tx_id::TEXT || ':paysafe_release:v2';
+    v_append_phase TEXT := 'PAYSAFE_SETTLEMENT';
+BEGIN
+    IF NULLIF(BTRIM(p_worker_claim_id), '') IS NULL THEN
+        RAISE EXCEPTION 'WORKER_CLAIM_REQUIRED: complete_internal_transfer_settlement requires the active worker claim id';
+    END IF;
+
+    SELECT * INTO v_tx
+    FROM public.transactions
+    WHERE id = p_tx_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Transaction % was not found for settlement completion', p_tx_id;
+    END IF;
+
+    SELECT * INTO v_lifecycle
+    FROM public.settlement_lifecycle
+    WHERE lifecycle_key = v_lifecycle_key
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Settlement lifecycle % was not found', v_lifecycle_key;
+    END IF;
+
+    IF LOWER(COALESCE(v_tx.status, '')) = 'completed'
+       OR COALESCE(v_lifecycle.status, '') = 'COMPLETED'
+       OR COALESCE(v_lifecycle.stage, '') = 'SETTLED' THEN
+        UPDATE public.settlement_lifecycle
+        SET
+            stage = 'SETTLED',
+            status = 'COMPLETED',
+            settled_at = COALESCE(settled_at, v_now),
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                'append_key', v_append_key,
+                'append_phase', v_append_phase,
+                'append_applied', TRUE,
+                'completed_at', v_now
+            )
+        WHERE id = v_lifecycle.id;
+
+        RETURN QUERY
+        SELECT
+            p_tx_id,
+            v_tx.status,
+            'completed',
+            'SETTLED',
+            'COMPLETED',
+            TRUE;
+        RETURN;
+    END IF;
+
+    IF COALESCE(v_lifecycle.metadata->>'worker_claim_id', '') <> p_worker_claim_id THEN
+        RAISE EXCEPTION 'CONCURRENCY_CONFLICT: Settlement % completion attempted with stale worker claim', p_tx_id;
+    END IF;
+
+    IF COALESCE(v_lifecycle.stage, '') <> 'PROCESSING' THEN
+        RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Settlement % is %, expected PROCESSING before completion', p_tx_id, v_lifecycle.stage;
+    END IF;
+
+    IF v_result = 'COMPLETED' AND NOT p_zero_sum_valid THEN
+        v_result := 'HELD_FOR_REVIEW';
+    END IF;
+
+    IF v_result = 'COMPLETED' THEN
+        IF LOWER(COALESCE(v_tx.status, '')) <> 'processing' THEN
+            RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Transaction % is %, expected processing before settlement completion', p_tx_id, v_tx.status;
+        END IF;
+
+        UPDATE public.transactions
+        SET
+            status = 'completed',
+            status_notes = COALESCE(NULLIF(BTRIM(p_result_note), ''), 'Settlement finalized by processor.'),
+            updated_at = v_now
+        WHERE id = p_tx_id;
+
+        UPDATE public.settlement_lifecycle
+        SET
+            stage = 'SETTLED',
+            status = 'COMPLETED',
+            settled_at = v_now,
+            last_error = NULL,
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                'append_key', v_append_key,
+                'append_phase', v_append_phase,
+                'append_applied', TRUE,
+                'completed_at', v_now,
+                'completion_result', 'COMPLETED'
+            )
+        WHERE id = v_lifecycle.id;
+
+        RETURN QUERY
+        SELECT
+            p_tx_id,
+            v_tx.status,
+            'completed',
+            'SETTLED',
+            'COMPLETED',
+            FALSE;
+        RETURN;
+    ELSIF v_result = 'HELD_FOR_REVIEW' THEN
+        IF LOWER(COALESCE(v_tx.status, '')) = 'processing' THEN
+            UPDATE public.transactions
+            SET
+                status = 'held_for_review',
+                status_notes = COALESCE(NULLIF(BTRIM(p_result_note), ''), 'Settlement moved to held_for_review.'),
+                updated_at = v_now
+            WHERE id = p_tx_id;
+        END IF;
+
+        UPDATE public.settlement_lifecycle
+        SET
+            stage = 'FAILED',
+            status = 'FAILED',
+            failed_at = v_now,
+            last_error = COALESCE(NULLIF(BTRIM(p_result_note), ''), 'HELD_FOR_REVIEW'),
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                'append_key', v_append_key,
+                'append_phase', v_append_phase,
+                'completion_result', 'HELD_FOR_REVIEW',
+                'held_for_review_at', v_now,
+                'zero_sum_valid', FALSE
+            )
+        WHERE id = v_lifecycle.id;
+
+        RETURN QUERY
+        SELECT
+            p_tx_id,
+            v_tx.status,
+            'held_for_review',
+            'FAILED',
+            'FAILED',
+            FALSE;
+        RETURN;
+    ELSE
+        RAISE EXCEPTION 'INVALID_SETTLEMENT_STATE: Unsupported settlement completion result %', v_result;
+    END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION public.complete_internal_transfer_settlement(UUID, TEXT, TEXT, TEXT, BOOLEAN)
+IS 'Completes an internal transfer settlement under lock using the active worker claim id. It finalizes transaction status only after append/idempotency preconditions were established and records durable lifecycle metadata. Worker path only.';
 
 CREATE TABLE IF NOT EXISTS public.merchant_fees (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
