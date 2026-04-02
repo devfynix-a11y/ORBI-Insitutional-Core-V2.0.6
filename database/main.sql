@@ -1993,6 +1993,7 @@ CREATE OR REPLACE FUNCTION public.post_transaction_v2(
 RETURNS void AS $$
 DECLARE
     leg JSONB;
+    v_leg_wallet_id UUID;
 BEGIN
     IF p_wallet_id IS NOT NULL AND (
         EXISTS (
@@ -2037,26 +2038,40 @@ BEGIN
 
     FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
     LOOP
+        v_leg_wallet_id := (leg->>'wallet_id')::UUID;
+
         IF EXISTS (
             SELECT 1 FROM public.wallets w
-            WHERE w.id = (leg->>'wallet_id')::UUID
+            WHERE w.id = v_leg_wallet_id
               AND (COALESCE(w.is_locked, FALSE)
                    OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
         )
         OR EXISTS (
             SELECT 1 FROM public.platform_vaults v
-            WHERE v.id = (leg->>'wallet_id')::UUID
+            WHERE v.id = v_leg_wallet_id
               AND (COALESCE(v.is_locked, FALSE)
                    OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
         ) THEN
             RAISE EXCEPTION 'WALLET_LOCKED: Wallet % is locked', (leg->>'wallet_id');
         END IF;
 
+        PERFORM 1
+          FROM public.wallets
+         WHERE id = v_leg_wallet_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            PERFORM 1
+              FROM public.platform_vaults
+             WHERE id = v_leg_wallet_id
+             FOR UPDATE;
+        END IF;
+
         INSERT INTO public.financial_ledger (
             id, transaction_id, user_id, wallet_id, entry_type, amount, balance_after, balance_after_encrypted, description
         ) VALUES (
             gen_random_uuid(), p_tx_id, p_user_id, 
-            (leg->>'wallet_id')::UUID, 
+            v_leg_wallet_id, 
             leg->>'entry_type', 
             leg->>'amount', 
             (leg->>'balance_after')::TEXT, 
@@ -2066,12 +2081,12 @@ BEGIN
 
         UPDATE public.wallets 
         SET balance = (leg->>'balance_after')::NUMERIC 
-        WHERE id = (leg->>'wallet_id')::UUID;
+        WHERE id = v_leg_wallet_id;
 
         UPDATE public.platform_vaults 
         SET balance = (leg->>'balance_after')::NUMERIC, 
             encrypted_balance = leg->>'balance_after_encrypted' 
-        WHERE id = (leg->>'wallet_id')::UUID;
+        WHERE id = v_leg_wallet_id;
     END LOOP;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
@@ -2084,22 +2099,37 @@ CREATE OR REPLACE FUNCTION public.append_ledger_entries_v1(
 RETURNS void AS $$
 DECLARE
     leg JSONB;
+    v_leg_wallet_id UUID;
 BEGIN
     FOR leg IN SELECT * FROM jsonb_array_elements(p_legs)
     LOOP
+        v_leg_wallet_id := (leg->>'wallet_id')::UUID;
+
         IF EXISTS (
             SELECT 1 FROM public.wallets w
-            WHERE w.id = (leg->>'wallet_id')::UUID
+            WHERE w.id = v_leg_wallet_id
               AND (COALESCE(w.is_locked, FALSE)
                    OR lower(COALESCE(w.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
         )
         OR EXISTS (
             SELECT 1 FROM public.platform_vaults v
-            WHERE v.id = (leg->>'wallet_id')::UUID
+            WHERE v.id = v_leg_wallet_id
               AND (COALESCE(v.is_locked, FALSE)
                    OR lower(COALESCE(v.status, '')) IN ('locked', 'frozen', 'blocked', 'suspended'))
         ) THEN
             RAISE EXCEPTION 'WALLET_LOCKED: Wallet % is locked', (leg->>'wallet_id');
+        END IF;
+
+        PERFORM 1
+          FROM public.wallets
+         WHERE id = v_leg_wallet_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            PERFORM 1
+              FROM public.platform_vaults
+             WHERE id = v_leg_wallet_id
+             FOR UPDATE;
         END IF;
 
         INSERT INTO public.financial_ledger (
@@ -2107,7 +2137,7 @@ BEGIN
         ) VALUES (
             gen_random_uuid(), p_tx_id, 
             (SELECT user_id FROM public.transactions WHERE id = p_tx_id),
-            (leg->>'wallet_id')::UUID, 
+            v_leg_wallet_id, 
             leg->>'entry_type', 
             leg->>'amount', 
             (leg->>'balance_after')::TEXT, 
@@ -2117,12 +2147,12 @@ BEGIN
 
         UPDATE public.wallets 
         SET balance = (leg->>'balance_after')::NUMERIC 
-        WHERE id = (leg->>'wallet_id')::UUID;
+        WHERE id = v_leg_wallet_id;
 
         UPDATE public.platform_vaults 
         SET balance = (leg->>'balance_after')::NUMERIC, 
             encrypted_balance = leg->>'balance_after_encrypted' 
-        WHERE id = (leg->>'wallet_id')::UUID;
+        WHERE id = v_leg_wallet_id;
     END LOOP;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
