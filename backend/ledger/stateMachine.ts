@@ -85,6 +85,11 @@ export class TransactionStateMachine {
      * Transitions a transaction to a new state and emits an event.
      */
     public static transition(txId: string, currentStatus: TransactionStatus, nextStatus: TransactionStatus, metadata: any = {}): void {
+        if (currentStatus === nextStatus) {
+            console.info(`[StateMachine] Skipping no-op transition for TX ${txId}: ${currentStatus}`);
+            return;
+        }
+
         if (!this.isValidTransition(currentStatus, nextStatus)) {
             throw new Error(`INVALID_STATE_TRANSITION: Cannot move from ${currentStatus} to ${nextStatus} for TX ${txId}`);
         }

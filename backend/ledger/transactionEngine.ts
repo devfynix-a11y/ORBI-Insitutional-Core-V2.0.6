@@ -35,7 +35,6 @@ export class BankingEngineService {
 
             // 1. STATE: CREATED
             let currentStatus: TransactionStatus = 'created';
-            TransactionStateMachine.transition(txId, 'created', 'created', { intent });
 
             // 2. Calculate Regulatory Fees
             const fees = await RegulatoryService.calculateFees(
