@@ -1,14 +1,16 @@
-
 import { TransactionService } from '../../ledger/transactionService.js';
 import { Audit } from '../security/audit.js';
 import { getAdminSupabase, getSupabase } from '../../services/supabaseClient.js';
-import { RegulatoryService } from '../ledger/regulatoryService.js';
 import { UUID } from '../../services/utils.js';
 import { ProviderFactory } from './providers/ProviderFactory.js';
-import crypto from 'crypto';
-import { DataVault } from '../security/encryption.js';
-import { RedisClusterFactory } from '../infrastructure/RedisClusterFactory.js';
+import { toProviderDomainError } from './providers/ProviderErrorNormalizer.js';
+import { providerRetryPolicy } from './providers/ProviderRetryPolicy.js';
+import {
+    WebhookSecurityError,
+    webhookVerificationService,
+} from './WebhookVerificationService.js';
 import { institutionalFundsService } from './InstitutionalFundsService.js';
+import { providerWebhookEventLedger } from './ProviderWebhookEventLedger.js';
 
 /**
  * SOVEREIGN WEBHOOK LISTENER (V4.0)
@@ -16,63 +18,6 @@ import { institutionalFundsService } from './InstitutionalFundsService.js';
  */
 class WebhookHandler {
     private ledger = new TransactionService();
-    private readonly requireWebhookSignatures =
-        process.env.ORBI_REQUIRE_WEBHOOK_SIGNATURES !== 'false';
-    private readonly allowProcessLocalReplayStore =
-        process.env.NODE_ENV !== 'production' &&
-        process.env.ORBI_ALLOW_PROCESS_LOCAL_WEBHOOK_REPLAY_STORE === 'true';
-    private readonly replayWindowSeconds =
-        Number(process.env.ORBI_WEBHOOK_REPLAY_WINDOW_SECONDS || 60 * 60);
-    private readonly replayStore = new Map<string, number>();
-
-    /**
-     * VERIFY HMAC SIGNATURE
-     */
-    private verifySignature(payload: any, signature: string, secret: string): boolean {
-        if (!signature || !secret) return false;
-        const payloadString = typeof payload === 'string' ? payload : JSON.stringify(payload);
-        const expectedSignature = crypto
-            .createHmac('sha256', secret)
-            .update(payloadString)
-            .digest('hex');
-        // Use timingSafeEqual to prevent timing attacks
-        const normalizedSignature = signature.replace(/^sha256=/i, '').trim();
-        const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
-        const providedBuffer = Buffer.from(normalizedSignature, 'utf8');
-        if (expectedBuffer.length !== providedBuffer.length) return false;
-        return crypto.timingSafeEqual(expectedBuffer, providedBuffer);
-    }
-
-    private computeReplayKey(
-        partnerId: string,
-        payload: any,
-        rawPayload?: string,
-        explicitEventId?: string,
-    ): string {
-        const stablePayload = rawPayload || JSON.stringify(payload || {});
-        const fingerprint = explicitEventId || crypto.createHash('sha256').update(stablePayload).digest('hex');
-        return `webhook:${partnerId}:${fingerprint}`;
-    }
-
-    private async registerReplayKey(key: string): Promise<boolean> {
-        const redis = RedisClusterFactory.getClient('monitor');
-        if (redis) {
-            const result = await redis.set(key, '1', 'EX', this.replayWindowSeconds, 'NX');
-            return result === 'OK';
-        }
-
-        if (!this.allowProcessLocalReplayStore) {
-            return true;
-        }
-
-        const now = Date.now();
-        for (const [storedKey, expiry] of this.replayStore.entries()) {
-            if (expiry <= now) this.replayStore.delete(storedKey);
-        }
-        if (this.replayStore.has(key)) return false;
-        this.replayStore.set(key, now + this.replayWindowSeconds * 1000);
-        return true;
-    }
 
     /**
      * PROCESS PROVIDER CALLBACK
@@ -80,113 +25,236 @@ class WebhookHandler {
     public async handleCallback(
         payload: any,
         partnerId: string,
-        signature?: string,
-        rawPayload?: string,
-        explicitEventId?: string,
+        context: {
+            signature?: string;
+            rawPayload?: string;
+            explicitEventId?: string;
+            headers?: Record<string, string | undefined>;
+            sourceIp?: string;
+        } = {},
     ) {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return;
 
-        // 1. Resolve Partner Metadata for Parsing Logic
         const { data: partner } = await sb.from('financial_partners').select('*').eq('id', partnerId).single();
         if (!partner) {
             console.error(`[Webhook] PARTNER_UNKNOWN: id ${partnerId}`);
             return;
         }
 
-        // 2. Verify Signature (CRITICAL FOR BANKING)
-        const webhookSecret =
-            typeof partner.webhook_secret === 'string'
-                ? await DataVault.decrypt(partner.webhook_secret)
-                : '';
+        const inspection = webhookVerificationService.inspectWebhook(
+            partner,
+            payload,
+            context.signature,
+            context.rawPayload,
+            context.explicitEventId,
+            context.headers,
+        );
+        const receipt = await providerWebhookEventLedger.recordReceipt({
+            partner_id: partner.id,
+            provider_event_id: inspection.providerEventId || null,
+            dedupe_key: inspection.dedupeKey,
+            replay_key: inspection.replayKey,
+            event_timestamp: inspection.eventTimestamp || null,
+            timestamp_source: inspection.eventTimestampSource || null,
+            signature_status: inspection.signatureStatus,
+            freshness_status: inspection.freshnessStatus,
+            verification_status: 'pending',
+            payload_sha256: inspection.payloadSha256,
+            payload,
+            raw_headers: context.headers || {},
+            source_ip: context.sourceIp || null,
+        });
 
-        if (webhookSecret && signature) {
-            const verificationPayload = rawPayload || payload;
-            const isValid = this.verifySignature(verificationPayload, signature, webhookSecret);
-            if (!isValid) {
-                console.error(`[Webhook] SECURITY_ALERT: Invalid signature for partner ${partner.name}`);
-                await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SIGNATURE_FAILED', { partnerId, payload });
-                throw new Error('INVALID_SIGNATURE');
-            }
-        } else if (webhookSecret && !signature) {
-            console.error(`[Webhook] SECURITY_ALERT: Missing signature for partner ${partner.name}`);
-            await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SIGNATURE_MISSING', { partnerId });
-            throw new Error('MISSING_SIGNATURE');
-        } else if (this.requireWebhookSignatures && !partner.webhook_secret) {
-            console.error(`[Webhook] SECURITY_ALERT: No webhook secret configured for partner ${partner.name}`);
-            await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SECRET_MISSING', { partnerId });
-            throw new Error('WEBHOOK_SECRET_NOT_CONFIGURED');
+        if (receipt.duplicate && ['applied', 'processing', 'rejected'].includes(receipt.record.application_status)) {
+            await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_DUPLICATE_IGNORED', {
+                partnerId,
+                providerEventId: receipt.record.provider_event_id,
+                dedupeKey: receipt.record.dedupe_key,
+                applicationStatus: receipt.record.application_status,
+            });
+            return { duplicate: true, eventId: receipt.record.id };
         }
 
-        const replayKey = this.computeReplayKey(partnerId, payload, rawPayload, explicitEventId);
-        const accepted = await this.registerReplayKey(replayKey);
-        if (!accepted) {
-            console.warn(`[Webhook] REPLAY_DETECTED for partner ${partner.name}`);
-            await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_REPLAY_BLOCKED', { partnerId, replayKey });
-            throw new Error('REPLAY_DETECTED');
+        try {
+            await webhookVerificationService.verifyWebhook(
+                partner,
+                payload,
+                context.signature,
+                context.rawPayload,
+                context.explicitEventId,
+                context.headers,
+            );
+            await providerWebhookEventLedger.markVerified(receipt.record.id);
+        } catch (verificationError: any) {
+            const message = String(verificationError?.message || verificationError);
+            const inspectionFromError =
+                verificationError instanceof WebhookSecurityError
+                    ? verificationError.inspection
+                    : inspection;
+            if (message === 'INVALID_SIGNATURE') {
+                console.error(`[Webhook] SECURITY_ALERT: Invalid signature for partner ${partner.name}`);
+                await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SIGNATURE_FAILED', {
+                    partnerId,
+                    payloadSha256: inspectionFromError.payloadSha256,
+                    providerEventId: inspectionFromError.providerEventId,
+                });
+            } else if (message === 'MISSING_SIGNATURE') {
+                console.error(`[Webhook] SECURITY_ALERT: Missing signature for partner ${partner.name}`);
+                await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SIGNATURE_MISSING', { partnerId });
+            } else if (message === 'WEBHOOK_SECRET_NOT_CONFIGURED') {
+                console.error(`[Webhook] SECURITY_ALERT: No webhook secret configured for partner ${partner.name}`);
+                await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_SECRET_MISSING', { partnerId });
+            } else if (message === 'REPLAY_DETECTED') {
+                console.warn(`[Webhook] REPLAY_DETECTED for partner ${partner.name}`);
+                await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_REPLAY_BLOCKED', {
+                    partnerId,
+                    dedupeKey: inspectionFromError.dedupeKey,
+                });
+            } else if (message === 'STALE_TIMESTAMP' || message === 'INVALID_TIMESTAMP') {
+                await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_TIMESTAMP_REJECTED', {
+                    partnerId,
+                    providerEventId: inspectionFromError.providerEventId,
+                    eventTimestamp: inspectionFromError.eventTimestamp,
+                    source: inspectionFromError.eventTimestampSource,
+                    reason: message,
+                });
+            }
+            await providerWebhookEventLedger.markRejected(receipt.record.id, message, message);
+            throw verificationError;
         }
 
         const providerNode = ProviderFactory.getProvider(partner);
-        const { reference, status, message, providerEventId } = providerNode.parseCallback(payload, partner);
-        
+        let callback;
+        try {
+            callback = await providerRetryPolicy.execute(
+                partner,
+                'WEBHOOK_PARSE',
+                async () => providerNode.parseCallback(payload, partner, { headers: context.headers }),
+                { maxAttempts: 1 },
+            );
+        } catch (parseError: any) {
+            const normalized = toProviderDomainError(parseError, partner);
+            await providerWebhookEventLedger.markFailed(
+                receipt.record.id,
+                'WEBHOOK_PARSE_FAILED',
+                normalized.message,
+            );
+            await Audit.log('SECURITY', 'SYSTEM', 'WEBHOOK_PARSE_FAILED', {
+                partnerId,
+                providerCode: normalized.providerCode,
+                category: normalized.category,
+                retryable: normalized.retryable,
+                message: normalized.message,
+            });
+            throw normalized;
+        }
+        const { reference, status, message, providerEventId } = callback;
+        await providerWebhookEventLedger.markParsed(receipt.record.id, {
+            reference,
+            normalized_status: status,
+            raw_status: callback.rawStatus || null,
+            provider_event_id: providerEventId || inspection.providerEventId || null,
+        });
+
+        const claimed = await providerWebhookEventLedger.claimForApplication(receipt.record.id);
+        if (!claimed) {
+            await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_DUPLICATE_IGNORED', {
+                partnerId,
+                providerEventId: providerEventId || inspection.providerEventId,
+                dedupeKey: inspection.dedupeKey,
+                reference,
+            });
+            return { duplicate: true, eventId: receipt.record.id };
+        }
+
         console.info(`[Webhook] Signal for ${reference} from ${partner.name}: ${status}`);
 
-        // 2. Try the standard transaction trace first
+        try {
+            const result = await this.applyNormalizedCallback(
+                sb,
+                partner,
+                {
+                    reference,
+                    status,
+                    message,
+                    providerEventId: providerEventId || inspection.providerEventId,
+                },
+                payload,
+            );
+            await providerWebhookEventLedger.markApplied(receipt.record.id);
+            await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_PROCESSED', {
+                provider: partner.name,
+                reference,
+                status,
+                providerEventId: providerEventId || inspection.providerEventId,
+                traceId: UUID.generate(),
+                eventLedgerId: receipt.record.id,
+                route: result?.route || 'TRANSACTION',
+                movementId: result?.movementId || null,
+            });
+            return result;
+        } catch (applicationError: any) {
+            await providerWebhookEventLedger.markFailed(
+                receipt.record.id,
+                applicationError?.message || 'WEBHOOK_APPLICATION_FAILED',
+                String(applicationError?.message || applicationError),
+            );
+            throw applicationError;
+        }
+    }
+
+    private async applyNormalizedCallback(
+        sb: any,
+        partner: any,
+        callback: {
+            reference: string;
+            status: 'completed' | 'failed' | 'processing' | 'pending';
+            message: string;
+            providerEventId?: string;
+        },
+        rawPayload: any,
+    ) {
+        const { reference, status, message, providerEventId } = callback;
+
         const { data: tx } = await sb.from('transactions')
             .select('*')
             .or(`id.eq.${reference},reference_id.eq.${reference}`)
             .maybeSingle();
-        
+
         if (!tx) {
             try {
                 const depositResult = await institutionalFundsService.handleWebhookDepositIntent(
-                    partnerId,
+                    partner.id,
                     reference,
                     status,
                     message,
                     providerEventId,
-                    payload,
+                    rawPayload,
                 );
-                await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_PROCESSED', {
-                    provider: partner.name,
+                return {
+                    route: 'EXTERNAL_DEPOSIT_INTENT',
+                    movementId: depositResult?.movement?.id || null,
+                    result: depositResult,
+                };
+            } catch {
+                const movementResult = await institutionalFundsService.handleWebhookMovement(
+                    partner.id,
                     reference,
                     status,
+                    message,
                     providerEventId,
-                    traceId: UUID.generate(),
-                    route: 'EXTERNAL_DEPOSIT_INTENT',
-                    movementId: (depositResult as any)?.movement?.id || null,
-                });
-                return depositResult;
-            } catch (depositError: any) {
-                try {
-                    const movementResult = await institutionalFundsService.handleWebhookMovement(
-                        partnerId,
-                        reference,
-                        status,
-                        message,
-                        providerEventId,
-                        payload,
-                    );
-                    await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_PROCESSED', {
-                        provider: partner.name,
-                        reference,
-                        status,
-                        providerEventId,
-                        traceId: UUID.generate(),
-                        route: 'EXTERNAL_MOVEMENT',
-                        movementId: (movementResult as any)?.movement?.id || null,
-                    });
-                    return movementResult;
-                } catch (movementError: any) {
-                    console.error(`[Webhook] TRACE_LOST: Unknown tx ${reference}`);
-                    throw movementError;
-                }
+                    rawPayload,
+                );
+                return {
+                    route: 'EXTERNAL_MOVEMENT',
+                    movementId: movementResult?.movement?.id || null,
+                    result: movementResult,
+                };
             }
         }
 
         const txId = tx.id;
-
-        // 3. Finalize Ledger Update
         if (status === 'completed') {
             await this.ledger.updateTransactionStatus(txId, 'completed', `Verified by ${partner.name}: ${message}`);
         } else if (status === 'processing' || status === 'pending') {
@@ -195,9 +263,10 @@ class WebhookHandler {
             await this.ledger.updateTransactionStatus(txId, 'failed', message || 'Provider rejection.');
         }
 
-        await Audit.log('FINANCIAL', 'SYSTEM', 'WEBHOOK_PROCESSED', { 
-            provider: partner.name, reference, status, providerEventId, traceId: UUID.generate() 
-        });
+        return {
+            route: 'TRANSACTION',
+            txId,
+        };
     }
 }
 
