@@ -19,11 +19,7 @@ import {
   expireSharedBudgetInvitationIfNeeded,
 } from './wealthCollab.js';
 import { createSharedBudgetSpendExecutor } from './wealthSharedBudgetFinance.js';
-import {
-  updateWealthSourceBalance,
-  createWealthTransaction,
-  insertBillReserveLedger,
-} from './wealthBillReserve.js';
+import { applyBillReserveAdjustment } from './wealthBillReserve.js';
 import { registerBillReserveRoutes } from './wealthBillReserveRoutes.js';
 import { registerSharedPotRoutes } from './wealthSharedPotRoutes.js';
 import { registerSharedBudgetRoutes } from './wealthSharedBudgetRoutes.js';
@@ -154,9 +150,7 @@ export const registerWealthRoutes = (v1: Router, deps: Deps) => {
     wealthNumber,
     resolveWealthSourceWallet,
     assertBillPaymentSourceAllowed,
-    createWealthTransaction,
-    updateWealthSourceBalance,
-    insertBillReserveLedger,
+    applyBillReserveAdjustment,
   });
 
   registerSharedPotRoutes(v1, {

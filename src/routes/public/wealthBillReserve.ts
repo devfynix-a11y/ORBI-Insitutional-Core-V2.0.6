@@ -1,4 +1,10 @@
-export const updateWealthSourceBalance = async (
+const isMissingRpc = (error: any, functionName: string): boolean => {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return code === 'PGRST202' || code === '42883' || message.includes(functionName);
+};
+
+const updateWealthSourceBalance = async (
   sb: any,
   sourceTable: 'platform_vaults' | 'wallets',
   sourceRecord: any,
@@ -16,7 +22,7 @@ export const updateWealthSourceBalance = async (
   if (error) throw new Error(error.message);
 };
 
-export const createWealthTransaction = async (
+const createWealthTransaction = async (
   sb: any,
   userId: string,
   sourceRecord: any,
@@ -53,7 +59,7 @@ export const createWealthTransaction = async (
   return data;
 };
 
-export const insertBillReserveLedger = async (
+const insertBillReserveLedger = async (
   sb: any,
   {
     transactionId,
@@ -108,4 +114,124 @@ export const insertBillReserveLedger = async (
   ];
   const { error } = await sb.from('financial_ledger').insert(rows);
   if (error) throw new Error(error.message);
+};
+
+type ApplyBillReserveAdjustmentInput = {
+  sb: any;
+  userId: string;
+  reserveId: string;
+  sourceRecord: any;
+  sourceTable: 'platform_vaults' | 'wallets';
+  amount: number;
+  currency: string;
+  description: string;
+  metadata: Record<string, any>;
+  action: 'LOCK' | 'RELEASE';
+  reserveBalanceAfter: number;
+  transactionType?: string;
+  transactionStatus?: string;
+};
+
+export const applyBillReserveAdjustment = async (input: ApplyBillReserveAdjustmentInput) => {
+  const {
+    sb,
+    userId,
+    reserveId,
+    sourceRecord,
+    sourceTable,
+    amount,
+    currency,
+    description,
+    metadata,
+    action,
+    reserveBalanceAfter,
+    transactionType,
+    transactionStatus,
+  } = input;
+
+  const sourceBalanceBefore = Number(sourceRecord.balance || 0);
+  const sourceBalanceAfter = action === 'LOCK'
+    ? sourceBalanceBefore - amount
+    : sourceBalanceBefore + amount;
+
+  const { data, error } = await sb.rpc('bill_reserve_adjust_v1', {
+    p_user_id: userId,
+    p_reserve_id: reserveId,
+    p_source_wallet_id: sourceRecord.id,
+    p_amount: amount,
+    p_action: action,
+    p_currency: currency,
+    p_description: description,
+    p_metadata: {
+      ...metadata,
+      source_table: sourceTable,
+      source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
+      wealth_impact_type: 'PLANNED',
+      transaction_type: transactionType || 'internal_transfer',
+      transaction_status: transactionStatus || 'completed',
+    },
+    p_desired_locked_balance: reserveBalanceAfter,
+  });
+
+  if (!error) {
+    const txId = data?.transaction_id || null;
+    const reserve = data?.reserve || null;
+    let transaction = null;
+    if (txId) {
+      const { data: tx } = await sb
+        .from('transactions')
+        .select('*')
+        .eq('id', txId)
+        .maybeSingle();
+      transaction = tx || null;
+    }
+    return {
+      transaction,
+      sourceBalanceAfter: Number(data?.source_balance_after ?? sourceBalanceAfter),
+      reserve,
+      atomic_commit: true,
+    };
+  }
+
+  if (!isMissingRpc(error, 'bill_reserve_adjust_v1')) {
+    throw new Error(error.message);
+  }
+
+  const transaction = await createWealthTransaction(
+    sb,
+    userId,
+    sourceRecord,
+    amount,
+    currency,
+    description,
+    'PLANNED',
+    metadata,
+    { transactionType, transactionStatus },
+  );
+
+  await updateWealthSourceBalance(
+    sb,
+    sourceTable,
+    sourceRecord,
+    userId,
+    sourceBalanceAfter,
+  );
+
+  await insertBillReserveLedger(sb, {
+    transactionId: transaction.id,
+    userId,
+    sourceRecord,
+    reserveId,
+    amount,
+    sourceBalanceAfter,
+    reserveBalanceAfter,
+    action,
+  });
+
+  return {
+    transaction,
+    sourceBalanceAfter,
+    reserve: null,
+    atomic_commit: false,
+  };
 };

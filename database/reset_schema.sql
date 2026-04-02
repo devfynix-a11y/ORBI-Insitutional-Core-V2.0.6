@@ -8,6 +8,8 @@ DROP FUNCTION IF EXISTS public.post_transaction_v2(UUID, UUID, UUID, UUID, TEXT,
 DROP FUNCTION IF EXISTS public.append_ledger_entries_v1(UUID, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS public.shared_pot_contribute_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS public.shared_pot_withdraw_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB, TEXT, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS public.card_settle_v1(TEXT, UUID, UUID, NUMERIC) CASCADE;
+DROP FUNCTION IF EXISTS public.bill_reserve_adjust_v1(UUID, UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, JSONB, NUMERIC) CASCADE;
 DROP FUNCTION IF EXISTS public.settle_bill_payment_from_reserve_v1(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.update_wallet_balance(UUID, NUMERIC, TEXT) CASCADE;
 DROP FUNCTION IF EXISTS public.delete_old_activity() CASCADE;
@@ -2538,6 +2540,421 @@ BEGIN
         'target_table', v_target_table,
         'target_wallet_role', v_target_role,
         'member_contributed_amount', v_new_contributed_amount
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.card_settle_v1(
+    p_card_transaction_id TEXT,
+    p_target_wallet_id UUID,
+    p_fee_wallet_id UUID,
+    p_fee_amount NUMERIC DEFAULT 0
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_card_tx public.card_transactions%ROWTYPE;
+    v_target_wallet public.wallets%ROWTYPE;
+    v_fee_wallet public.wallets%ROWTYPE;
+    v_fee_vault public.platform_vaults%ROWTYPE;
+    v_financial_tx public.transactions%ROWTYPE;
+    v_target_balance_after NUMERIC;
+    v_fee_balance_before NUMERIC := 0;
+    v_fee_balance_after NUMERIC := 0;
+    v_reference_id TEXT;
+BEGIN
+    IF p_card_transaction_id IS NULL OR trim(p_card_transaction_id) = '' THEN
+        RAISE EXCEPTION 'CARD_TRANSACTION_REQUIRED';
+    END IF;
+
+    IF p_target_wallet_id IS NULL THEN
+        RAISE EXCEPTION 'TARGET_WALLET_REQUIRED';
+    END IF;
+
+    SELECT *
+      INTO v_card_tx
+      FROM public.card_transactions
+     WHERE id = p_card_transaction_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CARD_TRANSACTION_NOT_FOUND';
+    END IF;
+
+    IF upper(COALESCE(v_card_tx.status, '')) <> 'AUTHORIZED' THEN
+        RAISE EXCEPTION 'CARD_TRANSACTION_NOT_AUTHORIZED';
+    END IF;
+
+    SELECT *
+      INTO v_target_wallet
+      FROM public.wallets
+     WHERE id = p_target_wallet_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'TARGET_WALLET_NOT_FOUND';
+    END IF;
+
+    IF COALESCE(v_card_tx.amount, 0) <= 0 THEN
+        RAISE EXCEPTION 'INVALID_CARD_SETTLEMENT_AMOUNT';
+    END IF;
+
+    IF COALESCE(p_fee_amount, 0) < 0 THEN
+        RAISE EXCEPTION 'INVALID_FEE_AMOUNT';
+    END IF;
+
+    IF COALESCE(p_fee_amount, 0) > 0 THEN
+        IF p_fee_wallet_id IS NULL THEN
+            RAISE EXCEPTION 'SYSTEM_FEE_WALLET_REQUIRED';
+        END IF;
+
+        SELECT *
+          INTO v_fee_wallet
+          FROM public.wallets
+         WHERE id = p_fee_wallet_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            SELECT *
+              INTO v_fee_vault
+              FROM public.platform_vaults
+             WHERE id = p_fee_wallet_id
+             FOR UPDATE;
+        END IF;
+
+        IF v_fee_wallet.id IS NULL AND v_fee_vault.id IS NULL THEN
+            RAISE EXCEPTION 'SYSTEM_FEE_WALLET_NOT_FOUND';
+        END IF;
+
+        v_fee_balance_before := COALESCE(v_fee_wallet.balance, v_fee_vault.balance, 0);
+        v_fee_balance_after := v_fee_balance_before + p_fee_amount;
+    END IF;
+
+    v_target_balance_after := COALESCE(v_target_wallet.balance, 0) + COALESCE(v_card_tx.amount, 0);
+    v_reference_id := 'card_' || trim(p_card_transaction_id);
+
+    INSERT INTO public.transactions (
+        id,
+        reference_id,
+        user_id,
+        wallet_id,
+        to_wallet_id,
+        amount,
+        currency,
+        description,
+        type,
+        status,
+        date,
+        metadata
+    ) VALUES (
+        gen_random_uuid(),
+        v_reference_id,
+        COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
+        NULL,
+        v_target_wallet.id,
+        v_card_tx.amount::text,
+        upper(COALESCE(NULLIF(trim(v_card_tx.currency), ''), 'TZS')),
+        'Card payment settlement - ' || p_card_transaction_id,
+        'deposit',
+        'completed',
+        CURRENT_DATE,
+        jsonb_build_object(
+            'card_transaction_id', p_card_transaction_id,
+            'source_wallet_type', 'EXTERNAL',
+            'target_wallet_type', COALESCE(v_target_wallet.wallet_type, 'INTERNAL'),
+            'settlement_path', 'SOVEREIGN_LEDGER',
+            'fee_wallet_id', p_fee_wallet_id
+        )
+    )
+    RETURNING * INTO v_financial_tx;
+
+    INSERT INTO public.financial_ledger (
+        id,
+        transaction_id,
+        user_id,
+        wallet_id,
+        entry_type,
+        amount,
+        balance_after,
+        description
+    ) VALUES (
+        gen_random_uuid(),
+        v_financial_tx.id,
+        COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
+        v_target_wallet.id,
+        'CREDIT',
+        v_card_tx.amount::text,
+        v_target_balance_after::text,
+        'Card deposit - ' || p_card_transaction_id
+    );
+
+    IF COALESCE(p_fee_amount, 0) > 0 THEN
+        INSERT INTO public.financial_ledger (
+            id,
+            transaction_id,
+            user_id,
+            wallet_id,
+            entry_type,
+            amount,
+            balance_after,
+            description
+        ) VALUES (
+            gen_random_uuid(),
+            v_financial_tx.id,
+            COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
+            COALESCE(v_fee_wallet.id, v_fee_vault.id),
+            'CREDIT',
+            p_fee_amount::text,
+            v_fee_balance_after::text,
+            'Card processor fee - ' || p_card_transaction_id
+        );
+    END IF;
+
+    UPDATE public.wallets
+       SET balance = v_target_balance_after,
+           updated_at = NOW()
+     WHERE id = v_target_wallet.id;
+
+    IF COALESCE(p_fee_amount, 0) > 0 THEN
+        IF v_fee_wallet.id IS NOT NULL THEN
+            UPDATE public.wallets
+               SET balance = v_fee_balance_after,
+                   updated_at = NOW()
+             WHERE id = v_fee_wallet.id;
+        ELSE
+            UPDATE public.platform_vaults
+               SET balance = v_fee_balance_after,
+                   updated_at = NOW()
+             WHERE id = v_fee_vault.id;
+        END IF;
+    END IF;
+
+    UPDATE public.card_transactions
+       SET status = 'SETTLED',
+           settled_at = NOW(),
+           updated_at = NOW()
+     WHERE id = p_card_transaction_id;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'settlement_id', v_financial_tx.id,
+        'transaction_id', p_card_transaction_id,
+        'amount', COALESCE(v_card_tx.amount, 0),
+        'fee', COALESCE(p_fee_amount, 0),
+        'target_balance_after', v_target_balance_after,
+        'fee_balance_after', v_fee_balance_after,
+        'status', 'COMPLETED'
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION public.bill_reserve_adjust_v1(
+    p_user_id UUID,
+    p_reserve_id UUID,
+    p_source_wallet_id UUID,
+    p_amount NUMERIC,
+    p_action TEXT,
+    p_currency TEXT DEFAULT 'TZS',
+    p_description TEXT DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb,
+    p_desired_locked_balance NUMERIC DEFAULT NULL
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_reserve public.bill_reserves%ROWTYPE;
+    v_source_wallet public.wallets%ROWTYPE;
+    v_source_vault public.platform_vaults%ROWTYPE;
+    v_source_table TEXT;
+    v_source_balance_before NUMERIC;
+    v_source_balance_after NUMERIC;
+    v_locked_balance_before NUMERIC;
+    v_locked_balance_after NUMERIC;
+    v_action TEXT := upper(COALESCE(trim(p_action), ''));
+    v_tx public.transactions%ROWTYPE;
+    v_reference_id TEXT := 'wealth_' || extract(epoch from now())::bigint || '_' || substr(md5(random()::text), 1, 8);
+    v_source_wallet_role TEXT;
+BEGIN
+    IF p_reserve_id IS NULL THEN
+        RAISE EXCEPTION 'BILL_RESERVE_REQUIRED';
+    END IF;
+    IF p_source_wallet_id IS NULL THEN
+        RAISE EXCEPTION 'SOURCE_WALLET_REQUIRED';
+    END IF;
+    IF p_amount IS NULL OR p_amount < 0 THEN
+        RAISE EXCEPTION 'INVALID_AMOUNT';
+    END IF;
+    IF v_action NOT IN ('LOCK', 'RELEASE') THEN
+        RAISE EXCEPTION 'INVALID_BILL_RESERVE_ACTION';
+    END IF;
+
+    SELECT *
+      INTO v_reserve
+      FROM public.bill_reserves
+     WHERE id = p_reserve_id
+       AND user_id = p_user_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'BILL_RESERVE_NOT_FOUND';
+    END IF;
+
+    SELECT *
+      INTO v_source_wallet
+      FROM public.wallets
+     WHERE id = p_source_wallet_id
+       AND user_id = p_user_id
+     FOR UPDATE;
+
+    IF FOUND THEN
+        v_source_table := 'wallets';
+        v_source_balance_before := COALESCE(v_source_wallet.balance, 0);
+        v_source_wallet_role := COALESCE(v_source_wallet.type, NULL);
+    ELSE
+        SELECT *
+          INTO v_source_vault
+          FROM public.platform_vaults
+         WHERE id = p_source_wallet_id
+           AND user_id = p_user_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'SOURCE_WALLET_NOT_FOUND';
+        END IF;
+
+        v_source_table := 'platform_vaults';
+        v_source_balance_before := COALESCE(v_source_vault.balance, 0);
+        v_source_wallet_role := COALESCE(v_source_vault.vault_role, NULL);
+    END IF;
+
+    v_locked_balance_before := COALESCE(v_reserve.locked_balance, 0);
+    v_locked_balance_after := COALESCE(p_desired_locked_balance,
+      CASE WHEN v_action = 'LOCK'
+        THEN v_locked_balance_before + p_amount
+        ELSE GREATEST(v_locked_balance_before - p_amount, 0)
+      END
+    );
+
+    IF v_action = 'LOCK' THEN
+        IF v_source_balance_before < p_amount THEN
+            RAISE EXCEPTION 'INSUFFICIENT_FUNDS';
+        END IF;
+        v_source_balance_after := v_source_balance_before - p_amount;
+    ELSE
+        IF v_locked_balance_before < p_amount THEN
+            RAISE EXCEPTION 'BILL_RESERVE_INSUFFICIENT_BALANCE';
+        END IF;
+        v_source_balance_after := v_source_balance_before + p_amount;
+    END IF;
+
+    INSERT INTO public.transactions (
+        id,
+        reference_id,
+        user_id,
+        wallet_id,
+        amount,
+        currency,
+        description,
+        type,
+        status,
+        date,
+        wealth_impact_type,
+        protection_state,
+        allocation_source,
+        metadata
+    ) VALUES (
+        gen_random_uuid(),
+        v_reference_id,
+        p_user_id,
+        p_source_wallet_id,
+        p_amount::text,
+        upper(COALESCE(NULLIF(trim(p_currency), ''), 'TZS')),
+        COALESCE(NULLIF(trim(p_description), ''), 'Bill reserve adjustment'),
+        COALESCE(NULLIF(trim(p_metadata->>'transaction_type'), ''), 'internal_transfer'),
+        COALESCE(NULLIF(trim(p_metadata->>'transaction_status'), ''), 'completed'),
+        CURRENT_DATE,
+        COALESCE(NULLIF(trim(p_metadata->>'wealth_impact_type'), ''), 'PLANNED'),
+        'OPEN',
+        NULLIF(trim(COALESCE(p_metadata->>'allocation_source', '')), ''),
+        p_metadata
+    )
+    RETURNING * INTO v_tx;
+
+    IF v_source_table = 'wallets' THEN
+        UPDATE public.wallets
+           SET balance = v_source_balance_after,
+               updated_at = NOW()
+         WHERE id = p_source_wallet_id
+           AND user_id = p_user_id;
+    ELSE
+        UPDATE public.platform_vaults
+           SET balance = v_source_balance_after,
+               updated_at = NOW()
+         WHERE id = p_source_wallet_id
+           AND user_id = p_user_id;
+    END IF;
+
+    UPDATE public.bill_reserves
+       SET locked_balance = v_locked_balance_after,
+           source_wallet_id = p_source_wallet_id,
+           updated_at = NOW()
+     WHERE id = p_reserve_id
+       AND user_id = p_user_id
+    RETURNING * INTO v_reserve;
+
+    INSERT INTO public.financial_ledger (
+        id,
+        transaction_id,
+        user_id,
+        wallet_id,
+        bill_reserve_id,
+        bucket_type,
+        entry_side,
+        entry_type,
+        amount,
+        balance_after,
+        description
+    ) VALUES
+    (
+        gen_random_uuid(),
+        v_tx.id,
+        p_user_id,
+        p_source_wallet_id,
+        p_reserve_id,
+        'OPERATING',
+        CASE WHEN v_action = 'LOCK' THEN 'DEBIT' ELSE 'CREDIT' END,
+        CASE WHEN v_action = 'LOCK' THEN 'DEBIT' ELSE 'CREDIT' END,
+        p_amount::text,
+        v_source_balance_after::text,
+        CASE WHEN v_action = 'LOCK'
+          THEN 'Bill reserve funding debit'
+          ELSE 'Bill reserve release credit'
+        END
+    ),
+    (
+        gen_random_uuid(),
+        v_tx.id,
+        p_user_id,
+        p_source_wallet_id,
+        p_reserve_id,
+        'PLANNED',
+        CASE WHEN v_action = 'LOCK' THEN 'CREDIT' ELSE 'DEBIT' END,
+        CASE WHEN v_action = 'LOCK' THEN 'CREDIT' ELSE 'DEBIT' END,
+        p_amount::text,
+        v_locked_balance_after::text,
+        CASE WHEN v_action = 'LOCK'
+          THEN 'Bill reserve protected balance credit'
+          ELSE 'Bill reserve protected balance release'
+        END
+    );
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'transaction_id', v_tx.id,
+        'reference_id', v_reference_id,
+        'source_balance_after', v_source_balance_after,
+        'reserve', to_jsonb(v_reserve),
+        'source_table', v_source_table,
+        'source_wallet_role', v_source_wallet_role,
+        'atomic_commit', true
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;

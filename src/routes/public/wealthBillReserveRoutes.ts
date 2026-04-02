@@ -9,9 +9,7 @@ type Deps = {
   wealthNumber: (value: any) => number;
   resolveWealthSourceWallet: (sb: any, userId: string, sourceWalletId?: string) => Promise<any>;
   assertBillPaymentSourceAllowed: (sourceRecord: any) => void;
-  createWealthTransaction: (...args: any[]) => Promise<any>;
-  updateWealthSourceBalance: (...args: any[]) => Promise<any>;
-  insertBillReserveLedger: (...args: any[]) => Promise<any>;
+  applyBillReserveAdjustment: (...args: any[]) => Promise<any>;
 };
 
 export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
@@ -24,9 +22,7 @@ export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
     wealthNumber,
     resolveWealthSourceWallet,
     assertBillPaymentSourceAllowed,
-    createWealthTransaction,
-    updateWealthSourceBalance,
-    insertBillReserveLedger,
+    applyBillReserveAdjustment,
   } = deps;
 
   v1.get('/wealth/bill-reserves', authenticate as any, async (req, res) => {
@@ -86,7 +82,7 @@ export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
         due_day: payload.due_day,
         reserve_mode: payload.reserve_mode || 'FIXED',
         reserve_amount: payload.reserve_amount,
-        locked_balance: lockedBalance,
+        locked_balance: lockedBalance > 0 ? 0 : lockedBalance,
         is_active: true,
         metadata: {
           created_from: 'mobile_app',
@@ -102,38 +98,29 @@ export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
 
       let transaction: any = null;
       if (lockedBalance > 0 && sourceRecord && sourceBalanceAfter != null) {
-        transaction = await createWealthTransaction(
+        const adjustment = await applyBillReserveAdjustment({
           sb,
-          session.sub,
+          userId: session.sub,
+          reserveId: data.id,
           sourceRecord,
-          lockedBalance,
+          sourceTable,
+          amount: lockedBalance,
           currency,
-          `Bill reserve funding: ${payload.provider_name}`,
-          'PLANNED',
-          {
+          description: `Bill reserve funding: ${payload.provider_name}`,
+          metadata: {
             bill_reserve_id: data.id,
-            source_table: sourceTable,
-            source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
             allocation_source: 'BILL_RESERVE_CREATE',
           },
-        );
-        await updateWealthSourceBalance(
-          sb,
-          sourceTable,
-          sourceRecord,
-          session.sub,
-          sourceBalanceAfter,
-        );
-        await insertBillReserveLedger(sb, {
-          transactionId: transaction.id,
-          userId: session.sub,
-          sourceRecord,
-          reserveId: data.id,
-          amount: lockedBalance,
-          sourceBalanceAfter,
-          reserveBalanceAfter: lockedBalance,
           action: 'LOCK',
+          reserveBalanceAfter: lockedBalance,
         });
+        transaction = adjustment.transaction;
+        sourceBalanceAfter = adjustment.sourceBalanceAfter;
+        if (adjustment.reserve) {
+          Object.assign(data, adjustment.reserve);
+        } else {
+          data.locked_balance = lockedBalance;
+        }
       }
       res.json({
         success: true,
@@ -190,7 +177,7 @@ export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
       if (payload.reserve_amount !== undefined) updatePayload.reserve_amount = payload.reserve_amount;
       if (payload.is_active !== undefined) updatePayload.is_active = payload.is_active;
       if (payload.status !== undefined) updatePayload.status = payload.status;
-      updatePayload.locked_balance = desiredLockedBalance;
+      updatePayload.locked_balance = delta !== 0 ? currentLockedBalance : desiredLockedBalance;
 
       let sourceRecord: any = null;
       let sourceTable: 'platform_vaults' | 'wallets' = 'platform_vaults';
@@ -232,42 +219,33 @@ export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
       let transaction: any = null;
       if (delta !== 0 && sourceRecord && sourceBalanceAfter != null && adjustmentAction) {
         const adjustmentAmount = Math.abs(delta);
-        transaction = await createWealthTransaction(
+        const adjustment = await applyBillReserveAdjustment({
           sb,
-          session.sub,
+          userId: session.sub,
+          reserveId: data.id,
           sourceRecord,
-          adjustmentAmount,
-          String(data.currency || sourceRecord.currency || 'TZS').toUpperCase(),
-          adjustmentAction === 'LOCK'
+          sourceTable,
+          amount: adjustmentAmount,
+          currency: String(data.currency || sourceRecord.currency || 'TZS').toUpperCase(),
+          description: adjustmentAction === 'LOCK'
             ? `Bill reserve top-up: ${data.provider_name}`
             : `Bill reserve release: ${data.provider_name}`,
-          'PLANNED',
-          {
+          metadata: {
             bill_reserve_id: data.id,
-            source_table: sourceTable,
-            source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
             allocation_source: adjustmentAction === 'LOCK'
               ? 'BILL_RESERVE_TOP_UP'
               : 'BILL_RESERVE_RELEASE',
           },
-        );
-        await updateWealthSourceBalance(
-          sb,
-          sourceTable,
-          sourceRecord,
-          session.sub,
-          sourceBalanceAfter,
-        );
-        await insertBillReserveLedger(sb, {
-          transactionId: transaction.id,
-          userId: session.sub,
-          sourceRecord,
-          reserveId: data.id,
-          amount: adjustmentAmount,
-          sourceBalanceAfter,
-          reserveBalanceAfter: desiredLockedBalance,
           action: adjustmentAction,
+          reserveBalanceAfter: desiredLockedBalance,
         });
+        transaction = adjustment.transaction;
+        sourceBalanceAfter = adjustment.sourceBalanceAfter;
+        if (adjustment.reserve) {
+          Object.assign(data, adjustment.reserve);
+        } else {
+          data.locked_balance = desiredLockedBalance;
+        }
       }
       res.json({
         success: true,
@@ -313,40 +291,24 @@ export const registerBillReserveRoutes = (v1: Router, deps: Deps) => {
         const currentBalance = wealthNumber(sourceRecord.balance);
         sourceBalanceAfter = currentBalance + lockedBalance;
 
-        transaction = await createWealthTransaction(
+        const adjustment = await applyBillReserveAdjustment({
           sb,
-          session.sub,
+          userId: session.sub,
+          reserveId: reserve.id,
           sourceRecord,
-          lockedBalance,
-          String(reserve.currency || sourceRecord.currency || 'TZS').toUpperCase(),
-          `Bill reserve delete release: ${reserve.provider_name || reserve.bill_type || 'Reserve'}`,
-          'PLANNED',
-          {
+          sourceTable,
+          amount: lockedBalance,
+          currency: String(reserve.currency || sourceRecord.currency || 'TZS').toUpperCase(),
+          description: `Bill reserve delete release: ${reserve.provider_name || reserve.bill_type || 'Reserve'}`,
+          metadata: {
             bill_reserve_id: reserve.id,
-            source_table: sourceTable,
-            source_wallet_role: sourceRecord.vault_role || sourceRecord.type || null,
             allocation_source: 'BILL_RESERVE_DELETE_RELEASE',
           },
-        );
-
-        await updateWealthSourceBalance(
-          sb,
-          sourceTable,
-          sourceRecord,
-          session.sub,
-          sourceBalanceAfter,
-        );
-
-        await insertBillReserveLedger(sb, {
-          transactionId: transaction.id,
-          userId: session.sub,
-          sourceRecord,
-          reserveId: reserve.id,
-          amount: lockedBalance,
-          sourceBalanceAfter,
-          reserveBalanceAfter: 0,
           action: 'RELEASE',
+          reserveBalanceAfter: 0,
         });
+        transaction = adjustment.transaction;
+        sourceBalanceAfter = adjustment.sourceBalanceAfter;
       }
 
       const { error: deleteError } = await sb

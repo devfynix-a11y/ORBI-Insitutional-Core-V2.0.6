@@ -63,6 +63,162 @@ export class CardProvider implements IPaymentProvider {
     DISCOVERY: /^6(?:011|5[0-9]{2})[0-9]{12}$/,
   };
 
+  private isMissingRpc(error: any, functionName: string): boolean {
+    const code = String(error?.code || '');
+    const message = String(error?.message || '');
+    return code === 'PGRST202' || code === '42883' || message.includes(functionName);
+  }
+
+  private getConfiguredFeeWalletId(): string {
+    const feeWalletId = String(process.env.SYSTEM_FEE_WALLET_ID || '').trim();
+    if (!feeWalletId) {
+      throw new Error('SYSTEM_FEE_WALLET_REQUIRED');
+    }
+    return feeWalletId;
+  }
+
+  private async settleCardPaymentLegacy(
+    sb: NonNullable<ReturnType<typeof getAdminSupabase> | ReturnType<typeof getSupabase>>,
+    cardTx: any,
+    targetWallet: any,
+    feeWalletId: string,
+  ): Promise<SettlementResult> {
+    const transactionAmount = Number(cardTx.amount || 0);
+    const fee = Math.round(transactionAmount * 0.025);
+    const financialTxId = uuidv4();
+    const targetBalanceBefore = Number(targetWallet.balance || 0);
+
+    const { data: feeWallet, error: feeWalletError } = await sb
+      .from('wallets')
+      .select('id, balance')
+      .eq('id', feeWalletId)
+      .maybeSingle();
+
+    if (feeWalletError) {
+      throw new Error(`Failed to load fee wallet: ${feeWalletError.message}`);
+    }
+
+    const { data: feeVault, error: feeVaultError } = await sb
+      .from('platform_vaults')
+      .select('id, balance')
+      .eq('id', feeWalletId)
+      .maybeSingle();
+
+    if (feeVaultError) {
+      throw new Error(`Failed to load fee vault: ${feeVaultError.message}`);
+    }
+
+    if (!feeWallet && !feeVault) {
+      throw new Error('SYSTEM_FEE_WALLET_NOT_FOUND');
+    }
+
+    const feeBalanceBefore = Number((feeWallet || feeVault)?.balance || 0);
+    const feeBalanceAfter = feeBalanceBefore + fee;
+    const targetBalanceAfter = targetBalanceBefore + transactionAmount;
+
+    const { error: financialTxError } = await sb
+      .from('transactions')
+      .insert({
+        id: financialTxId,
+        reference_id: `card_${cardTx.id}`,
+        user_id: targetWallet.user_id,
+        type: 'deposit',
+        status: 'completed',
+        amount: transactionAmount.toString(),
+        currency: cardTx.currency,
+        wallet_id: null,
+        to_wallet_id: targetWallet.id,
+        description: `Card payment settlement - ${cardTx.id}`,
+        metadata: {
+          card_transaction_id: cardTx.id,
+          source_wallet_type: 'EXTERNAL',
+          target_wallet_type: targetWallet.wallet_type || 'INTERNAL',
+          settlement_path: 'SOVEREIGN_LEDGER',
+          fee_wallet_id: feeWalletId,
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+    if (financialTxError) {
+      throw new Error(`Failed to create financial transaction: ${financialTxError.message}`);
+    }
+
+    const ledgerRows = [
+      {
+        id: uuidv4(),
+        transaction_id: financialTxId,
+        user_id: targetWallet.user_id,
+        wallet_id: targetWallet.id,
+        entry_type: 'CREDIT',
+        amount: transactionAmount.toString(),
+        balance_after: targetBalanceAfter.toString(),
+        description: `Card deposit - ${cardTx.id}`,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: uuidv4(),
+        transaction_id: financialTxId,
+        user_id: targetWallet.user_id,
+        wallet_id: feeWalletId,
+        entry_type: 'CREDIT',
+        amount: fee.toString(),
+        balance_after: feeBalanceAfter.toString(),
+        description: `Card processor fee - ${cardTx.id}`,
+        created_at: new Date().toISOString(),
+      },
+    ];
+
+    const { error: ledgerError } = await sb.from('financial_ledger').insert(ledgerRows);
+    if (ledgerError) {
+      throw new Error(`Failed to write settlement ledger: ${ledgerError.message}`);
+    }
+
+    const { error: targetWalletUpdateError } = await sb
+      .from('wallets')
+      .update({ balance: targetBalanceAfter.toString() })
+      .eq('id', targetWallet.id);
+
+    if (targetWalletUpdateError) {
+      throw new Error(`Failed to update target wallet balance: ${targetWalletUpdateError.message}`);
+    }
+
+    if (feeWallet) {
+      const { error: feeWalletUpdateError } = await sb
+        .from('wallets')
+        .update({ balance: feeBalanceAfter.toString() })
+        .eq('id', feeWalletId);
+      if (feeWalletUpdateError) {
+        throw new Error(`Failed to update fee wallet balance: ${feeWalletUpdateError.message}`);
+      }
+    } else {
+      const { error: feeVaultUpdateError } = await sb
+        .from('platform_vaults')
+        .update({ balance: feeBalanceAfter.toString() })
+        .eq('id', feeWalletId);
+      if (feeVaultUpdateError) {
+        throw new Error(`Failed to update fee vault balance: ${feeVaultUpdateError.message}`);
+      }
+    }
+
+    const { error: cardTxUpdateError } = await sb
+      .from('card_transactions')
+      .update({ status: 'SETTLED', settled_at: new Date().toISOString() })
+      .eq('id', cardTx.id);
+
+    if (cardTxUpdateError) {
+      throw new Error(`Failed to mark card transaction settled: ${cardTxUpdateError.message}`);
+    }
+
+    return {
+      settlementId: financialTxId,
+      transactionId: cardTx.id,
+      amount: transactionAmount,
+      fee,
+      status: 'COMPLETED',
+    };
+  }
+
   /**
    * AUTHENTICATE - OAuth/API Key validation
    */
@@ -373,7 +529,7 @@ export class CardProvider implements IPaymentProvider {
    * SETTLE CARD PAYMENT - Conditional ledger logic
    */
   async settleCardPayment(transactionId: string, targetWalletId: string): Promise<SettlementResult> {
-    const sb = getSupabase();
+    const sb = getAdminSupabase() || getSupabase();
     if (!sb) throw new Error('Database connection required');
 
     console.info(`[CardProvider] Settling card transaction ${transactionId}`);
@@ -402,80 +558,36 @@ export class CardProvider implements IPaymentProvider {
       const sourceType = 'EXTERNAL'; // Card processor is always external
       const targetType = targetWallet.wallet_type || 'INTERNAL';
 
-      const transactionAmount = parseInt(cardTx.amount);
+      const transactionAmount = Number(cardTx.amount || 0);
       const fee = Math.round(transactionAmount * 0.025); // 2.5% default fee
+      const feeWalletId = this.getConfiguredFeeWalletId();
 
-      // 4. CREATE FINANCIAL TRANSACTION
-      const financialTxId = `ftx_${uuidv4()}`;
-      const { data: financialTx } = await sb
-        .from('transactions')
-        .insert({
-          id: financialTxId,
-          user_id: targetWallet.user_id,
-          type: 'deposit',
-          status: 'completed',
-          amount: transactionAmount.toString(),
-          currency: cardTx.currency,
-          source_wallet_id: 'card_processor_external',
-          target_wallet_id: targetWalletId,
-          description: `Card payment settlement - ${transactionId}`,
-          settlement_path: sourceType === 'EXTERNAL' && targetType === 'EXTERNAL' ? 'NO_LEDGER' : 'SOVEREIGN_LEDGER',
-          idempotency_key: `card_${transactionId}`,
-          metadata: {
-            card_transaction_id: transactionId,
-            source_wallet_type: sourceType,
-            target_wallet_type: targetType,
-          },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .select()
-        .single();
+      let settlementId: string | null = null;
 
-      // 5. CREATE CONDITIONAL LEDGER ENTRIES
       if (sourceType === 'EXTERNAL' && targetType === 'INTERNAL') {
-        // Credit ledger only
-        await sb.from('financial_ledger').insert([
-          {
-            id: uuidv4(),
-            transaction_id: financialTxId,
-            user_id: targetWallet.user_id,
-            wallet_id: targetWalletId,
-            entry_type: 'CREDIT',
-            amount: transactionAmount.toString(),
-            balance_after: ((targetWallet.balance || 0) + transactionAmount).toString(),
-            description: `Card deposit - ${transactionId}`,
-            created_at: new Date().toISOString(),
-          },
-          {
-            id: uuidv4(),
-            transaction_id: financialTxId,
-            user_id: targetWallet.user_id,
-            wallet_id: process.env.SYSTEM_FEE_WALLET_ID || 'system_fees',
-            entry_type: 'CREDIT',
-            amount: fee.toString(),
-            balance_after: fee.toString(),
-            description: `Card processor fee - ${transactionId}`,
-            created_at: new Date().toISOString(),
-          },
-        ]);
+        const { data, error } = await sb.rpc('card_settle_v1', {
+          p_card_transaction_id: transactionId,
+          p_target_wallet_id: targetWalletId,
+          p_fee_wallet_id: feeWalletId,
+          p_fee_amount: fee,
+        });
 
-        // Update wallet balance
-        await sb
-          .from('wallets')
-          .update({ balance: ((targetWallet.balance || 0) + transactionAmount).toString() })
-          .eq('id', targetWalletId);
+        if (error) {
+          if (!this.isMissingRpc(error, 'card_settle_v1')) {
+            throw new Error(error.message);
+          }
+          const legacyResult = await this.settleCardPaymentLegacy(sb, cardTx, targetWallet, feeWalletId);
+          settlementId = legacyResult.settlementId;
+        } else {
+          settlementId = String(data?.settlement_id || '');
+        }
+      } else {
+        throw new Error(`Unsupported card settlement path: ${sourceType} => ${targetType}`);
       }
-
-      // 6. MARK TRANSACTION AS SETTLED
-      await sb
-        .from('card_transactions')
-        .update({ status: 'SETTLED', settled_at: new Date().toISOString() })
-        .eq('id', transactionId);
 
       await Audit.log('FINANCIAL', targetWallet.user_id, 'CARD_SETTLEMENT_COMPLETED', {
         cardTxId: transactionId,
-        financialTxId,
+        financialTxId: settlementId,
         amount: transactionAmount,
         fee,
       });
@@ -483,8 +595,8 @@ export class CardProvider implements IPaymentProvider {
       try {
         await this.goals.runAutoAllocationsForCredit({
           userId: String(targetWallet.user_id),
-          sourceTransactionId: financialTxId,
-          sourceReferenceId: financialTxId,
+          sourceTransactionId: String(settlementId),
+          sourceReferenceId: String(settlementId),
           sourceWalletId: String(targetWalletId),
           sourceAmount: transactionAmount,
           currency: cardTx.currency,
@@ -499,7 +611,7 @@ export class CardProvider implements IPaymentProvider {
       }
 
       return {
-        settlementId: financialTxId,
+        settlementId: String(settlementId),
         transactionId,
         amount: transactionAmount,
         fee,
