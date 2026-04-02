@@ -10,7 +10,8 @@
     "render-build": "npm install && npm run build",
     "start": "node dist/server.js",
     "dev": "tsx server.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test --test-force-exit tests/**/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.41.0",
