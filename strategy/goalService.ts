@@ -685,7 +685,7 @@ export class GoalService {
 
             const { error } = await sb
                 .from('goals')
-                .update({ current: newAmount, source_wallet_id: sourceWalletId })
+                .update({ source_wallet_id: sourceWalletId })
                 .eq('id', goalId);
             if (error) {
                 throw new Error(error.message);
@@ -816,8 +816,6 @@ export class GoalService {
                 ]
             );
 
-            const { error } = await sb.from('goals').update({ current: newAmount }).eq('id', goalId);
-            if (error) throw new Error(error.message);
         }
 
         let items = Storage.getFromDB<any>(STORAGE_KEYS.GOALS);
