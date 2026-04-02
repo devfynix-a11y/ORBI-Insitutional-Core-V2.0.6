@@ -911,6 +911,25 @@ CREATE TABLE IF NOT EXISTS public.kms_keys (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.kms_keys
+        WHERE status = 'ACTIVE'
+        GROUP BY type
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE NOTICE 'Skipping kms_keys_one_active_per_type index creation until duplicate ACTIVE KMS keys are cleaned up.';
+    ELSE
+        EXECUTE '
+            CREATE UNIQUE INDEX IF NOT EXISTS kms_keys_one_active_per_type
+            ON public.kms_keys(type)
+            WHERE status = ''ACTIVE''
+        ';
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.audit_trail (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
     prev_hash TEXT, 

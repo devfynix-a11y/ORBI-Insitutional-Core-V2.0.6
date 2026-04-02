@@ -17,6 +17,18 @@ interface KeyMetadata {
 
 const kmsLogger = logger.child({ component: 'kms' });
 
+export const isRecoverableActiveKeyInsertConflict = (error: any): boolean => {
+    const code = String(error?.code || '').trim();
+    const message = String(error?.message || '').toLowerCase();
+    return (
+        code === '23505' &&
+        (
+            message.includes('kms_keys_one_active_per_type') ||
+            (message.includes('kms_keys') && message.includes('active') && message.includes('type'))
+        )
+    );
+};
+
 export class SecureKMSService {
     private keys: Map<string, KeyMetadata> = new Map();
     private keyMaterial: Map<string, CryptoKey> = new Map();
@@ -99,6 +111,87 @@ export class SecureKMSService {
                 this.activeKeyIds[keyType] = '';
             }
         }
+    }
+
+    private async tryUnwrapDbKeyWithKnownSecrets(
+        dbKey: any,
+        uniqueSecrets: string[],
+    ): Promise<CryptoKey | null> {
+        for (const secret of uniqueSecrets) {
+            try {
+                const wrappingKey = await this.getWrappingKey(secret);
+                const unwrapped = await this.unwrapDbKey(dbKey, wrappingKey);
+                if (unwrapped) {
+                    return unwrapped;
+                }
+            } catch {
+                // Try the next candidate secret.
+            }
+        }
+
+        return null;
+    }
+
+    private registerHydratedDbKey(dbKey: any, keyMaterial: CryptoKey) {
+        const keyType = dbKey.type as KeyType;
+        this.keys.set(dbKey.key_id, {
+            id: dbKey.key_id,
+            version: dbKey.version,
+            type: keyType,
+            status: dbKey.status as any,
+            wrappedJwk: dbKey.wrapped_jwk,
+            expiresAt: dbKey.expires_at ? new Date(dbKey.expires_at).getTime() : 0,
+        });
+        this.keyMaterial.set(dbKey.key_id, keyMaterial);
+        if (dbKey.status === 'ACTIVE') {
+            this.activeKeyIds[keyType] = dbKey.key_id;
+        }
+    }
+
+    private async hydrateExistingActiveKeyForType(
+        type: KeyType,
+        sb: any,
+        uniqueSecrets: string[],
+    ): Promise<boolean> {
+        const { data, error } = await sb
+            .from('kms_keys')
+            .select('*')
+            .eq('type', type)
+            .eq('status', 'ACTIVE')
+            .order('version', { ascending: false })
+            .order('created_at', { ascending: false })
+            .limit(2);
+
+        if (error) {
+            throw error;
+        }
+
+        const activeDbKeys = data || [];
+        if (activeDbKeys.length === 0) {
+            return false;
+        }
+
+        this.validateSingleActiveKeyPerType(activeDbKeys);
+
+        const winner = activeDbKeys[0];
+        const unwrapped = await this.tryUnwrapDbKeyWithKnownSecrets(winner, uniqueSecrets);
+        if (!unwrapped) {
+            kmsLogger.error('kms.unwrap_failed', {
+                key_id: winner.key_id,
+                key_type: winner.type,
+                key_status: winner.status,
+            });
+            await this.retireDbKeys(sb, [winner], 'UNWRAP_FAILED_AFTER_INSERT_CONFLICT');
+            return false;
+        }
+
+        this.registerHydratedDbKey(winner, unwrapped);
+        kmsLogger.info('kms.active_key_adopted_after_conflict', {
+            key_type: type,
+            key_id: winner.key_id,
+            key_version: winner.version,
+        });
+        return true;
     }
 
     private async getWrappingKey(secret: string): Promise<CryptoKey> {
@@ -207,29 +300,10 @@ export class SecureKMSService {
             // 1. Unwrap and load all keys (both ACTIVE and ROTATED)
             if (dbKeys && dbKeys.length > 0) {
                 for (const dbKey of dbKeys) {
-                    let unwrapped: CryptoKey | null = null;
-                    
-                    // Try all known secrets to unwrap the key
-                    for (const secret of uniqueSecrets) {
-                        try {
-                            const wrappingKey = await this.getWrappingKey(secret);
-                            unwrapped = await this.unwrapDbKey(dbKey, wrappingKey);
-                            if (unwrapped) break; // Success
-                        } catch (e: any) {
-                            // Try next secret
-                        }
-                    }
+                    const unwrapped = await this.tryUnwrapDbKeyWithKnownSecrets(dbKey, uniqueSecrets);
 
                     if (unwrapped) {
-                        this.keys.set(dbKey.key_id, {
-                            id: dbKey.key_id,
-                            version: dbKey.version,
-                            type: dbKey.type as KeyType,
-                            status: dbKey.status as any,
-                            wrappedJwk: dbKey.wrapped_jwk,
-                            expiresAt: dbKey.expires_at ? new Date(dbKey.expires_at).getTime() : 0
-                        });
-                        this.keyMaterial.set(dbKey.key_id, unwrapped);
+                        this.registerHydratedDbKey(dbKey, unwrapped);
                         
                         if (dbKey.status === 'ACTIVE') {
                             const keyType = dbKey.type as KeyType;
@@ -270,7 +344,7 @@ export class SecureKMSService {
                     kmsLogger.info('kms.provisioning_new_active_key', { key_type: type });
                     const existingTypeKeys = Array.from(this.keys.values()).filter(k => k.type === type);
                     const nextVersion = existingTypeKeys.length > 0 ? Math.max(...existingTypeKeys.map(k => k.version)) + 1 : 1;
-                    await this.provisionNewKey(type, primaryWrappingKey, sb, nextVersion);
+                    await this.provisionNewKey(type, primaryWrappingKey, sb, nextVersion, uniqueSecrets);
                 }
             }
 
@@ -315,7 +389,13 @@ export class SecureKMSService {
         kmsLogger.info('kms.initialized_deterministic_fallback');
     }
 
-    private async provisionNewKey(type: KeyType, wrappingKey: CryptoKey, sb: any, version: number = 1) {
+    private async provisionNewKey(
+        type: KeyType,
+        wrappingKey: CryptoKey,
+        sb: any,
+        version: number = 1,
+        uniqueSecrets: string[] = [],
+    ) {
         const id = `key-v${version}-${type.toLowerCase()}-${UUID.generate().slice(0, 8)}`;
         let key: CryptoKey;
 
@@ -366,7 +446,22 @@ export class SecureKMSService {
             expires_at: expiresAt
         });
 
-        if (error) throw error;
+        if (error) {
+            if (isRecoverableActiveKeyInsertConflict(error)) {
+                kmsLogger.warn('kms.provisioning_race_recovered', {
+                    key_type: type,
+                    attempted_key_id: id,
+                    attempted_version: version,
+                });
+
+                const adopted = await this.hydrateExistingActiveKeyForType(type, sb, uniqueSecrets);
+                if (adopted) {
+                    return;
+                }
+            }
+
+            throw error;
+        }
 
         this.keys.set(id, {
             id,
@@ -454,7 +549,7 @@ export class SecureKMSService {
             }
 
             // 4. Provision new ACTIVE key
-            await this.provisionNewKey(type, primaryWrappingKey, sb, nextVersion);
+            await this.provisionNewKey(type, primaryWrappingKey, sb, nextVersion, possibleSecrets);
             
             kmsLogger.info('kms.key_rotation_succeeded', { key_type: type, new_version: nextVersion });
         } catch (e) {
