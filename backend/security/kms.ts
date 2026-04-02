@@ -17,7 +17,7 @@ interface KeyMetadata {
 
 const kmsLogger = logger.child({ component: 'kms' });
 
-class SecureKMSService {
+export class SecureKMSService {
     private keys: Map<string, KeyMetadata> = new Map();
     private keyMaterial: Map<string, CryptoKey> = new Map();
     private activeKeyIds: Record<KeyType, string> = { AUTH: '', ENCRYPTION: '', SECRET_WRAPPING: '', SYSTEM: '', SIGNING: '' };
@@ -60,6 +60,44 @@ class SecureKMSService {
                 active_key_count: activeKeys.length,
             });
             throw new Error(`[KMS] Multiple ACTIVE keys detected for ${type}: ${keyIds.join(', ')}`);
+        }
+    }
+
+    private async retireDbKeys(sb: any, dbKeys: any[], reason: string) {
+        const keyIds = dbKeys
+            .map((dbKey) => String(dbKey?.key_id || '').trim())
+            .filter(Boolean);
+
+        if (!keyIds.length) {
+            return;
+        }
+
+        const { error } = await sb
+            .from('kms_keys')
+            .update({ status: 'ROTATED' })
+            .in('key_id', keyIds);
+
+        if (error) {
+            throw error;
+        }
+
+        for (const dbKey of dbKeys) {
+            const keyType = dbKey.type as KeyType;
+            kmsLogger.warn('kms.unusable_active_key_retired', {
+                key_id: dbKey.key_id,
+                key_type: keyType,
+                previous_status: dbKey.status,
+                retirement_reason: reason,
+            });
+
+            const existingMeta = this.keys.get(dbKey.key_id);
+            if (existingMeta) {
+                existingMeta.status = 'ROTATED';
+            }
+
+            if (this.activeKeyIds[keyType] === dbKey.key_id) {
+                this.activeKeyIds[keyType] = '';
+            }
         }
     }
 
@@ -161,10 +199,10 @@ class SecureKMSService {
                 return await this.initDeterministic(primaryKeyMaterial);
             }
 
-            this.validateSingleActiveKeyPerType(dbKeys || []);
-
             const types: KeyType[] = ['AUTH', 'ENCRYPTION', 'SECRET_WRAPPING', 'SYSTEM', 'SIGNING'];
             const primaryWrappingKey = await this.getWrappingKey(uniqueSecrets[0]);
+            const usableActiveDbKeysByType = new Map<KeyType, any[]>();
+            const unusableActiveDbKeys: any[] = [];
             
             // 1. Unwrap and load all keys (both ACTIVE and ROTATED)
             if (dbKeys && dbKeys.length > 0) {
@@ -193,19 +231,36 @@ class SecureKMSService {
                         });
                         this.keyMaterial.set(dbKey.key_id, unwrapped);
                         
-                        // If multiple ACTIVE keys exist (shouldn't happen but we handle it), 
-                        // the one with the highest version (first in ordered list) wins.
-                        if (dbKey.status === 'ACTIVE' && !this.activeKeyIds[dbKey.type as KeyType]) {
-                            this.activeKeyIds[dbKey.type as KeyType] = dbKey.key_id;
+                        if (dbKey.status === 'ACTIVE') {
+                            const keyType = dbKey.type as KeyType;
+                            const existing = usableActiveDbKeysByType.get(keyType) || [];
+                            existing.push(dbKey);
+                            usableActiveDbKeysByType.set(keyType, existing);
                         }
                     } else {
                         const unwrapPayload = { key_id: dbKey.key_id, key_type: dbKey.type, key_status: dbKey.status };
                         if (dbKey.status === 'ACTIVE') {
                             kmsLogger.error('kms.unwrap_failed', unwrapPayload);
+                            unusableActiveDbKeys.push(dbKey);
                         } else {
                             kmsLogger.warn('kms.unwrap_failed_rotated_key', unwrapPayload);
                         }
                     }
+                }
+            }
+
+            if (unusableActiveDbKeys.length > 0) {
+                await this.retireDbKeys(sb, unusableActiveDbKeys, 'UNWRAP_FAILED');
+            }
+
+            const duplicatedUsableActiveKeys = Array.from(usableActiveDbKeysByType.values())
+                .filter((activeKeys) => activeKeys.length > 1)
+                .flat();
+            this.validateSingleActiveKeyPerType(duplicatedUsableActiveKeys);
+
+            for (const [type, activeKeys] of usableActiveDbKeysByType.entries()) {
+                if (activeKeys.length === 1) {
+                    this.activeKeyIds[type] = activeKeys[0].key_id;
                 }
             }
 
