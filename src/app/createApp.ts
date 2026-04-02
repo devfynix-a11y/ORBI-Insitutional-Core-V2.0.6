@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { validateStartupEnvironment } from '../bootstrap/validation.js';
 import { registerInternalRoutes, mountInternalRoutes } from '../routes/internal/index.js';
 import { registerAdminRoutes, mountAdminRoutes } from '../routes/admin/index.js';
 import { mountPublicRoutes, registerLegacyGatewayRoute, registerMonitoringRoutes, registerTerminalHandlers, registerTopLevelPublicRoutes } from '../routes/public/index.js';
@@ -17,7 +18,7 @@ import { validate } from '../middleware/validation/validate.js';
 import { authenticate, adminOnly, resolveSessionRole, requireRole, resolveSessionRegistryType, mapServiceRoleToRegistryType, requireSessionPermission } from '../middleware/auth/sessionAuth.js';
 import { ALLOWED_ORIGINS, configureCoreSecurityMiddleware, createGlobalIpLimiter } from '../middleware/security/setup.js';
 import express from 'express';
-import { createServer } from 'http';
+import { createRuntime } from './runtime.js';
 import { Server as LogicCore } from '../../backend/server.js';
 import { Sentinel } from '../../backend/security/sentinel.js';
 import { WAF } from '../../backend/security/waf.js';
@@ -36,7 +37,6 @@ import {
 import { z } from 'zod';
 import { RedisClusterFactory } from '../../backend/infrastructure/RedisClusterFactory.js';
 // emailService removed as per user request
-import multer from 'multer';
 import { Auth as NewAuth } from '../../backend/src/modules/auth/auth.controller.js';
 import { ReconciliationEngine as ReconEngine } from '../../backend/ledger/reconciliationEngine.js';
 import { authenticateApiKey } from '../../backend/middleware/apiKeyAuth.js';
@@ -52,57 +52,9 @@ import { KMS } from '../../backend/security/kms.js';
 import { DataVault } from '../../backend/security/encryption.js';
 import { SandboxController } from '../../backend/sandbox/sandboxController.js';
 
-// --- STARTUP VALIDATION ---
-const requiredEnv = [
-    'JWT_SECRET',
-    'RP_ID',
-    'ORBI_WEB_ORIGIN',
-    'ORBI_ANDROID_APP_HASH',
-    'ORBI_MOBILE_ORIGIN',
-    'KMS_MASTER_KEY',
-    'WORKER_SECRET'
-];
+validateStartupEnvironment();
 
-for (const key of requiredEnv) {
-    if (process.env.NODE_ENV === 'production' && !process.env[key]) {
-        console.error(`[Startup] CRITICAL_FAILURE: Missing required environment variable: ${key}`);
-        process.exit(1);
-    }
-}
-
-if (process.env.NODE_ENV === 'production') {
-    if (
-        process.env.REDIS_TLS_ENABLED === 'true' &&
-        process.env.REDIS_ALLOW_INSECURE_TLS === 'true'
-    ) {
-        console.error('[Startup] CRITICAL_FAILURE: REDIS_ALLOW_INSECURE_TLS cannot be enabled in production.');
-        process.exit(1);
-    }
-
-    if (process.env.ORBI_ANDROID_APP_HASH && !process.env.ORBI_ANDROID_PACKAGE_NAME) {
-        console.error('[Startup] CRITICAL_FAILURE: ORBI_ANDROID_PACKAGE_NAME is required when ORBI_ANDROID_APP_HASH is configured.');
-        process.exit(1);
-    }
-}
-
-const app = express();
-const httpServer = createServer(app);
-
-// Configure Multer for memory storage
-const upload = multer({ 
-    storage: multer.memoryStorage(), 
-    limits: { fileSize: 20 * 1024 * 1024 } 
-});
-
-// PORT CONFIGURATION
-// Render/Production requires process.env.PORT
-const PORT = Number(process.env.PORT) || 3000;
-
-// Enable trust proxy for correct IP detection behind Render/Nginx
-app.set('trust proxy', 1);
-
-// Serve static files from the 'public' directory
-app.use(express.static('public'));
+const { app, httpServer, upload, port: PORT } = createRuntime();
 
 /**
  * ORBI SOVEREIGN GATEWAY (V28.0 Platinum)
