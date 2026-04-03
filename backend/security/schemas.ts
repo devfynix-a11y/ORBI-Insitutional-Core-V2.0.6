@@ -135,6 +135,8 @@ export const UserProfileUpdateSchema = z.object({
     kyc_level: z.number().optional(),
     kyc_status: z.enum(['unverified', 'pending', 'verified', 'rejected']).optional(),
     language: z.enum(['en', 'sw']).optional(),
+    notif_push: z.boolean().optional(),
+    notif_email: z.boolean().optional(),
     notif_security: z.boolean().optional(),
     notif_financial: z.boolean().optional(),
     notif_budget: z.boolean().optional(),

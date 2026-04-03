@@ -1118,7 +1118,7 @@ class OrbiServer {
         // Verified: Only avatar and settings (identity is locked)
         // Unverified: full_name, phone, address, nationality, avatar_url, metadata, currency, and settings
         const settingsFields = [
-            'language', 'notif_security', 'notif_financial', 'notif_budget', 'notif_marketing',
+            'language', 'notif_push', 'notif_email', 'notif_security', 'notif_financial', 'notif_budget', 'notif_marketing',
             'security_tx_pin_hash', 'security_tx_pin_enabled', 'security_biometric_enabled', 'fcm_token'
         ];
 

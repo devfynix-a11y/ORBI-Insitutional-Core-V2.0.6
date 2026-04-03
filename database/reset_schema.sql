@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS public.users (
     id_type TEXT,
     id_number TEXT,
     language TEXT DEFAULT 'en',
+    notif_push BOOLEAN DEFAULT TRUE,
+    notif_email BOOLEAN DEFAULT TRUE,
     notif_security BOOLEAN DEFAULT TRUE,
     notif_financial BOOLEAN DEFAULT TRUE,
     notif_budget BOOLEAN DEFAULT TRUE,
@@ -196,6 +198,13 @@ CREATE TABLE IF NOT EXISTS public.staff (
     address TEXT,
     nationality TEXT DEFAULT 'Tanzania',
     language TEXT DEFAULT 'en',
+    notif_push BOOLEAN DEFAULT TRUE,
+    notif_email BOOLEAN DEFAULT TRUE,
+    notif_security BOOLEAN DEFAULT TRUE,
+    notif_financial BOOLEAN DEFAULT TRUE,
+    notif_budget BOOLEAN DEFAULT TRUE,
+    notif_marketing BOOLEAN DEFAULT FALSE,
+    fcm_token TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -337,6 +346,12 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='language') THEN
         ALTER TABLE public.users ADD COLUMN language TEXT DEFAULT 'en';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_push') THEN
+        ALTER TABLE public.users ADD COLUMN notif_push BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_email') THEN
+        ALTER TABLE public.users ADD COLUMN notif_email BOOLEAN DEFAULT TRUE;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='notif_security') THEN
         ALTER TABLE public.users ADD COLUMN notif_security BOOLEAN DEFAULT TRUE;
     END IF;
@@ -359,9 +374,30 @@ BEGIN
         ALTER TABLE public.users ADD COLUMN security_biometric_enabled BOOLEAN DEFAULT FALSE;
     END IF;
 
-    -- Add language to staff
+    -- Add language and notification preferences to staff
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='language') THEN
         ALTER TABLE public.staff ADD COLUMN language TEXT DEFAULT 'en';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='notif_push') THEN
+        ALTER TABLE public.staff ADD COLUMN notif_push BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='notif_email') THEN
+        ALTER TABLE public.staff ADD COLUMN notif_email BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='notif_security') THEN
+        ALTER TABLE public.staff ADD COLUMN notif_security BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='notif_financial') THEN
+        ALTER TABLE public.staff ADD COLUMN notif_financial BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='notif_budget') THEN
+        ALTER TABLE public.staff ADD COLUMN notif_budget BOOLEAN DEFAULT TRUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='notif_marketing') THEN
+        ALTER TABLE public.staff ADD COLUMN notif_marketing BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='fcm_token') THEN
+        ALTER TABLE public.staff ADD COLUMN fcm_token TEXT;
     END IF;
 END $$;
 

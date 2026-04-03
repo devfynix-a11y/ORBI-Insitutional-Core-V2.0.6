@@ -7,11 +7,13 @@ import { GoogleGenAI } from "@google/genai";
 import { DataVault } from '../security/encryption.js';
 import { DataProtection } from '../security/DataProtection.js';
 import { orbiGatewayService } from '../infrastructure/orbiGatewayService.js';
+import { firebasePushService } from '../infrastructure/firebasePushService.js';
 import parsePhoneNumber from 'libphonenumber-js';
 
 import { SocketRegistry } from '../infrastructure/SocketRegistry.js';
 
 import { TemplateName, TemplatePayloads } from '../templates/template_types.js';
+import { officialGatewayTemplatePolicy } from './OfficialGatewayTemplatePolicy.js';
 
 /**
  * NEXUS MESSAGING & NOTIFICATION NODE (V5.1)
@@ -53,13 +55,13 @@ class MessagingService {
         const sb = getAdminSupabase();
         if (sb) {
             let { data: profile } = await sb.from('users')
-                .select('language, notif_security, notif_financial, notif_budget, notif_marketing, phone, nationality, email, fcm_token, id_type')
+                .select('language, notif_push, notif_email, notif_security, notif_financial, notif_budget, notif_marketing, phone, nationality, email, fcm_token, id_type')
                 .eq('id', userId)
                 .maybeSingle();
                 
             if (!profile) {
                 const { data: staffProfile } = await sb.from('staff')
-                    .select('language, notif_security, notif_financial, notif_budget, notif_marketing, phone, nationality, email, fcm_token, id_type')
+                    .select('language, notif_push, notif_email, notif_security, notif_financial, notif_budget, notif_marketing, phone, nationality, email, fcm_token, id_type')
                     .eq('id', userId)
                     .maybeSingle();
                 profile = staffProfile;
@@ -76,6 +78,8 @@ class MessagingService {
 
             return {
                 language: profileData.language || 'en',
+                notif_push: profileData.notif_push ?? true,
+                notif_email: profileData.notif_email ?? true,
                 notif_security: profileData.notif_security ?? true,
                 notif_financial: profileData.notif_financial ?? true,
                 notif_budget: profileData.notif_budget ?? true,
@@ -89,6 +93,8 @@ class MessagingService {
         }
         return {
             language: 'en',
+            notif_push: true,
+            notif_email: true,
             notif_security: true,
             notif_financial: true,
             notif_budget: true,
@@ -191,7 +197,8 @@ CEO, ORBI`
             whatsapp?: boolean,
             template?: string,
             eventCode?: string,
-            variables?: Record<string, any>
+            variables?: Record<string, any>,
+            systemCustomBypass?: boolean,
         } = {}
     ): Promise<UserMessage | null> {
         const sb = getAdminSupabase();
@@ -212,9 +219,23 @@ CEO, ORBI`
             return null;
         }
 
+        const pushAllowed = profile.notif_push !== false;
+        const emailAllowed = profile.notif_email !== false;
+        if (!pushAllowed) options.push = false;
+        if (!emailAllowed) options.email = false;
+
         const id = UUID.generate();
         const refId = id.substring(0, 8).toUpperCase();
         const isTransactional = ['security', 'update', 'info'].includes(category);
+        const templatePlan = officialGatewayTemplatePolicy.resolve({
+            category,
+            subject,
+            body,
+            refId,
+            template: options.template,
+            variables: options.variables,
+            systemCustomBypass: options.systemCustomBypass,
+        });
 
         let displaySubject = subject;
         let displayBody = body;
@@ -276,7 +297,10 @@ CEO, ORBI`
         // Add refId to variables for templates
         const vars = { 
             refId,
-            ...(options.variables || { subject: displaySubject, body: displayBody })
+            ...templatePlan.variables,
+            ...(options.variables || {}),
+            subject: displaySubject,
+            body: displayBody,
         };
 
         let formattedPhone = profile.phone;
@@ -305,67 +329,67 @@ CEO, ORBI`
             options.email = false;
         }
 
-        if (isTanzania || profile.fcm_token) {
+        if (pushAllowed && (isTanzania || profile.fcm_token)) {
             options.push = options.push ?? true;
         }
 
         // Try Push Notification
-        if (options.push && profile.fcm_token) {
-            if (options.template) {
-                await orbiGatewayService.sendTemplate(options.template as TemplateName, profile.fcm_token, vars as any, { 
-                    language, 
-                    messageType: category === 'promo' ? 'promotional' : 'transactional',
-                    channel: 'push',
-                    fcmToken: profile.fcm_token,
-                    requestId: id
-                });
-            } else {
-                await orbiGatewayService.sendPush(profile.fcm_token, subject, body, { category, messageId: id }, language, undefined, undefined, id);
-            }
+        if (options.push && pushAllowed && profile.fcm_token) {
+            await firebasePushService.send({
+                token: profile.fcm_token,
+                title: displaySubject,
+                body: displayBody,
+                data: {
+                    category,
+                    messageId: id,
+                    refId,
+                    ...(options.template ? { templateName: options.template } : {}),
+                    ...(options.eventCode ? { eventCode: options.eventCode } : {}),
+                },
+                requestId: id,
+            });
         }
 
         // Try SMS
         if (options.sms && profile.phone) {
-            if (options.template) {
-                await orbiGatewayService.sendTemplate(options.template as TemplateName, formattedPhone, vars as any, { 
+            if (templatePlan.templateName) {
+                await orbiGatewayService.sendTemplate(templatePlan.templateName as TemplateName, formattedPhone, vars as any, { 
                     language, 
                     messageType: category === 'promo' ? 'promotional' : 'transactional',
                     channel: 'sms',
                     fcmToken: profile.fcm_token,
                     requestId: id
                 });
-            } else {
+            } else if (templatePlan.systemCustomBypass) {
                 await orbiGatewayService.sendSms(formattedPhone, `${subject}: ${body}`, language, undefined, undefined, id);
             }
         }
 
         // Try Email (with fallback to SMS if requested)
-        if (options.email && profile.email) {
+        if (options.email && emailAllowed && profile.email) {
             let emailSent = false;
-            if (options.template) {
-                emailSent = await orbiGatewayService.sendTemplate(options.template as TemplateName, profile.email, vars as any, { 
+            if (templatePlan.templateName) {
+                emailSent = await orbiGatewayService.sendTemplate(templatePlan.templateName as TemplateName, profile.email, vars as any, { 
                     language, 
                     messageType: category === 'promo' ? 'promotional' : 'transactional',
                     channel: 'email',
                     fcmToken: profile.fcm_token,
                     requestId: id
                 });
-            } else {
-                emailSent = await orbiGatewayService.sendEmail(profile.email, subject, body, undefined, language, undefined, undefined, id);
             }
         }
 
         // Try WhatsApp
         if (options.whatsapp && profile.phone) {
-            if (options.template) {
-                await orbiGatewayService.sendTemplate(options.template as TemplateName, formattedPhone, vars as any, { 
+            if (templatePlan.templateName) {
+                await orbiGatewayService.sendTemplate(templatePlan.templateName as TemplateName, formattedPhone, vars as any, { 
                     language, 
                     messageType: category === 'promo' ? 'promotional' : 'transactional',
                     channel: 'whatsapp',
                     fcmToken: profile.fcm_token,
                     requestId: id
                 });
-            } else {
+            } else if (templatePlan.systemCustomBypass) {
                 // Fallback to SMS if no template, as WhatsApp usually requires templates for business-initiated messages
                 await orbiGatewayService.sendSms(formattedPhone, `${subject}: ${body}`, language, undefined, undefined, id);
             }

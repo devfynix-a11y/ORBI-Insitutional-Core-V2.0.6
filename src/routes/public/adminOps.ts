@@ -1,10 +1,68 @@
 import type { RequestHandler, Router } from 'express';
+import { z } from 'zod';
 import { Audit } from '../../../backend/security/audit.js';
 import { getAdminSupabase, getSupabase } from '../../../backend/supabaseClient.js';
 import { ServiceActorOps } from '../../../backend/features/ServiceActorOps.js';
 import { Messaging } from '../../../backend/features/MessagingService.js';
+import { staffMessagingAdminService } from '../../../backend/features/StaffMessagingAdminService.js';
 import { AuthService } from '../../../iam/authService.js';
 import { sessionHasAnyRole } from '../../middleware/auth/authorization.js';
+
+const MessageAudienceFiltersSchema = z.object({
+  search: z.string().trim().optional(),
+  country: z.string().trim().optional(),
+  registryType: z.string().trim().optional(),
+  kycStatus: z.string().trim().optional(),
+  accountStatus: z.string().trim().optional(),
+  appOrigin: z.string().trim().optional(),
+  hasPhone: z.boolean().optional(),
+  hasEmail: z.boolean().optional(),
+  createdAfter: z.string().trim().optional(),
+  createdBefore: z.string().trim().optional(),
+  newCustomersWithinDays: z.coerce.number().int().positive().optional(),
+  minTransactionCount: z.coerce.number().int().min(0).optional(),
+  minTransactionAmount: z.coerce.number().min(0).optional(),
+  maxTransactionAmount: z.coerce.number().min(0).optional(),
+  minTotalTransactionAmount: z.coerce.number().min(0).optional(),
+  currency: z.string().trim().optional(),
+  limit: z.coerce.number().int().min(1).max(5000).optional(),
+});
+
+const TemplateCatalogQuerySchema = z.object({
+  search: z.string().trim().optional(),
+  channel: z.enum(['sms', 'email', 'push', 'whatsapp']).optional(),
+  language: z.enum(['en', 'sw']).optional(),
+  messageType: z.enum(['transactional', 'promotional']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+const TemplatePreviewSchema = z.object({
+  templateName: z.string().min(1),
+  variables: z.record(z.string(), z.unknown()).optional(),
+  channel: z.enum(['sms', 'email', 'push', 'whatsapp']).optional(),
+  language: z.enum(['en', 'sw']).optional(),
+  messageType: z.enum(['transactional', 'promotional']).optional(),
+});
+
+const StaffTemplatedSendSchema = z.object({
+  templateName: z.string().min(1),
+  variables: z.record(z.string(), z.unknown()).optional(),
+  userIds: z.array(z.string().uuid()).optional(),
+  filters: MessageAudienceFiltersSchema.optional(),
+  channel: z.enum(['sms', 'email', 'push', 'whatsapp']).optional(),
+  language: z.enum(['en', 'sw']).optional(),
+  messageType: z.enum(['transactional', 'promotional']).optional(),
+  category: z.enum(['security', 'update', 'promo', 'info']).optional(),
+  maxRecipients: z.coerce.number().int().min(1).max(500).optional(),
+});
+
+const StaffSystemSmsSchema = z.object({
+  body: z.string().min(1).max(2000),
+  userIds: z.array(z.string().uuid()).optional(),
+  filters: MessageAudienceFiltersSchema.optional(),
+  category: z.enum(['security', 'update', 'promo', 'info']).optional(),
+  maxRecipients: z.coerce.number().int().min(1).max(500).optional(),
+});
 
 type Deps = {
   authenticate: RequestHandler;
@@ -430,6 +488,102 @@ export const registerAdminOpsRoutes = (v1: Router, deps: Deps) => {
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  v1.get('/admin/messaging/templates', authenticate, async (req, res) => {
+    const session = (req as any).session;
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'MARKETING', 'IT'])) {
+      return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+      const query = TemplateCatalogQuerySchema.parse(req.query);
+      const data = await staffMessagingAdminService.searchTemplates(query);
+      res.json({ success: true, data });
+    } catch (e: any) {
+      res.status(400).json({ success: false, error: e.message });
+    }
+  });
+
+  v1.post('/admin/messaging/templates/preview', authenticate, async (req, res) => {
+    const session = (req as any).session;
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'MARKETING', 'IT'])) {
+      return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+      const payload = TemplatePreviewSchema.parse(req.body);
+      const data = await staffMessagingAdminService.previewTemplate(payload);
+      res.json({ success: true, data });
+    } catch (e: any) {
+      res.status(400).json({ success: false, error: e.message });
+    }
+  });
+
+  v1.post('/admin/messaging/audience/preview', authenticate, async (req, res) => {
+    const session = (req as any).session;
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'MARKETING', 'IT'])) {
+      return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+      const filters = MessageAudienceFiltersSchema.parse(req.body || {});
+      const data = await staffMessagingAdminService.previewAudience(filters);
+      res.json({ success: true, data });
+    } catch (e: any) {
+      res.status(400).json({ success: false, error: e.message });
+    }
+  });
+
+  v1.post('/admin/messaging/send-template', authenticate, async (req, res) => {
+    const session = (req as any).session;
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'MARKETING', 'IT'])) {
+      return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+      const payload = StaffTemplatedSendSchema.parse(req.body);
+      const data = await staffMessagingAdminService.sendTemplated({
+        actorId: session.sub,
+        ...payload,
+      });
+
+      await Audit.log('ADMIN', session.sub, 'STAFF_TEMPLATE_MESSAGE_SENT', {
+        templateName: payload.templateName,
+        userIdCount: payload.userIds?.length || 0,
+        hasFilters: !!payload.filters,
+        category: payload.category || null,
+      });
+
+      res.json({ success: true, data });
+    } catch (e: any) {
+      res.status(400).json({ success: false, error: e.message });
+    }
+  });
+
+  v1.post('/admin/messaging/send-system-sms', authenticate, async (req, res) => {
+    const session = (req as any).session;
+    if (!sessionHasAnyRole(session, ['ADMIN', 'SUPER_ADMIN', 'CUSTOMER_CARE', 'IT'])) {
+      return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+      const payload = StaffSystemSmsSchema.parse(req.body);
+      const data = await staffMessagingAdminService.sendSystemCustomSms({
+        actorId: session.sub,
+        ...payload,
+      });
+
+      await Audit.log('ADMIN', session.sub, 'STAFF_SYSTEM_SMS_SENT', {
+        userIdCount: payload.userIds?.length || 0,
+        hasFilters: !!payload.filters,
+        category: payload.category || null,
+      });
+
+      res.json({ success: true, data });
+    } catch (e: any) {
+      res.status(400).json({ success: false, error: e.message });
     }
   });
 

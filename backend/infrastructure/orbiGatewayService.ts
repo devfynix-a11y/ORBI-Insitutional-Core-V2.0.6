@@ -1,6 +1,6 @@
 import { logger } from './logger.js';
 import parsePhoneNumber from 'libphonenumber-js';
-import { TemplateName, TemplatePayloads } from '../templates/template_types.js';
+import { MessageType, TemplateChannel, TemplateLanguage, TemplateName, TemplatePayloads } from '../templates/template_types.js';
 
 export const gatewayInfraLogger = logger.child({ component: 'orbi_gateway_service' });
 
@@ -57,8 +57,9 @@ class OrbiGatewayService {
                     'x-api-key': this.apiKey
                 },
                 body: JSON.stringify({
-                    phone: normalizedRecipient,
-                    message: body,
+                    recipient: normalizedRecipient,
+                    body,
+                    channel: 'sms',
                     messageType: 'transactional',
                     language,
                     ownerUid: process.env.OBI_GATEWAY_USER_ID,
@@ -97,8 +98,8 @@ class OrbiGatewayService {
                 },
                 body: JSON.stringify({
                     recipient,
+                    body,
                     subject,
-                    message: body,
                     html,
                     messageType: 'transactional',
                     language,
@@ -218,6 +219,58 @@ class OrbiGatewayService {
         } catch (error) {
             gatewayInfraLogger.error('gateway_service.template_exception', { channel, recipient, template_name: templateName }, error);
             return false;
+        }
+    }
+
+    async getTemplateCatalog(options: {
+        search?: string;
+        channel?: TemplateChannel;
+        language?: TemplateLanguage;
+        messageType?: MessageType;
+        limit?: number;
+    } = {}): Promise<Array<{
+        name: string;
+        channel: TemplateChannel;
+        language: TemplateLanguage | string;
+        messageType: MessageType;
+        subject?: string;
+        body: string;
+        variables: string[];
+    }>> {
+        if (!this.apiKey || !this.baseUrl) {
+            gatewayInfraLogger.error('gateway_service.template_catalog_missing_configuration');
+            return [];
+        }
+
+        const params = new URLSearchParams();
+        if (options.search) params.set('search', options.search);
+        if (options.channel) params.set('channel', options.channel);
+        if (options.language) params.set('language', options.language);
+        if (options.messageType) params.set('messageType', options.messageType);
+        if (options.limit) params.set('limit', String(options.limit));
+
+        const endpoint = `${this.baseUrl}/api/templates/catalog${params.size ? `?${params.toString()}` : ''}`;
+
+        try {
+            const response = await fetch(endpoint, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': this.apiKey
+                },
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                gatewayInfraLogger.error('gateway_service.template_catalog_failed', { endpoint, status_code: response.status, error_text: errorText });
+                return [];
+            }
+
+            const payload = await response.json().catch(() => ({}));
+            return Array.isArray(payload?.data) ? payload.data : [];
+        } catch (error) {
+            gatewayInfraLogger.error('gateway_service.template_catalog_exception', { endpoint }, error);
+            return [];
         }
     }
 }

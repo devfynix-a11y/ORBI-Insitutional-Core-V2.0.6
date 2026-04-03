@@ -163,6 +163,8 @@ export interface UserProfile {
     kyc_level?: number;
     kyc_status?: string;
     customer_id?: string;
+    notif_push?: boolean;
+    notif_email?: boolean;
     notif_security?: boolean;
     notif_financial?: boolean;
     notif_budget?: boolean;

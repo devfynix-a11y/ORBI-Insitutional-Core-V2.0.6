@@ -62,6 +62,8 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON_BASE64
+        sync: false
       - key: ORBI_INTERNAL_MTLS_MODE
         value: "required"
       - key: ORBI_INTERNAL_MTLS_SOURCE
