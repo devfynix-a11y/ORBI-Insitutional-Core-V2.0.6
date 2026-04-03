@@ -4,12 +4,14 @@ services:
     env: node
     plan: starter
     region: ohio
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NPM_CONFIG_PRODUCTION
+        value: "false"
       - key: BACKEND_URL
         value: "https://orbi-financial-technologies-c0re-v2026.onrender.com"
       - key: RP_ID
