@@ -28,15 +28,19 @@
 - `WORKER_SECRET`
 - `WORKER_SIGNING_SECRET`
 - `ORBI_INTERNAL_MTLS_MODE=required`
+- `ORBI_INTERNAL_MTLS_SOURCE`
+- `ORBI_ENFORCE_HTTPS=true`
 - `RP_ID`
 - `ORBI_WEB_ORIGIN`
 - `ORBI_MOBILE_ORIGIN`
+- `ORBI_CORE_PORTAL_APP_ORIGIN`
 - `ORBI_ANDROID_APP_HASH`
 
 ### Strongly Recommended
 - `REDIS_URL` or `REDIS_CLUSTER_NODES`
 - `REDIS_TLS_ENABLED=true`
 - `REDIS_ALLOW_INSECURE_TLS=false`
+- `ORBI_TLS_ENABLED=true` with valid `ORBI_TLS_CERT_PATH` and `ORBI_TLS_KEY_PATH` when terminating TLS directly on the Node server
 - `ORBI_GATEWAY_API_KEY` and `ORBI_GATEWAY_URL`
 - `ORBI_WEBHOOK_MAX_AGE_SECONDS`
 - `ORBI_WEBHOOK_REPLAY_WINDOW_SECONDS`
@@ -54,16 +58,51 @@
 ## Pre-Flight Checklist
 1. Confirm required production env vars are present (see above).
 2. Confirm `ORBI_INTERNAL_MTLS_MODE=required` and worker signing secrets are set.
-3. Ensure Supabase connectivity using service-role credentials.
-4. Verify critical RPCs exist:
+3. Confirm internal mTLS source is explicitly configured:
+   - proxy mode: `ORBI_INTERNAL_MTLS_SOURCE=proxy` and `ORBI_INTERNAL_MTLS_PROXY_SHARED_SECRET`
+   - direct mode: `ORBI_INTERNAL_MTLS_SOURCE=direct` and `ORBI_INTERNAL_MTLS_CA_PATH`
+4. Confirm desktop portal identity is configured if desktop clients are enabled:
+   - `ORBI_CORE_PORTAL_APP_ID`
+   - `ORBI_CORE_PORTAL_APP_ORIGIN`
+5. Ensure Supabase connectivity using service-role credentials.
+6. Verify critical RPCs exist:
    - `post_transaction_v2`
    - `append_ledger_entries_v1`
    - `claim_internal_transfer_settlement`
    - `complete_internal_transfer_settlement`
    - `repair_wallet_balance_emergency`
-5. Validate Redis connectivity (or accept degraded mode if intentionally disabled).
-6. Verify provider registry readiness for active partners (mapping config, webhook callback config).
-7. Run `/health` and `/api/admin/monitor/operational-health` before opening traffic.
+7. Validate Redis connectivity (or accept degraded mode if intentionally disabled).
+8. Verify provider registry readiness for active partners (mapping config, webhook callback config).
+9. Run `/health` and `/api/admin/monitor/operational-health` before opening traffic.
+
+## TLS / SSL
+- If you are behind a managed edge such as Render, keep:
+  - `ORBI_ENFORCE_HTTPS=true`
+  - `ORBI_TLS_ENABLED=false`
+  This relies on the platform TLS terminator plus strict HTTPS enforcement and HSTS inside the app.
+- If you terminate TLS directly in Node, set:
+  - `ORBI_TLS_ENABLED=true`
+  - `ORBI_TLS_CERT_PATH=/path/to/fullchain.pem`
+  - `ORBI_TLS_KEY_PATH=/path/to/privkey.pem`
+  - optional `ORBI_TLS_CA_PATH=/path/to/ca.pem`
+- In production, startup now fails if HTTPS enforcement is disabled or TLS file paths are missing while `ORBI_TLS_ENABLED=true`.
+- Database/API transport is also locked down:
+  - `SUPABASE_URL` must use `https://` in production
+  - Redis should use `rediss://` with `REDIS_TLS_ENABLED=true`
+  - direct insecure database transport is not allowed by startup validation
+
+## Internal mTLS
+- Preferred on Render:
+  - `ORBI_INTERNAL_MTLS_SOURCE=proxy`
+  - trusted proxy/service mesh verifies client certs
+  - proxy injects `ORBI_INTERNAL_MTLS_PROXY_HEADER` with secret `ORBI_INTERNAL_MTLS_PROXY_SHARED_SECRET`
+  - backend rejects spoofed mTLS headers without that attestation
+- Direct end-to-end Node termination:
+  - `ORBI_INTERNAL_MTLS_SOURCE=direct`
+  - `ORBI_TLS_ENABLED=true`
+  - `ORBI_INTERNAL_MTLS_CA_PATH=/path/to/internal-ca.pem`
+  - workers must connect directly to Node and present valid client certs
+  - use this only where infrastructure allows direct TLS connectivity to the service
 
 ## Database Migration Order
 1. Apply core schema: `database/reset_schema.sql`

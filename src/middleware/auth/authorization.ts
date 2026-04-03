@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import type { DetailedPeerCertificate, TLSSocket } from 'tls';
 import { RedisClusterFactory } from '../../../backend/infrastructure/RedisClusterFactory.js';
 import { Audit } from '../../../backend/security/audit.js';
 
@@ -18,6 +19,9 @@ export type MutualTlsIdentity = {
   serialNumber: string | null;
   forwardedCert: string | null;
   verificationHeader: string | null;
+  source: 'direct' | 'proxy' | 'none';
+  authorizationError: string | null;
+  attestedByProxy: boolean;
 };
 
 export type InternalRequestIdentity = WorkerIdentity & {
@@ -96,11 +100,19 @@ const signedInternalRequestMaxAgeSeconds = Number(process.env.ORBI_INTERNAL_REQU
 const signedInternalReplayWindowSeconds = Number(process.env.ORBI_INTERNAL_REPLAY_WINDOW_SECONDS || 600);
 const allowLocalReplayStore =
   process.env.NODE_ENV !== 'production' || process.env.ORBI_ALLOW_PROCESS_LOCAL_INTERNAL_REPLAY_STORE === 'true';
+const trustedMtlsProxyHeader = String(process.env.ORBI_INTERNAL_MTLS_PROXY_HEADER || 'x-orbi-mtls-attested').trim();
+const trustedMtlsProxySecret = String(process.env.ORBI_INTERNAL_MTLS_PROXY_SHARED_SECRET || '').trim();
 const getInternalMtlsMode = () => {
   const configured = String(process.env.ORBI_INTERNAL_MTLS_MODE || '').trim().toLowerCase();
   if (configured === 'required' || configured === 'optional') return configured;
   if (configured === 'off') return 'off';
   return process.env.NODE_ENV === 'production' ? 'required' : 'off';
+};
+
+const getInternalMtlsSource = (): 'proxy' | 'direct' => {
+  const configured = String(process.env.ORBI_INTERNAL_MTLS_SOURCE || '').trim().toLowerCase();
+  if (configured === 'direct') return 'direct';
+  return 'proxy';
 };
 
 export const extractBearerToken = (req: Pick<Request, 'headers'>): string | null => {
@@ -223,7 +235,60 @@ export const createAuthorizationMiddleware = (
   };
 };
 
-export const resolveMutualTlsIdentity = (req: Request): MutualTlsIdentity => {
+const carriesForwardedMtlsHeaders = (req: Request): boolean => Boolean(
+  req.get('x-ssl-client-verify') ||
+  req.get('x-client-cert-verified') ||
+  req.get('x-forwarded-client-cert-verified') ||
+  req.get('x-ssl-client-subject-dn') ||
+  req.get('x-client-cert-subject') ||
+  req.get('x-forwarded-client-cert-subject') ||
+  req.get('x-forwarded-client-cert') ||
+  req.get('x-ssl-client-cert'),
+);
+
+const hasTrustedProxyMtlsAttestation = (req: Request): boolean => {
+  if (!trustedMtlsProxyHeader || !trustedMtlsProxySecret) {
+    return false;
+  }
+
+  const attestation = String(req.get(trustedMtlsProxyHeader) || '').trim();
+  return Boolean(attestation) && timingSafeMatch(attestation, trustedMtlsProxySecret);
+};
+
+const resolveDirectMutualTlsIdentity = (req: Request): MutualTlsIdentity => {
+  const socket = req.socket as TLSSocket | undefined;
+  const hasPeerCertificate = typeof socket?.getPeerCertificate === 'function';
+  const peerCertificate = hasPeerCertificate
+    ? socket!.getPeerCertificate(true) as DetailedPeerCertificate | Record<string, unknown>
+    : null;
+  const hasPresentedCert = Boolean(peerCertificate && Object.keys(peerCertificate).length);
+  const certificateRecord = hasPresentedCert && peerCertificate ? peerCertificate : null;
+  const certificateSubject = certificateRecord && typeof certificateRecord === 'object' && 'subject' in certificateRecord
+    ? JSON.stringify((peerCertificate as DetailedPeerCertificate).subject || {})
+    : null;
+  const certificateIssuer = certificateRecord && typeof certificateRecord === 'object' && 'issuer' in certificateRecord
+    ? JSON.stringify((peerCertificate as DetailedPeerCertificate).issuer || {})
+    : null;
+  const serialNumber = certificateRecord && typeof certificateRecord === 'object' && 'serialNumber' in certificateRecord
+    ? String((peerCertificate as DetailedPeerCertificate).serialNumber || '').trim() || null
+    : null;
+
+  const verified = Boolean(socket?.authorized && hasPresentedCert);
+
+  return {
+    verified,
+    subject: certificateSubject,
+    issuer: certificateIssuer,
+    serialNumber,
+    forwardedCert: null,
+    verificationHeader: null,
+    source: verified || hasPresentedCert ? 'direct' : 'none',
+    authorizationError: typeof socket?.authorizationError === 'string' ? socket.authorizationError : null,
+    attestedByProxy: false,
+  };
+};
+
+const resolveProxyMutualTlsIdentity = (req: Request): MutualTlsIdentity => {
   const verificationHeader = String(
     req.get('x-ssl-client-verify') ||
     req.get('x-client-cert-verified') ||
@@ -253,7 +318,7 @@ export const resolveMutualTlsIdentity = (req: Request): MutualTlsIdentity => {
     req.get('x-ssl-client-cert') ||
     '',
   ).trim() || null;
-  const verified = ['success', 'ok', 'true', 'verified', '1'].includes(verificationHeader.toLowerCase());
+  const verified = ['success', 'ok', 'true', 'verified', '1'].includes(String(verificationHeader || '').toLowerCase());
 
   return {
     verified,
@@ -262,7 +327,34 @@ export const resolveMutualTlsIdentity = (req: Request): MutualTlsIdentity => {
     serialNumber,
     forwardedCert,
     verificationHeader: verificationHeader || null,
+    source: verified || verificationHeader || subject || issuer || serialNumber || forwardedCert ? 'proxy' : 'none',
+    authorizationError: null,
+    attestedByProxy: true,
   };
+};
+
+export const resolveMutualTlsIdentity = (req: Request): MutualTlsIdentity => {
+  const source = getInternalMtlsSource();
+
+  if (source === 'direct') {
+    return resolveDirectMutualTlsIdentity(req);
+  }
+
+  if (!hasTrustedProxyMtlsAttestation(req)) {
+    return {
+      verified: false,
+      subject: null,
+      issuer: null,
+      serialNumber: null,
+      forwardedCert: null,
+      verificationHeader: null,
+      source: carriesForwardedMtlsHeaders(req) ? 'proxy' : 'none',
+      authorizationError: carriesForwardedMtlsHeaders(req) ? 'UNTRUSTED_PROXY_MTLS_HEADERS' : null,
+      attestedByProxy: false,
+    };
+  }
+
+  return resolveProxyMutualTlsIdentity(req);
 };
 
 export const resolveWorkerIdentity = (req: Request): WorkerIdentity | null => {
@@ -548,12 +640,28 @@ export const createInternalWorkerMiddleware = (
     const bodySha256 = hashRequestBody(req.body);
     const mtlsIdentity = resolveMutualTlsIdentity(req);
 
+    if (getInternalMtlsSource() === 'proxy' && carriesForwardedMtlsHeaders(req) && !mtlsIdentity.attestedByProxy) {
+      await logInternalAuthFailure(req, worker.id, 'UNTRUSTED_MTLS_PROXY_HEADERS', {
+        required_scopes: requiredScopes,
+        requested_scopes: worker.scopes,
+        body_sha256: bodySha256,
+        mtls_mode: internalMtlsMode,
+      });
+      return res.status(401).json({
+        success: false,
+        error: 'UNTRUSTED_MTLS_PROXY_HEADERS',
+        message: 'mTLS verification headers were provided without trusted proxy attestation.',
+      });
+    }
+
     if (internalMtlsMode === 'required' && !mtlsIdentity.verified) {
       await logInternalAuthFailure(req, worker.id, 'MTLS_REQUIRED', {
         required_scopes: requiredScopes,
         requested_scopes: worker.scopes,
         body_sha256: bodySha256,
         mtls_mode: internalMtlsMode,
+        mtls_source: mtlsIdentity.source,
+        mtls_authorization_error: mtlsIdentity.authorizationError,
       });
       return res.status(401).json({
         success: false,
@@ -569,6 +677,8 @@ export const createInternalWorkerMiddleware = (
         body_sha256: bodySha256,
         mtls_mode: internalMtlsMode,
         mtls_verification_header: mtlsIdentity.verificationHeader,
+        mtls_source: mtlsIdentity.source,
+        mtls_authorization_error: mtlsIdentity.authorizationError,
       });
       return res.status(401).json({ success: false, error: 'INVALID_MTLS_IDENTITY' });
     }

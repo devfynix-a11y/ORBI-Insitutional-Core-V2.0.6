@@ -1,5 +1,6 @@
 import { logger } from '../../backend/infrastructure/logger.js';
 import { getAdminSupabase, getSupabase } from '../../services/supabaseClient.js';
+import fs from 'fs';
 
 const REQUIRED_ENV_PROD = [
   'JWT_SECRET',
@@ -65,6 +66,14 @@ export const validateStartupEnvironment = () => {
   }
 
   if (isProd) {
+    const supabaseUrl = String(process.env.SUPABASE_URL || '').trim();
+    if (!supabaseUrl.startsWith('https://')) {
+      logger.fatal('startup.invalid_supabase_transport', {
+        supabase_url: supabaseUrl,
+      });
+      process.exit(1);
+    }
+
     if (
       process.env.REDIS_TLS_ENABLED === 'true' &&
       process.env.REDIS_ALLOW_INSECURE_TLS === 'true'
@@ -103,6 +112,73 @@ export const validateStartupEnvironment = () => {
         internal_mtls_mode: process.env.ORBI_INTERNAL_MTLS_MODE,
       });
       process.exit(1);
+    }
+
+    const internalMtlsSource = String(process.env.ORBI_INTERNAL_MTLS_SOURCE || 'proxy').trim().toLowerCase();
+    if (!['proxy', 'direct'].includes(internalMtlsSource)) {
+      logger.fatal('startup.invalid_internal_mtls_source', {
+        internal_mtls_source: process.env.ORBI_INTERNAL_MTLS_SOURCE,
+      });
+      process.exit(1);
+    }
+
+    if (internalMtlsSource === 'proxy' && !String(process.env.ORBI_INTERNAL_MTLS_PROXY_SHARED_SECRET || '').trim()) {
+      logger.fatal('startup.missing_internal_mtls_proxy_secret', {
+        internal_mtls_source: internalMtlsSource,
+      });
+      process.exit(1);
+    }
+
+    if (internalMtlsSource === 'direct' && String(process.env.ORBI_TLS_ENABLED || '').trim().toLowerCase() !== 'true') {
+      logger.fatal('startup.invalid_direct_mtls_transport', {
+        internal_mtls_source: internalMtlsSource,
+        tls_enabled: process.env.ORBI_TLS_ENABLED,
+      });
+      process.exit(1);
+    }
+
+    if (String(process.env.ORBI_ENFORCE_HTTPS || 'true').trim().toLowerCase() === 'false') {
+      logger.fatal('startup.https_enforcement_disabled', {
+        enforce_https: process.env.ORBI_ENFORCE_HTTPS,
+      });
+      process.exit(1);
+    }
+  }
+
+  if (String(process.env.ORBI_TLS_ENABLED || '').trim().toLowerCase() === 'true') {
+    const requiredTlsPaths = ['ORBI_TLS_KEY_PATH', 'ORBI_TLS_CERT_PATH'];
+
+    for (const key of requiredTlsPaths) {
+      const candidate = String(process.env[key] || '').trim();
+      if (!candidate) {
+        logger.fatal('startup.missing_tls_file_path', { env_key: key });
+        process.exit(1);
+      }
+
+      if (!fs.existsSync(candidate)) {
+        logger.fatal('startup.tls_file_missing', { env_key: key, path: candidate });
+        process.exit(1);
+      }
+    }
+
+    const caPath = String(process.env.ORBI_TLS_CA_PATH || '').trim();
+    if (caPath && !fs.existsSync(caPath)) {
+      logger.fatal('startup.tls_file_missing', { env_key: 'ORBI_TLS_CA_PATH', path: caPath });
+      process.exit(1);
+    }
+
+    if (String(process.env.ORBI_INTERNAL_MTLS_SOURCE || 'proxy').trim().toLowerCase() === 'direct') {
+      const internalMtlsCaPath = String(process.env.ORBI_INTERNAL_MTLS_CA_PATH || process.env.ORBI_TLS_CA_PATH || '').trim();
+      if (!internalMtlsCaPath) {
+        logger.fatal('startup.missing_internal_mtls_ca', {
+          env_key: 'ORBI_INTERNAL_MTLS_CA_PATH',
+        });
+        process.exit(1);
+      }
+      if (!fs.existsSync(internalMtlsCaPath)) {
+        logger.fatal('startup.tls_file_missing', { env_key: 'ORBI_INTERNAL_MTLS_CA_PATH', path: internalMtlsCaPath });
+        process.exit(1);
+      }
     }
   }
 };

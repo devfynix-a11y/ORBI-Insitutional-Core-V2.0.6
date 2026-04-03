@@ -86,7 +86,12 @@ Authentication failures generate `INTERNAL_REQUEST_AUTH_FAILED` security audit e
 
 ## mTLS support
 
-The middleware is now mTLS-aware when a trusted edge, reverse proxy, or service mesh forwards verified client certificate metadata headers. Supported verification headers include values like:
+The middleware now supports two hardened mTLS source modes controlled by `ORBI_INTERNAL_MTLS_SOURCE`:
+
+- `proxy`: a trusted edge, reverse proxy, or service mesh verifies the client certificate and must also attach an attestation secret header before the backend will trust any forwarded mTLS headers
+- `direct`: Node terminates TLS itself, requests client certificates, and validates them with a configured CA bundle
+
+Supported forwarded verification headers include values like:
 
 - `x-ssl-client-verify`
 - `x-client-cert-verified`
@@ -94,7 +99,7 @@ The middleware is now mTLS-aware when a trusted edge, reverse proxy, or service 
 
 Supported identity headers include subject, issuer, serial, and forwarded certificate fields.
 
-Mode is controlled by `ORBI_INTERNAL_MTLS_MODE`:
+Verification behavior is controlled by `ORBI_INTERNAL_MTLS_MODE`:
 
 - `required`: reject internal requests unless mTLS verification headers indicate success
 - `optional`: accept requests without mTLS headers, but reject requests that present failed verification headers
@@ -102,13 +107,33 @@ Mode is controlled by `ORBI_INTERNAL_MTLS_MODE`:
 
 Production required behavior is `required`, and startup validation now fails if `ORBI_INTERNAL_MTLS_MODE` is not set to `required`.
 
+### Proxy attestation hardening
+
+When `ORBI_INTERNAL_MTLS_SOURCE=proxy`, the backend will only trust forwarded mTLS headers if the request also includes:
+
+- header name from `ORBI_INTERNAL_MTLS_PROXY_HEADER` (default `x-orbi-mtls-attested`)
+- exact shared secret value from `ORBI_INTERNAL_MTLS_PROXY_SHARED_SECRET`
+
+If a request presents forwarded mTLS headers without proxy attestation, it is rejected as `UNTRUSTED_MTLS_PROXY_HEADERS`.
+
+### Direct Node mTLS termination
+
+When `ORBI_INTERNAL_MTLS_SOURCE=direct`, the backend expects:
+
+- `ORBI_TLS_ENABLED=true`
+- `ORBI_TLS_CERT_PATH`
+- `ORBI_TLS_KEY_PATH`
+- `ORBI_INTERNAL_MTLS_CA_PATH` (or fallback `ORBI_TLS_CA_PATH`)
+
+In this mode, Node requests client certificates during the TLS handshake and internal routes require the presented client certificate to be valid.
+
 ## Current limitations
 
 This is materially stronger than the old worker-secret-only model, but there are still important limitations:
 
 - HMAC-signed requests still rely on symmetric shared secrets
-- mTLS verification is only as strong as the trusted edge/service mesh forwarding the certificate verification result
-- full end-to-end mutual TLS still depends on infrastructure configuration outside this Node service
+- proxy-mode mTLS verification is only as strong as the trusted edge/service mesh forwarding the certificate verification result and protecting the attestation secret
+- direct Node mTLS termination requires direct TLS connectivity to the Node service and is not a drop-in substitute for managed edge TLS termination
 - legacy shared-secret mode remains intentionally weaker and should stay disabled in production
 - process-local replay protection is only a fallback; Redis-backed replay protection is preferred for multi-node deployments
 
@@ -116,5 +141,6 @@ This is materially stronger than the old worker-secret-only model, but there are
 
 - keep signed internal requests enabled
 - keep legacy shared-secret fallback disabled
-- run internal traffic behind a trusted proxy or mesh that forwards verified client-certificate metadata
+- when using proxy mode, run internal traffic behind a trusted proxy or mesh that forwards verified client-certificate metadata and injects the attestation secret header
+- when using direct mode, ensure workers connect directly over TLS and present certificates signed by the configured internal CA
 - keep `ORBI_INTERNAL_MTLS_MODE=required` in production

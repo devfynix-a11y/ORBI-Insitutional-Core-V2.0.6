@@ -10,6 +10,9 @@ import { sanitizeContent } from './sanitize.js';
 import { riskAssessment } from './riskAssessment.js';
 
 const isProd = process.env.NODE_ENV === 'production';
+const enforceHttps = String(process.env.ORBI_ENFORCE_HTTPS || (isProd ? 'true' : 'false'))
+  .trim()
+  .toLowerCase() === 'true';
 
 const configuredOrigins = [
   process.env.ORIGIN,
@@ -40,6 +43,33 @@ type SecuritySetupOptions = {
 
 export const configureCoreSecurityMiddleware = (app: Express, options: SecuritySetupOptions) => {
   const { redisClient, allowProcessLocalIdempotency, idempotencyTtlSeconds } = options;
+
+  if (enforceHttps) {
+    app.use((req, res, next) => {
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+      const isHttps = req.secure || forwardedProto === 'https';
+
+      if (isHttps) {
+        return next();
+      }
+
+      const host = req.get('host');
+      if (!host) {
+        return res.status(400).json({ success: false, error: 'HTTPS_REQUIRED' });
+      }
+
+      const redirectTarget = `https://${host}${req.originalUrl || req.url || '/'}`;
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        return res.redirect(308, redirectTarget);
+      }
+
+      return res.status(426).json({
+        success: false,
+        error: 'HTTPS_REQUIRED',
+        redirect_to: redirectTarget,
+      });
+    });
+  }
 
   app.use(createIdempotencyMiddleware({
     redisClient,

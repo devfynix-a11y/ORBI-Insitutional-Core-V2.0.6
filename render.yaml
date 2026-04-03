@@ -26,10 +26,14 @@ services:
         value: "com.orbi.mobile"
       - key: ORBI_IOS_TEAM_ID
         sync: false
+      - key: ORBI_CORE_PORTAL_APP_ORIGIN
+        value: "ORBI-NODE-PORTAL-V2026"
+      - key: ORBI_CORE_PORTAL_APP_ID
+        value: "ORBI_NODE_PORTAL_V2026"
       - key: ORBI_CORE_APP_ORIGIN
-        value: "ORBI_INSTITUTIONAL_CORE_V2026"
+        value: "ORBI-NODE-APPS-V2026"
       - key: ORBI_CORE_APP_ID
-        value: "ORBI_INSTITUTIONAL_CORE_V2026"
+        value: "ORBI_NODE_APPS_V2026"
       - key: ORBI_INSTITUTIONAL_APP_ID
         value: "ORBI_INSTITUTIONAL_CORE_V2026"
       - key: ORBI_INSTITUTIONAL_APP_ORIGIN
@@ -60,6 +64,16 @@ services:
         sync: false
       - key: ORBI_INTERNAL_MTLS_MODE
         value: "required"
+      - key: ORBI_INTERNAL_MTLS_SOURCE
+        value: "proxy"
+      - key: ORBI_INTERNAL_MTLS_PROXY_HEADER
+        value: "x-orbi-mtls-attested"
+      - key: ORBI_INTERNAL_MTLS_PROXY_SHARED_SECRET
+        sync: false
+      - key: ORBI_ENFORCE_HTTPS
+        value: "true"
+      - key: ORBI_TLS_ENABLED
+        value: "false"
       - key: ORBI_ALLOWED_ORIGINS
         sync: false
       - key: GEMINI_API_KEY
