@@ -4696,7 +4696,7 @@ END $$;
 -- 7B. PAYMENT PROVIDER BOOTSTRAP (IDEMPOTENT)
 DO $$
 BEGIN
-    -- Provider registry seeds keep fresh environments deposit-ready.
+    -- Provider registry seeds are placeholders only; production operators must configure real providers before activation.
     INSERT INTO public.financial_partners (
         id, name, type, supported_currencies, icon, color, api_base_url,
         provider_metadata, mapping_config, logic_type, status
@@ -4729,7 +4729,7 @@ BEGIN
             )
         ),
         'REGISTRY',
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000102',
@@ -4759,7 +4759,7 @@ BEGIN
             )
         ),
         'REGISTRY',
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000103',
@@ -4788,7 +4788,7 @@ BEGIN
             )
         ),
         'REGISTRY',
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000104',
@@ -4818,7 +4818,7 @@ BEGIN
             )
         ),
         'REGISTRY',
-        'ACTIVE'
+        'INACTIVE'
     )
     ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -4845,8 +4845,8 @@ BEGIN
         '255700000001',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'deposit_collection', 'rail', 'MOBILE_MONEY')
     ),
     (
@@ -4858,8 +4858,8 @@ BEGIN
         '255700000002',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'outbound_settlement', 'rail', 'MOBILE_MONEY')
     ),
     (
@@ -4871,8 +4871,8 @@ BEGIN
         '255700000003',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'fee_collection', 'rail', 'MOBILE_MONEY')
     ),
     (
@@ -4884,8 +4884,8 @@ BEGIN
         '255700000004',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'tax_collection', 'rail', 'MOBILE_MONEY')
     ),
     (
@@ -4897,8 +4897,8 @@ BEGIN
         '1100000001',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'deposit_collection', 'rail', 'BANK')
     ),
     (
@@ -4910,8 +4910,8 @@ BEGIN
         '1100000002',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'outbound_settlement', 'rail', 'BANK')
     ),
     (
@@ -4923,8 +4923,8 @@ BEGIN
         '1100000003',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'fee_collection', 'rail', 'BANK')
     ),
     (
@@ -4936,8 +4936,8 @@ BEGIN
         '1100000004',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'tax_collection', 'rail', 'BANK')
     ),
     (
@@ -4949,8 +4949,8 @@ BEGIN
         '2200000001',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'deposit_collection', 'rail', 'CARD_GATEWAY')
     ),
     (
@@ -4962,8 +4962,8 @@ BEGIN
         '2200000002',
         'TZS',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'outbound_settlement', 'rail', 'CARD_GATEWAY')
     ),
     (
@@ -4975,8 +4975,8 @@ BEGIN
         'CRYPTO-COLLECT-001',
         'USDT',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'deposit_collection', 'rail', 'CRYPTO')
     ),
     (
@@ -4988,8 +4988,8 @@ BEGIN
         'CRYPTO-SETTLE-001',
         'USDT',
         'TZ',
-        'ACTIVE',
-        TRUE,
+        'INACTIVE',
+        FALSE,
         jsonb_build_object('purpose', 'outbound_settlement', 'rail', 'CRYPTO')
     )
     ON CONFLICT (id) DO UPDATE SET
@@ -5017,7 +5017,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000101',
         10,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000302',
@@ -5028,7 +5028,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000101',
         10,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000303',
@@ -5039,7 +5039,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000102',
         20,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000304',
@@ -5050,7 +5050,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000102',
         20,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000305',
@@ -5061,7 +5061,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000103',
         30,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000306',
@@ -5072,7 +5072,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000104',
         40,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     ),
     (
         '10000000-0000-0000-0000-000000000307',
@@ -5083,7 +5083,7 @@ BEGIN
         '10000000-0000-0000-0000-000000000104',
         40,
         '{}'::jsonb,
-        'ACTIVE'
+        'INACTIVE'
     )
     ON CONFLICT (id) DO UPDATE SET
         rail = EXCLUDED.rail,

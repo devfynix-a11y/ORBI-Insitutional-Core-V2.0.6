@@ -6,11 +6,30 @@ import { TRUSTED_APP_IDS, TRUSTED_APP_ORIGINS } from '../config/appIdentity.js';
  * ORBI TRUSTED DOMAINS
  * List of verified web origins allowed to communicate with the Sovereign Node.
  */
-export const ALLOWED_DOMAINS = [
-    'orbi-financial-technologies-c0re-v2026.onrender.com',
-    'localhost',
-    '127.0.0.1'
-];
+const isProd = process.env.NODE_ENV === 'production';
+const configuredTrustedDomains = [
+    process.env.RP_ID,
+    process.env.ORBI_WEB_ORIGIN,
+    process.env.BACKEND_URL,
+    ...(process.env.ORBI_ALLOWED_ORIGINS || '').split(','),
+]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .map((value) => {
+        try {
+            if (/^https?:\/\//i.test(value)) {
+                return new URL(value).hostname;
+            }
+            return value.replace(/^https?:\/\//i, '').split('/')[0];
+        } catch {
+            return value;
+        }
+    });
+
+export const ALLOWED_DOMAINS = Array.from(new Set([
+    ...configuredTrustedDomains,
+    ...(isProd ? [] : ['localhost', '127.0.0.1']),
+]));
 
 const ALLOWED_IOS_BUNDLE_IDS = (process.env.ORBI_IOS_BUNDLE_IDS || '')
     .split(',')
@@ -82,7 +101,7 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
     const appIdHeader = req.get('x-orbi-app-id') || ''; // App ID identification
     const appOriginHeader = req.get('x-orbi-app-origin') || '';
 
-    const isLocal = rpID === 'localhost' || rpID === '127.0.0.1';
+    const isLocal = !isProd && (rpID === 'localhost' || rpID === '127.0.0.1');
     
     // 3. Route-Aware Logic
     

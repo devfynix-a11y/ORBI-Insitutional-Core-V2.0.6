@@ -6,7 +6,7 @@
     ],
     "target": {
       "namespace": "android_app",
-      "package_name": "com.example.orbi_mobileapp",
+      "package_name": "com.orbi.mobile",
       "sha256_cert_fingerprints": [
         "89:EA:FE:BD:11:8B:28:C2:53:2F:32:4F:50:94:D4:AD:67:47:B8:2C:54:EF:95:72:39:3D:2D:31:1E:DD:83:0A"
       ]

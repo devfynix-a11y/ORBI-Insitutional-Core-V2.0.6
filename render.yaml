@@ -31,22 +31,36 @@ services:
       - key: ORBI_INSTITUTIONAL_APP_ORIGIN
         value: "ORBI_INSTITUTIONAL_CORE_V2026"
       - key: ORBI_ANDROID_PACKAGE_NAME
-        value: "com.example.orbi_mobileapp"
+        value: "com.orbi.mobile"
       - key: ORBI_ANDROID_APP_HASH
-        value: "ier+vRGLKMJTLzJPUJTUrWdHuCxU75VyOT0tMR7dgwo="
+        sync: false
       - key: APP_ID
         value: "ORBI_INSTITUTIONAL_CORE_V2026"
-      - key: API_KEY
+      - key: JWT_SECRET
         sync: false
-      - key: KMS_MASTER_SALT
+      - key: SESSION_SECRET
+        sync: false
+      - key: WORKER_SECRET
+        sync: false
+      - key: WORKER_SIGNING_SECRET
+        sync: false
+      - key: KMS_MASTER_KEY
+        sync: false
+      - key: KMS_SALT
         sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY
         sync: false
-      - key: REDIS_URL
-        value: "redis://red-d6ubkhs50q8c73fumq4g:6379"
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ORBI_INTERNAL_MTLS_MODE
+        value: "required"
+      - key: ORBI_ALLOWED_ORIGINS
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: REDIS_URL
+        value: "redis://red-d6ubkhs50q8c73fumq4g:6379"
       - key: KYC_BUCKET
         sync: false

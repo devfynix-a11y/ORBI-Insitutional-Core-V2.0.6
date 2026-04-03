@@ -9,15 +9,27 @@ import { wafInspect } from './wafInspect.js';
 import { sanitizeContent } from './sanitize.js';
 import { riskAssessment } from './riskAssessment.js';
 
-export const ALLOWED_ORIGINS = [
-  'https://orbi-financial-technologies-c0re-v2026.onrender.com',
-  'https://orbi-backend-v2-0-1.onrender.com',
-  'https://fynix-backend-v2-0-1.onrender.com',
-  'https://ais-dev-otadbk3zs67js4adfe3zhb-131722823335.europe-west2.run.app',
-  'https://ais-pre-otadbk3zs67js4adfe3zhb-131722823335.europe-west2.run.app',
-  'https://ais-dev-egx2rrccp653yh67wk47za-20006156269.europe-west2.run.app',
-  'https://ais-pre-egx2rrccp653yh67wk47za-20006156269.europe-west2.run.app',
+const isProd = process.env.NODE_ENV === 'production';
+
+const configuredOrigins = [
+  process.env.ORIGIN,
+  process.env.ORBI_WEB_ORIGIN,
+  process.env.BACKEND_URL,
+  ...(process.env.ORBI_ALLOWED_ORIGINS || '').split(','),
+]
+  .map((value) => String(value || '').trim())
+  .filter(Boolean);
+
+const devOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
 ];
+
+export const ALLOWED_ORIGINS = Array.from(
+  new Set([...(isProd ? configuredOrigins : [...configuredOrigins, ...devOrigins])]),
+);
 
 type SecuritySetupOptions = {
   redisAvailable: boolean;

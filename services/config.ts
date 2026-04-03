@@ -3,14 +3,28 @@
  * ORBI BACKEND CONFIGURATION
  * Optimized for Render Production Node
  */
+const isProd = process.env.NODE_ENV === 'production';
+const defaultBackendUrl = isProd
+    ? ''
+    : 'http://localhost:' + (process.env.PORT || '3000');
+const configuredBackendUrl = (process.env.BACKEND_URL || defaultBackendUrl).trim();
+
+if (isProd && !configuredBackendUrl) {
+    throw new Error('BACKEND_URL is required in production');
+}
+
+const wsBaseUrl = configuredBackendUrl
+    ? configuredBackendUrl.replace(/^http/i, 'ws')
+    : '';
+
 export const CONFIG = {
-    BACKEND_URL: process.env.BACKEND_URL || "https://orbi-financial-technologies-c0re-v2026.onrender.com",
+    BACKEND_URL: configuredBackendUrl,
     // Fix: Added WS_URL required by socketClient.ts, including the nexus-stream path
-    WS_URL: (process.env.BACKEND_URL || "https://orbi-financial-technologies-c0re-v2026.onrender.com").replace('http', 'ws') + "/nexus-stream",
+    WS_URL: wsBaseUrl ? `${wsBaseUrl}/nexus-stream` : '',
     APP_ID: process.env.ORBI_INSTITUTIONAL_APP_ID || process.env.ORBI_CORE_APP_ID || process.env.APP_ID || 'ORBI_INSTITUTIONAL_CORE_V2026',
     APP_ORIGIN: process.env.ORBI_INSTITUTIONAL_APP_ORIGIN || process.env.ORBI_CORE_APP_ORIGIN || 'ORBI_INSTITUTIONAL_CORE_V2026',
     // Fix: Added IS_REMOTE_BACKEND required by socketClient.ts
-    IS_REMOTE_BACKEND: true,
+    IS_REMOTE_BACKEND: /^https?:\/\//i.test(configuredBackendUrl) && !/localhost|127\.0\.0\.1/i.test(configuredBackendUrl),
     
     // Security Parameters
     WAF: {
