@@ -112,12 +112,6 @@ DROP TABLE IF EXISTS public.behavioral_biometrics CASCADE;
 DROP TABLE IF EXISTS public.ai_risk_logs CASCADE;
 DROP TABLE IF EXISTS public.secure_enclave_keys CASCADE;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='staff' AND column_name='address') THEN
-        ALTER TABLE public.staff ADD COLUMN address TEXT;
-    END IF;
-END $$;
 -- ORBI SOVEREIGN RESET SCHEMA V93.0 (FULL REBUILD)
 -- This script is generated for full reset and rebuild.
 -- It drops existing objects, then recreates the schema with the settlement_lifecycle fixes merged in.
@@ -936,19 +930,6 @@ CREATE TABLE IF NOT EXISTS public.budget_alerts (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS public.background_jobs (
-    id UUID PRIMARY KEY,
-    type TEXT NOT NULL,
-    payload JSONB,
-    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
-    attempts INTEGER DEFAULT 0,
-    max_attempts INTEGER DEFAULT 3,
-    last_error TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    processed_at TIMESTAMP WITH TIME ZONE
-);
-
 CREATE TABLE IF NOT EXISTS public.tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
     user_id UUID REFERENCES public.users(id) ON DELETE CASCADE, 
@@ -1002,6 +983,25 @@ CREATE TABLE IF NOT EXISTS public.kms_keys (
     expires_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.kms_keys
+        WHERE status = 'ACTIVE'
+        GROUP BY type
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE NOTICE 'Skipping kms_keys_one_active_per_type index creation until duplicate ACTIVE KMS keys are cleaned up.';
+    ELSE
+        EXECUTE '
+            CREATE UNIQUE INDEX IF NOT EXISTS kms_keys_one_active_per_type
+            ON public.kms_keys(type)
+            WHERE status = ''ACTIVE''
+        ';
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS public.audit_trail (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
@@ -1085,7 +1085,7 @@ CREATE TABLE IF NOT EXISTS public.external_fund_movements (
     external_reference TEXT,
     source_external_ref TEXT,
     target_external_ref TEXT,
-    settlement_lifecycle_id UUID REFERENCES public.settlement_lifecycle(id) ON DELETE SET NULL,
+    settlement_lifecycle_id UUID,
     provider_event_id TEXT,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -1678,6 +1678,10 @@ CREATE TRIGGER trg_settlement_lifecycle_updated_at
 BEFORE UPDATE ON public.settlement_lifecycle
 FOR EACH ROW
 EXECUTE FUNCTION public.set_settlement_lifecycle_updated_at();
+
+ALTER TABLE public.external_fund_movements
+    ADD CONSTRAINT external_fund_movements_settlement_lifecycle_id_fkey
+    FOREIGN KEY (settlement_lifecycle_id) REFERENCES public.settlement_lifecycle(id) ON DELETE SET NULL;
 
 CREATE OR REPLACE FUNCTION public.claim_internal_transfer_settlement(
     p_tx_id UUID,
@@ -3662,208 +3666,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
-CREATE OR REPLACE FUNCTION public.card_settle_v1(
-    p_card_transaction_id TEXT,
-    p_target_wallet_id UUID,
-    p_fee_wallet_id UUID,
-    p_fee_amount NUMERIC DEFAULT 0
-)
-RETURNS JSONB AS $$
-DECLARE
-    v_card_tx public.card_transactions%ROWTYPE;
-    v_target_wallet public.wallets%ROWTYPE;
-    v_fee_wallet public.wallets%ROWTYPE;
-    v_fee_vault public.platform_vaults%ROWTYPE;
-    v_financial_tx public.transactions%ROWTYPE;
-    v_target_balance_after NUMERIC;
-    v_fee_balance_before NUMERIC := 0;
-    v_fee_balance_after NUMERIC := 0;
-    v_reference_id TEXT;
-BEGIN
-    IF p_card_transaction_id IS NULL OR trim(p_card_transaction_id) = '' THEN
-        RAISE EXCEPTION 'CARD_TRANSACTION_REQUIRED';
-    END IF;
 
-    IF p_target_wallet_id IS NULL THEN
-        RAISE EXCEPTION 'TARGET_WALLET_REQUIRED';
-    END IF;
-
-    SELECT *
-      INTO v_card_tx
-      FROM public.card_transactions
-     WHERE id = p_card_transaction_id
-     FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'CARD_TRANSACTION_NOT_FOUND';
-    END IF;
-
-    IF upper(COALESCE(v_card_tx.status, '')) <> 'AUTHORIZED' THEN
-        RAISE EXCEPTION 'CARD_TRANSACTION_NOT_AUTHORIZED';
-    END IF;
-
-    SELECT *
-      INTO v_target_wallet
-      FROM public.wallets
-     WHERE id = p_target_wallet_id
-     FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'TARGET_WALLET_NOT_FOUND';
-    END IF;
-
-    IF COALESCE(v_card_tx.amount, 0) <= 0 THEN
-        RAISE EXCEPTION 'INVALID_CARD_SETTLEMENT_AMOUNT';
-    END IF;
-
-    IF COALESCE(p_fee_amount, 0) < 0 THEN
-        RAISE EXCEPTION 'INVALID_FEE_AMOUNT';
-    END IF;
-
-    IF COALESCE(p_fee_amount, 0) > 0 THEN
-        IF p_fee_wallet_id IS NULL THEN
-            RAISE EXCEPTION 'SYSTEM_FEE_WALLET_REQUIRED';
-        END IF;
-
-        SELECT *
-          INTO v_fee_wallet
-          FROM public.wallets
-         WHERE id = p_fee_wallet_id
-         FOR UPDATE;
-
-        IF NOT FOUND THEN
-            SELECT *
-              INTO v_fee_vault
-              FROM public.platform_vaults
-             WHERE id = p_fee_wallet_id
-             FOR UPDATE;
-        END IF;
-
-        IF v_fee_wallet.id IS NULL AND v_fee_vault.id IS NULL THEN
-            RAISE EXCEPTION 'SYSTEM_FEE_WALLET_NOT_FOUND';
-        END IF;
-
-        v_fee_balance_before := COALESCE(v_fee_wallet.balance, v_fee_vault.balance, 0);
-        v_fee_balance_after := v_fee_balance_before + p_fee_amount;
-    END IF;
-
-    v_target_balance_after := COALESCE(v_target_wallet.balance, 0) + COALESCE(v_card_tx.amount, 0);
-    v_reference_id := 'card_' || trim(p_card_transaction_id);
-
-    INSERT INTO public.transactions (
-        id,
-        reference_id,
-        user_id,
-        wallet_id,
-        to_wallet_id,
-        amount,
-        currency,
-        description,
-        type,
-        status,
-        date,
-        metadata
-    ) VALUES (
-        gen_random_uuid(),
-        v_reference_id,
-        COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
-        NULL,
-        v_target_wallet.id,
-        v_card_tx.amount::text,
-        upper(COALESCE(NULLIF(trim(v_card_tx.currency), ''), 'TZS')),
-        'Card payment settlement - ' || p_card_transaction_id,
-        'deposit',
-        'completed',
-        CURRENT_DATE,
-        jsonb_build_object(
-            'card_transaction_id', p_card_transaction_id,
-            'source_wallet_type', 'EXTERNAL',
-            'target_wallet_type', COALESCE(v_target_wallet.wallet_type, 'INTERNAL'),
-            'settlement_path', 'SOVEREIGN_LEDGER',
-            'fee_wallet_id', p_fee_wallet_id
-        )
-    )
-    RETURNING * INTO v_financial_tx;
-
-    INSERT INTO public.financial_ledger (
-        id,
-        transaction_id,
-        user_id,
-        wallet_id,
-        entry_type,
-        amount,
-        balance_after,
-        description
-    ) VALUES (
-        gen_random_uuid(),
-        v_financial_tx.id,
-        COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
-        v_target_wallet.id,
-        'CREDIT',
-        v_card_tx.amount::text,
-        v_target_balance_after::text,
-        'Card deposit - ' || p_card_transaction_id
-    );
-
-    IF COALESCE(p_fee_amount, 0) > 0 THEN
-        INSERT INTO public.financial_ledger (
-            id,
-            transaction_id,
-            user_id,
-            wallet_id,
-            entry_type,
-            amount,
-            balance_after,
-            description
-        ) VALUES (
-            gen_random_uuid(),
-            v_financial_tx.id,
-            COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
-            COALESCE(v_fee_wallet.id, v_fee_vault.id),
-            'CREDIT',
-            p_fee_amount::text,
-            v_fee_balance_after::text,
-            'Card processor fee - ' || p_card_transaction_id
-        );
-    END IF;
-
-    UPDATE public.wallets
-       SET balance = v_target_balance_after,
-           updated_at = NOW()
-     WHERE id = v_target_wallet.id;
-
-    IF COALESCE(p_fee_amount, 0) > 0 THEN
-        IF v_fee_wallet.id IS NOT NULL THEN
-            UPDATE public.wallets
-               SET balance = v_fee_balance_after,
-                   updated_at = NOW()
-             WHERE id = v_fee_wallet.id;
-        ELSE
-            UPDATE public.platform_vaults
-               SET balance = v_fee_balance_after,
-                   updated_at = NOW()
-             WHERE id = v_fee_vault.id;
-        END IF;
-    END IF;
-
-    UPDATE public.card_transactions
-       SET status = 'SETTLED',
-           settled_at = NOW(),
-           updated_at = NOW()
-     WHERE id = p_card_transaction_id;
-
-    RETURN jsonb_build_object(
-        'success', true,
-        'settlement_id', v_financial_tx.id,
-        'transaction_id', p_card_transaction_id,
-        'amount', COALESCE(v_card_tx.amount, 0),
-        'fee', COALESCE(p_fee_amount, 0),
-        'target_balance_after', v_target_balance_after,
-        'fee_balance_after', v_fee_balance_after,
-        'status', 'COMPLETED'
-    );
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 CREATE OR REPLACE FUNCTION public.bill_reserve_adjust_v1(
     p_user_id UUID,
@@ -4816,7 +4619,7 @@ CREATE INDEX IF NOT EXISTS idx_external_fund_movements_user_date ON public.exter
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_transaction ON public.external_fund_movements(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_provider_status ON public.external_fund_movements(provider_id, status);
 CREATE INDEX IF NOT EXISTS idx_external_fund_movements_status_updated ON public.external_fund_movements(status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup ON public.provider_routing_rules(rail, operation_code, status, priority);
+CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup_basic ON public.provider_routing_rules(rail, operation_code, status, priority);
 CREATE INDEX IF NOT EXISTS idx_inbound_sms_request_id ON public.inbound_sms_messages(request_id);
 CREATE INDEX IF NOT EXISTS idx_offline_transaction_sessions_request_id ON public.offline_transaction_sessions(request_id);
 CREATE INDEX IF NOT EXISTS idx_offline_transaction_sessions_status ON public.offline_transaction_sessions(status, created_at);
@@ -4838,10 +4641,10 @@ CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_provider_reference ON public
 CREATE INDEX IF NOT EXISTS idx_settlement_lifecycle_lifecycle_key ON public.settlement_lifecycle(lifecycle_key);
 CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_lookup ON public.provider_routing_rules(rail, operation_code, currency, country_code, status, priority);
 CREATE INDEX IF NOT EXISTS idx_platform_fee_configs_lookup ON public.platform_fee_configs(flow_code, status, currency, provider_id, rail, channel, direction, operation_type, transaction_type, priority);
-CREATE INDEX IF NOT EXISTS idx_service_commissions_actor ON public.service_commissions(actor_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_service_commissions_actor_status_created ON public.service_commissions(actor_user_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_service_commissions_source ON public.service_commissions(source_transaction_id);
-CREATE INDEX IF NOT EXISTS idx_agent_transactions_owner ON public.agent_transactions(owner_user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_merchant_transactions_owner ON public.merchant_transactions(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_transactions_owner_created ON public.agent_transactions(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_merchant_transactions_owner_created ON public.merchant_transactions(owner_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_categories_user ON public.categories(user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON public.tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_messages_user_read ON public.user_messages(user_id, is_read);
@@ -5472,6 +5275,210 @@ CREATE POLICY "Service role card transactions bypass" ON public.card_transaction
 DROP POLICY IF EXISTS "Admins view card settings" ON public.merchant_card_settings;
 CREATE POLICY "Admins view card settings" ON public.merchant_card_settings
     FOR SELECT USING ((SELECT public.get_auth_role()) IN ('SUPER_ADMIN', 'ADMIN'));
+
+CREATE OR REPLACE FUNCTION public.card_settle_v1(
+    p_card_transaction_id TEXT,
+    p_target_wallet_id UUID,
+    p_fee_wallet_id UUID,
+    p_fee_amount NUMERIC DEFAULT 0
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_card_tx public.card_transactions%ROWTYPE;
+    v_target_wallet public.wallets%ROWTYPE;
+    v_fee_wallet public.wallets%ROWTYPE;
+    v_fee_vault public.platform_vaults%ROWTYPE;
+    v_financial_tx public.transactions%ROWTYPE;
+    v_target_balance_after NUMERIC;
+    v_fee_balance_before NUMERIC := 0;
+    v_fee_balance_after NUMERIC := 0;
+    v_reference_id TEXT;
+BEGIN
+    IF p_card_transaction_id IS NULL OR trim(p_card_transaction_id) = '' THEN
+        RAISE EXCEPTION 'CARD_TRANSACTION_REQUIRED';
+    END IF;
+
+    IF p_target_wallet_id IS NULL THEN
+        RAISE EXCEPTION 'TARGET_WALLET_REQUIRED';
+    END IF;
+
+    SELECT *
+      INTO v_card_tx
+      FROM public.card_transactions
+     WHERE id = p_card_transaction_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CARD_TRANSACTION_NOT_FOUND';
+    END IF;
+
+    IF upper(COALESCE(v_card_tx.status, '')) <> 'AUTHORIZED' THEN
+        RAISE EXCEPTION 'CARD_TRANSACTION_NOT_AUTHORIZED';
+    END IF;
+
+    SELECT *
+      INTO v_target_wallet
+      FROM public.wallets
+     WHERE id = p_target_wallet_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'TARGET_WALLET_NOT_FOUND';
+    END IF;
+
+    IF COALESCE(v_card_tx.amount, 0) <= 0 THEN
+        RAISE EXCEPTION 'INVALID_CARD_SETTLEMENT_AMOUNT';
+    END IF;
+
+    IF COALESCE(p_fee_amount, 0) < 0 THEN
+        RAISE EXCEPTION 'INVALID_FEE_AMOUNT';
+    END IF;
+
+    IF COALESCE(p_fee_amount, 0) > 0 THEN
+        IF p_fee_wallet_id IS NULL THEN
+            RAISE EXCEPTION 'SYSTEM_FEE_WALLET_REQUIRED';
+        END IF;
+
+        SELECT *
+          INTO v_fee_wallet
+          FROM public.wallets
+         WHERE id = p_fee_wallet_id
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+            SELECT *
+              INTO v_fee_vault
+              FROM public.platform_vaults
+             WHERE id = p_fee_wallet_id
+             FOR UPDATE;
+        END IF;
+
+        IF v_fee_wallet.id IS NULL AND v_fee_vault.id IS NULL THEN
+            RAISE EXCEPTION 'SYSTEM_FEE_WALLET_NOT_FOUND';
+        END IF;
+
+        v_fee_balance_before := COALESCE(v_fee_wallet.balance, v_fee_vault.balance, 0);
+        v_fee_balance_after := v_fee_balance_before + p_fee_amount;
+    END IF;
+
+    v_target_balance_after := COALESCE(v_target_wallet.balance, 0) + COALESCE(v_card_tx.amount, 0);
+    v_reference_id := 'card_' || trim(p_card_transaction_id);
+
+    INSERT INTO public.transactions (
+        id,
+        reference_id,
+        user_id,
+        wallet_id,
+        to_wallet_id,
+        amount,
+        currency,
+        description,
+        type,
+        status,
+        date,
+        metadata
+    ) VALUES (
+        gen_random_uuid(),
+        v_reference_id,
+        COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
+        NULL,
+        v_target_wallet.id,
+        v_card_tx.amount::text,
+        upper(COALESCE(NULLIF(trim(v_card_tx.currency), ''), 'TZS')),
+        'Card payment settlement - ' || p_card_transaction_id,
+        'deposit',
+        'completed',
+        CURRENT_DATE,
+        jsonb_build_object(
+            'card_transaction_id', p_card_transaction_id,
+            'source_wallet_type', 'EXTERNAL',
+            'target_wallet_type', COALESCE(v_target_wallet.wallet_type, 'INTERNAL'),
+            'settlement_path', 'SOVEREIGN_LEDGER',
+            'fee_wallet_id', p_fee_wallet_id
+        )
+    )
+    RETURNING * INTO v_financial_tx;
+
+    INSERT INTO public.financial_ledger (
+        id,
+        transaction_id,
+        user_id,
+        wallet_id,
+        entry_type,
+        amount,
+        balance_after,
+        description
+    ) VALUES (
+        gen_random_uuid(),
+        v_financial_tx.id,
+        COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
+        v_target_wallet.id,
+        'CREDIT',
+        v_card_tx.amount::text,
+        v_target_balance_after::text,
+        'Card deposit - ' || p_card_transaction_id
+    );
+
+    IF COALESCE(p_fee_amount, 0) > 0 THEN
+        INSERT INTO public.financial_ledger (
+            id,
+            transaction_id,
+            user_id,
+            wallet_id,
+            entry_type,
+            amount,
+            balance_after,
+            description
+        ) VALUES (
+            gen_random_uuid(),
+            v_financial_tx.id,
+            COALESCE(v_target_wallet.user_id, v_card_tx.user_id),
+            COALESCE(v_fee_wallet.id, v_fee_vault.id),
+            'CREDIT',
+            p_fee_amount::text,
+            v_fee_balance_after::text,
+            'Card processor fee - ' || p_card_transaction_id
+        );
+    END IF;
+
+    UPDATE public.wallets
+       SET balance = v_target_balance_after,
+           updated_at = NOW()
+     WHERE id = v_target_wallet.id;
+
+    IF COALESCE(p_fee_amount, 0) > 0 THEN
+        IF v_fee_wallet.id IS NOT NULL THEN
+            UPDATE public.wallets
+               SET balance = v_fee_balance_after,
+                   updated_at = NOW()
+             WHERE id = v_fee_wallet.id;
+        ELSE
+            UPDATE public.platform_vaults
+               SET balance = v_fee_balance_after,
+                   updated_at = NOW()
+             WHERE id = v_fee_vault.id;
+        END IF;
+    END IF;
+
+    UPDATE public.card_transactions
+       SET status = 'SETTLED',
+           settled_at = NOW(),
+           updated_at = NOW()
+     WHERE id = p_card_transaction_id;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'settlement_id', v_financial_tx.id,
+        'transaction_id', p_card_transaction_id,
+        'amount', COALESCE(v_card_tx.amount, 0),
+        'fee', COALESCE(p_fee_amount, 0),
+        'target_balance_after', v_target_balance_after,
+        'fee_balance_after', v_fee_balance_after,
+        'status', 'COMPLETED'
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
 
 CREATE TABLE IF NOT EXISTS public.background_jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

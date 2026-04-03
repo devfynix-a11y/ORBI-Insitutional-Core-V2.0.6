@@ -75,6 +75,52 @@ export class SecureKMSService {
         }
     }
 
+    private sortActiveDbKeys(activeKeys: any[]): any[] {
+        return [...(activeKeys || [])].sort((left, right) => {
+            const versionDelta = Number(right?.version || 0) - Number(left?.version || 0);
+            if (versionDelta !== 0) {
+                return versionDelta;
+            }
+
+            const createdAtDelta =
+                new Date(String(right?.created_at || 0)).getTime() -
+                new Date(String(left?.created_at || 0)).getTime();
+            if (createdAtDelta !== 0) {
+                return createdAtDelta;
+            }
+
+            return String(right?.key_id || '').localeCompare(String(left?.key_id || ''));
+        });
+    }
+
+    private async resolveDuplicateUsableActiveKeysForType(
+        type: KeyType,
+        activeDbKeys: any[],
+        sb: any,
+    ): Promise<string> {
+        const sortedActiveKeys = this.sortActiveDbKeys(activeDbKeys);
+        const winner = sortedActiveKeys[0];
+        const losers = sortedActiveKeys.slice(1);
+
+        kmsLogger.error('kms.multiple_active_keys_recovering', {
+            key_type: type,
+            winner_key_id: winner?.key_id,
+            duplicate_key_ids: sortedActiveKeys.map((key) => key?.key_id),
+            duplicate_count: sortedActiveKeys.length,
+        });
+
+        await this.retireDbKeys(sb, losers, 'DUPLICATE_ACTIVE_KEY_RECOVERY');
+        this.activeKeyIds[type] = winner.key_id;
+
+        kmsLogger.warn('kms.multiple_active_keys_recovered', {
+            key_type: type,
+            active_key_id: winner.key_id,
+            rotated_key_ids: losers.map((key) => key.key_id),
+        });
+
+        return winner.key_id;
+    }
+
     private async retireDbKeys(sb: any, dbKeys: any[], reason: string) {
         const keyIds = dbKeys
             .map((dbKey) => String(dbKey?.key_id || '').trim())
@@ -327,14 +373,14 @@ export class SecureKMSService {
                 await this.retireDbKeys(sb, unusableActiveDbKeys, 'UNWRAP_FAILED');
             }
 
-            const duplicatedUsableActiveKeys = Array.from(usableActiveDbKeysByType.values())
-                .filter((activeKeys) => activeKeys.length > 1)
-                .flat();
-            this.validateSingleActiveKeyPerType(duplicatedUsableActiveKeys);
-
             for (const [type, activeKeys] of usableActiveDbKeysByType.entries()) {
                 if (activeKeys.length === 1) {
                     this.activeKeyIds[type] = activeKeys[0].key_id;
+                    continue;
+                }
+
+                if (activeKeys.length > 1) {
+                    await this.resolveDuplicateUsableActiveKeysForType(type, activeKeys, sb);
                 }
             }
 
