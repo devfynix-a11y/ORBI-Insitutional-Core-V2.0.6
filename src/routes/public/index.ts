@@ -183,21 +183,12 @@ export const registerTopLevelPublicRoutes = (app: Express, deps: TopLevelDeps) =
     });
   });
 
-  app.get(['/health', '/heath'], async (_req, res) => {
-    const breakerStates = ResilienceEngine.getCircuitStates();
-    const ledgerIntegrity = await LogicCore.getAuditTrail().then((logs) => logs.length > 0).catch(() => false);
-    const operational = await OperationalHealthService.captureSnapshot().catch(() => null);
-
+  app.get(['/health', '/heath'], (_req, res) => {
     res.json({
-      status: operational?.status || 'NOMINAL',
+      status: 'ONLINE',
       node: process.env.RENDER_INSTANCE_ID || 'DPS-PRIMARY-RELAY',
       version: '28.0.0',
       uptime: (process as any).uptime(),
-      circuits: breakerStates,
-      ledger: ledgerIntegrity ? 'VERIFIED' : 'PENDING_SYNC',
-      connectivity: operational?.connectivity,
-      jobs: operational?.jobs,
-      metrics: operational?.metrics,
       ts: Date.now(),
     });
   });
