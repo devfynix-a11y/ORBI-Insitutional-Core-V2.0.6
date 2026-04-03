@@ -698,11 +698,27 @@ CEO, ORBI`
             
             // Decrypt messages before returning
             if (data) {
-                return Promise.all(data.map(async (msg) => ({
-                    ...msg,
-                    subject: await DataProtection.decryptMessageContent(msg.subject, msg.subject),
-                    body: await DataProtection.decryptMessageContent(msg.body, msg.body)
-                })));
+                return Promise.all(data.map(async (msg) => {
+                    try {
+                        return {
+                            ...msg,
+                            subject: await DataProtection.decryptMessageContent(msg.subject, msg.subject),
+                            body: await DataProtection.decryptMessageContent(msg.body, msg.body)
+                        };
+                    } catch (error) {
+                        console.warn('[Messaging] Message decrypt failed, returning safe fallback.', {
+                            userId,
+                            messageId: msg.id,
+                            category: msg.category,
+                            error: error instanceof Error ? error.message : String(error),
+                        });
+                        return {
+                            ...msg,
+                            subject: 'Secure ORBI message',
+                            body: 'This message could not be decrypted on this device yet.',
+                        };
+                    }
+                }));
             }
         }
         return [];
