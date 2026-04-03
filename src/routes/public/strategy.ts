@@ -24,7 +24,7 @@ export const registerStrategyRoutes = (v1: Router, deps: Deps) => {
     const authToken = (req as any).authToken as string | null;
     try {
       const result = await LogicCore.postGoal({ ...req.body, user_id: session.sub }, authToken || undefined);
-      res.json({ success: true, data: result });
+      res.json({ success: true, data: result?.data ?? result });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
     }
@@ -45,7 +45,7 @@ export const registerStrategyRoutes = (v1: Router, deps: Deps) => {
     const authToken = (req as any).authToken as string | null;
     try {
       const result = await LogicCore.updateGoal({ ...req.body, id: req.params.id }, authToken || undefined);
-      res.json({ success: true, data: result });
+      res.json({ success: true, data: result?.data ?? result });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
     }

@@ -459,40 +459,39 @@ export class GoalService {
         }
 
         const sb = this.getDb(token);
-        let localGoal = { ...g };
-        if (sb) {
-            const isUUID = (str: any) => typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
-            const goalId = isUUID(g.id) ? g.id : UUID.generate();
-            
-            const payload: any = {
-                id: goalId,
-                user_id: g.user_id,
-                name: g.name,
-                target: g.target,
-                current: g.current || 0,
-                deadline: g.deadline === '' ? null : g.deadline,
-                color: g.color,
-                icon: g.icon,
-                funding_strategy: g.fundingStrategy || 'manual',
-                auto_allocation_enabled: g.autoAllocationEnabled || false
-            };
-            
-            // Remove undefined fields
-            Object.keys(payload).forEach(key => payload[key] === undefined && delete payload[key]);
-
-            const { data, error } = await sb.from('goals').upsert(payload).select().single();
-            if (error) {
-                console.error("[GoalService] Upsert error:", error);
-                throw new Error(error.message);
-            } else if (data) {
-                const hydrated = await this.hydrateGoals([data]);
-                localGoal = hydrated[0];
-            }
-        } else {
-            if (!localGoal.id) {
-                localGoal.id = UUID.generate();
-            }
+        if (!sb) {
+            throw new Error('GOAL_DB_UNAVAILABLE');
         }
+        let localGoal = { ...g };
+        const isUUID = (str: any) => typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+        const goalId = isUUID(g.id) ? g.id : UUID.generate();
+
+        const payload: any = {
+            id: goalId,
+            user_id: g.user_id,
+            name: g.name,
+            target: g.target,
+            current: g.current || 0,
+            deadline: g.deadline === '' ? null : g.deadline,
+            color: g.color,
+            icon: g.icon,
+            funding_strategy: g.fundingStrategy || 'manual',
+            auto_allocation_enabled: g.autoAllocationEnabled || false
+        };
+
+        // Remove undefined fields
+        Object.keys(payload).forEach(key => payload[key] === undefined && delete payload[key]);
+
+        const { data, error } = await sb.from('goals').upsert(payload).select().single();
+        if (error) {
+            console.error("[GoalService] Upsert error:", error);
+            throw new Error(error.message);
+        }
+        if (!data) {
+            throw new Error('GOAL_CREATE_NOT_PERSISTED');
+        }
+        const hydrated = await this.hydrateGoals([data]);
+        localGoal = hydrated[0];
 
         let items = Storage.getFromDB<any>(STORAGE_KEYS.GOALS);
         const localIndex = items.findIndex(i => String(i.id) === String(localGoal.id));
