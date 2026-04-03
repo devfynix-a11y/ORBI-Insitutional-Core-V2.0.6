@@ -22,6 +22,10 @@ services:
         value: "ORBI_MOBILE_V2026"
       - key: ORBI_MOBILE_APP_ID
         value: "mobile-android"
+      - key: ORBI_IOS_BUNDLE_IDS
+        value: "com.orbi.mobile"
+      - key: ORBI_IOS_TEAM_ID
+        sync: false
       - key: ORBI_CORE_APP_ORIGIN
         value: "ORBI_INSTITUTIONAL_CORE_V2026"
       - key: ORBI_CORE_APP_ID

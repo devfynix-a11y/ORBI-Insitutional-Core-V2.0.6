@@ -144,6 +144,36 @@ export const registerTopLevelPublicRoutes = (app: Express, deps: TopLevelDeps) =
     }]);
   });
 
+  const serveAppleAppSiteAssociation = (_req: any, res: any, next: any) => {
+    const teamId = String(process.env.ORBI_IOS_TEAM_ID || '').trim();
+    const bundleIds = String(process.env.ORBI_IOS_BUNDLE_IDS || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    if (!teamId || bundleIds.length === 0) {
+      return next();
+    }
+
+    const appIds = bundleIds.map((bundleId) => `${teamId}.${bundleId}`);
+    res.type('application/json');
+    res.send({
+      applinks: {
+        apps: [],
+        details: bundleIds.map((bundleId) => ({
+          appID: `${teamId}.${bundleId}`,
+          paths: ['*'],
+        })),
+      },
+      webcredentials: {
+        apps: appIds,
+      },
+    });
+  };
+
+  app.get('/.well-known/apple-app-site-association', serveAppleAppSiteAssociation);
+  app.get('/apple-app-site-association', serveAppleAppSiteAssociation);
+
   app.get('/', (_req, res) => {
     res.json({
       status: 'ONLINE',
