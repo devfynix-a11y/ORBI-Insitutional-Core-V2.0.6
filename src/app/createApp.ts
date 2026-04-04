@@ -10,9 +10,16 @@ import { ALLOWED_ORIGINS } from '../middleware/security/setup.js';
 import { createRuntime } from './runtime.js';
 import { continuousSessionMonitor } from '../../backend/src/middleware/session-monitor.middleware.js';
 import { tracingMiddleware } from '../../backend/middleware/tracing.js';
+import { logger } from '../../backend/infrastructure/logger.js';
 
 validateStartupEnvironment();
-await validateStartupDependencies();
+void validateStartupDependencies()
+  .then(() => {
+    logger.info('startup.dependencies_validated');
+  })
+  .catch((error) => {
+    logger.error('startup.dependencies_validation_failed', undefined, error);
+  });
 
 const { app, httpServer, upload, port: PORT } = createRuntime();
 
