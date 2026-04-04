@@ -449,6 +449,11 @@ export class GoalService {
     }
 
     async postGoal(g: Goal, token?: string) { 
+        console.info('[GoalService] GOAL_CREATE_TRACE:start', {
+            user_id: g.user_id,
+            name: g.name,
+            has_token: Boolean(token),
+        });
         let encryptedTarget: any = g.target;
         let encryptedCurrent: any = g.current;
         try {
@@ -460,6 +465,10 @@ export class GoalService {
 
         const sb = this.getDb(token);
         if (!sb) {
+            console.error('[GoalService] GOAL_CREATE_TRACE:db_unavailable', {
+                user_id: g.user_id,
+                name: g.name,
+            });
             throw new Error('GOAL_DB_UNAVAILABLE');
         }
         let localGoal = { ...g };
@@ -482,14 +491,27 @@ export class GoalService {
         // Remove undefined fields
         Object.keys(payload).forEach(key => payload[key] === undefined && delete payload[key]);
 
+        console.info('[GoalService] GOAL_CREATE_TRACE:upsert_attempt', {
+            payload,
+        });
+
         const { data, error } = await sb.from('goals').upsert(payload).select().single();
         if (error) {
             console.error("[GoalService] Upsert error:", error);
             throw new Error(error.message);
         }
         if (!data) {
+            console.error('[GoalService] GOAL_CREATE_TRACE:no_row_returned', {
+                user_id: g.user_id,
+                name: g.name,
+            });
             throw new Error('GOAL_CREATE_NOT_PERSISTED');
         }
+        console.info('[GoalService] GOAL_CREATE_TRACE:upsert_success', {
+            id: data.id,
+            user_id: data.user_id,
+            name: data.name,
+        });
         const hydrated = await this.hydrateGoals([data]);
         localGoal = hydrated[0];
 
