@@ -36,13 +36,35 @@ export class CategoryService {
         })));
     }
 
+    private toDbPayload(category: Record<string, any>, encryptedBudget: string) {
+        const payload: Record<string, any> = {
+            id: category.id,
+            user_id: category.user_id ?? category.userId,
+            organization_id: category.organization_id ?? category.organizationId,
+            name: category.name,
+            budget: encryptedBudget,
+            color: category.color,
+            icon: category.icon,
+            currency: category.currency,
+            period: category.period,
+            hard_limit: category.hard_limit ?? category.hardLimit,
+            is_corporate: category.is_corporate ?? category.isCorporate,
+            budget_interval: category.budget_interval ?? category.budgetInterval,
+            budget_period: category.budget_period ?? category.budgetPeriod,
+        };
+
+        Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
+        return payload;
+    }
+
     async postCategory(c: Category, token?: string) { 
         const encryptedBudget = await DataProtection.encryptAmount(Number(c.budget || 0));
         const sb = this.getDb(token);
         if (sb) {
+            const payload = this.toDbPayload(c as Record<string, any>, encryptedBudget);
             const { data, error } = await sb
                 .from('categories')
-                .upsert({ ...c, budget: encryptedBudget })
+                .upsert(payload)
                 .select()
                 .single();
             if (error) {
@@ -71,9 +93,12 @@ export class CategoryService {
         const encryptedBudget = await DataProtection.encryptAmount(Number(c.budget || 0));
         const sb = this.getDb(token);
         if (sb) {
+            const payload = this.toDbPayload(c as Record<string, any>, encryptedBudget);
+            delete payload.id;
+            delete payload.user_id;
             const { error } = await sb
                 .from('categories')
-                .update({ ...c, budget: encryptedBudget })
+                .update(payload)
                 .eq('id', c.id);
             if (error) {
                 console.error('[CategoryService] Update error:', error);
